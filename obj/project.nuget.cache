@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "dgSpecHash": "K1M9X41efgA=",
+  "success": true,
+  "projectFilePath": "D:\\SC\\Personal\\CloudSelfService\\CloudSelfService.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\dj101166\\.nuget\\packages\\microsoft.aspnetcore.app.internal.assets\\10.0.9\\microsoft.aspnetcore.app.internal.assets.10.0.9.nupkg.sha512",
+    "C:\\Users\\dj101166\\.nuget\\packages\\mudblazor\\9.1.0\\mudblazor.9.1.0.nupkg.sha512"
+  ],
+  "logs": []
+}

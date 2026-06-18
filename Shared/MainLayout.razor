@@ -1,0 +1,173 @@
+@inherits LayoutComponentBase
+@implements IDisposable
+@inject IJSRuntime JSRuntime
+@inject NavigationManager Navigation
+@inject CloudSelfService.Services.AppVersionService VersionService
+@inject ILogger<MainLayout> Logger
+
+<PageTitle>Advanced Cloud Self Service</PageTitle>
+
+<MudThemeProvider IsDarkMode="_isDarkMode" />
+<MudPopoverProvider />
+<MudDialogProvider />
+<MudSnackbarProvider />
+
+<div class="page">
+    <div class="sidebar">
+        <NavMenu />
+    </div>
+
+    <main>
+        <div class="top-row px-4">
+            <div class="topbar-brand-wrap" style="display:flex; align-items:center; gap:8px;">
+                <img src="images/advanced-logo-full.png" alt="Advanced" class="topbar-brand-logo" />
+                <button class="btn-version" @onclick="ToggleChangelog" title="View release notes">v@(VersionService.Version)</button>
+            </div>
+            <div class="topbar-actions">
+                <button class="btn-topbar-action" @onclick="ToggleThemeAsync" title="Toggle light/dark mode">
+                    <span>@(_isDarkMode ? "☀️" : "🌙")</span>
+                    <span>@(_isDarkMode ? "Light" : "Dark")</span>
+                </button>
+
+                @* Auth placeholder — profile menu renders here once auth is enabled.
+                   See CLAUDE.md for wiring instructions. Replace this comment with
+                   the <div class="profile-menu-container"> block from EscapedDefects
+                   Shared/MainLayout.razor once GitHub OAuth or Entra OIDC is configured. *@
+            </div>
+        </div>
+
+        <article class="content px-4">
+            @Body
+        </article>
+    </main>
+</div>
+
+@if (_changelogOpen)
+{
+    <div class="changelog-backdrop" @onclick="CloseChangelog"></div>
+    <div class="changelog-panel">
+        <div class="changelog-panel-topbar">
+            <span class="changelog-panel-appname">Cloud Self Service</span>
+            <button class="changelog-close-btn" @onclick="CloseChangelog" aria-label="Close">&#x2715;</button>
+        </div>
+        <div class="changelog-panel-body">
+            <h2 class="changelog-main-title">Release Notes</h2>
+            <hr class="changelog-divider" />
+            @foreach (var entry in _changelog)
+            {
+                var ver = entry.Version;
+                var isOpen = _expandedVersions.Contains(ver);
+                <div class="changelog-version-section @(isOpen ? "is-open" : "")">
+                    <button class="changelog-version-header" @onclick="@(() => ToggleVersion(ver))">
+                        <div>
+                            <span class="changelog-version-label">@ver</span>
+                            @if (entry.Date is not null)
+                            {
+                                <span class="changelog-version-date">Release date: @entry.Date</span>
+                            }
+                        </div>
+                        <span class="changelog-chevron">@(isOpen ? "▲" : "▼")</span>
+                    </button>
+                    @if (isOpen)
+                    {
+                        <div class="changelog-version-body">
+                            <ul class="changelog-list">
+                                @foreach (var item in entry.Items)
+                                {
+                                    <li>
+                                        @item.Text
+                                        @if (item.SubItems is { Count: > 0 })
+                                        {
+                                            <ul class="changelog-sublist">
+                                                @foreach (var sub in item.SubItems)
+                                                {
+                                                    <li>@sub</li>
+                                                }
+                                            </ul>
+                                        }
+                                    </li>
+                                }
+                            </ul>
+                        </div>
+                    }
+                </div>
+            }
+        </div>
+    </div>
+}
+
+@code {
+    private bool _initialized;
+    private bool _isDarkMode;
+    private bool _changelogOpen;
+    private readonly HashSet<string> _expandedVersions = new();
+
+    private record ChangelogItem(string Text, List<string>? SubItems = null);
+    private record ChangelogEntry(string Version, string? Date, List<ChangelogItem> Items);
+
+    private static readonly List<ChangelogEntry> _changelog = new()
+    {
+        new("v0.1.0", "June 17, 2026", new()
+        {
+            new("Initial scaffold", new()
+            {
+                "Blazor Server (.NET 10, MudBlazor 9) skeleton matching the suite brand palette (cyan #019EC0 accent, navy-to-teal sidebar, full dark-mode support).",
+                "Topbar with full Advanced logo, version chip that opens this release-notes panel, and a Light/Dark toggle.",
+                "Sidebar navigation: Dashboard (/), Service Health (/service-health), App Services (/app-services).",
+                "Auth (GitHub OAuth / Microsoft Entra) intentionally NOT yet wired — scaffolded with placeholder comments for future addition.",
+            }),
+        }),
+    };
+
+    protected override void OnInitialized()
+    {
+        Navigation.LocationChanged += OnLocationChanged;
+    }
+
+    private void OnLocationChanged(object? sender, Microsoft.AspNetCore.Components.Routing.LocationChangedEventArgs e)
+    {
+        InvokeAsync(StateHasChanged);
+    }
+
+    public void Dispose()
+    {
+        Navigation.LocationChanged -= OnLocationChanged;
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender || _initialized) return;
+        _initialized = true;
+
+        try
+        {
+            _isDarkMode = await JSRuntime.InvokeAsync<bool>("themeManager.initializeTheme");
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Theme manager JS call failed — using default theme");
+        }
+
+        StateHasChanged();
+    }
+
+    private async Task ToggleThemeAsync()
+    {
+        _isDarkMode = await JSRuntime.InvokeAsync<bool>("themeManager.toggleTheme");
+    }
+
+    private void ToggleChangelog()
+    {
+        _changelogOpen = !_changelogOpen;
+        if (_changelogOpen && _expandedVersions.Count == 0 && _changelog.Count > 0)
+            _expandedVersions.Add(_changelog[0].Version);
+    }
+
+    private void CloseChangelog() => _changelogOpen = false;
+
+    private void ToggleVersion(string version)
+    {
+        if (!_expandedVersions.Remove(version))
+            _expandedVersions.Add(version);
+    }
+}

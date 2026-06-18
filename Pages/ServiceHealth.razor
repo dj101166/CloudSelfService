@@ -1,0 +1,42 @@
+@page "/service-health"
+
+<PageTitle>Service Health — Advanced Cloud Self Service</PageTitle>
+
+<div class="d-flex justify-content-between align-items-baseline mb-3">
+    <span class="page-title-main">Service Health</span>
+</div>
+
+<div class="card mb-3">
+    <div class="card-body">
+        <div class="d-flex flex-wrap gap-2 align-items-center">
+            <span style="font-size:0.8rem;font-weight:600;opacity:0.6;text-transform:uppercase;letter-spacing:.05em;">Filter</span>
+            <button class="filter-chip filter-chip-active">All</button>
+            <button class="filter-chip">Healthy</button>
+            <button class="filter-chip">Degraded</button>
+            <button class="filter-chip">Down</button>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-body p-0">
+        <table class="table mb-0">
+            <thead>
+                <tr>
+                    <th>Service</th>
+                    <th>Environment</th>
+                    <th>Status</th>
+                    <th>Uptime (30d)</th>
+                    <th>Last Checked</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td colspan="5" class="text-center py-4" style="color:var(--text-color);opacity:0.5;font-size:0.9rem;">
+                        No services configured yet. Connect to Azure Resource Management API to populate.
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</div>

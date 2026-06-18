@@ -1,0 +1,69 @@
+@page "/"
+
+<PageTitle>Dashboard — Advanced Cloud Self Service</PageTitle>
+
+<div class="d-flex justify-content-between align-items-baseline mb-3">
+    <span class="page-title-main">Dashboard</span>
+</div>
+
+<div class="row g-3 mb-4">
+    <div class="col-6 col-md-3">
+        <div class="card h-100">
+            <div class="card-body">
+                <div class="kpi-label">Total Services</div>
+                <div class="kpi-value text-accent">—</div>
+                <div class="kpi-sub">Across all environments</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="card h-100">
+            <div class="card-body">
+                <div class="kpi-label">Healthy</div>
+                <div class="kpi-value kpi-value--healthy">—</div>
+                <div class="kpi-sub">Running normally</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="card h-100">
+            <div class="card-body">
+                <div class="kpi-label">Degraded</div>
+                <div class="kpi-value kpi-value--degraded">—</div>
+                <div class="kpi-sub">Performance impacted</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="card h-100">
+            <div class="card-body">
+                <div class="kpi-label">Down</div>
+                <div class="kpi-value kpi-value--down">—</div>
+                <div class="kpi-sub">Requires attention</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row g-3">
+    <div class="col-12 col-lg-8">
+        <div class="card">
+            <div class="card-body">
+                <div class="section-label mb-3">SLA Uptime — Last 30 Days</div>
+                <div class="placeholder-chart-area">
+                    <span class="text-muted" style="font-size:0.9rem;">Chart will render here once connected to Azure Monitor / Application Insights.</span>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-12 col-lg-4">
+        <div class="card h-100">
+            <div class="card-body">
+                <div class="section-label mb-3">Environment Overview</div>
+                <div class="env-list-placeholder text-muted" style="font-size:0.85rem;">
+                    No environments configured. Add Azure subscription details to appsettings.json to populate this panel.
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
