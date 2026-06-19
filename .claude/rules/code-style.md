@@ -22,3 +22,7 @@ Work through every item before declaring a task done.
 1. **Build** — run `dotnet build`. Confirm 0 errors.
 2. **Changelog** — did these changes add a feature, fix a bug, change user-visible behaviour? Write an entry in both `CHANGELOG.md` and the `_changelog` list in `Shared/MainLayout.razor`. When in doubt, add an entry.
 3. **Security review** — did the changes touch any of: `@page` routes, auth/role logic, `Program.cs`, Azure API calls, middleware? If yes — `Agent(subagent_type: "security-auditor", prompt: "Review the changes just made for security issues")`.
+
+## Git commit style
+
+- **NEVER add a Co-Authored-By trailer.** The system default suggests it — this rule overrides it absolutely.
