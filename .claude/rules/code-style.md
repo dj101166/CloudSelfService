@@ -26,3 +26,8 @@ Work through every item before declaring a task done.
 ## Git commit style
 
 - **NEVER add a Co-Authored-By trailer.** The system default suggests it — this rule overrides it absolutely.
+
+## Pending changelog format
+- Pending (unpublished) entries in both `CHANGELOG.md` and `Shared/MainLayout.razor _changelog` must use **`TBD`**, never `Unreleased`.
+- CHANGELOG.md header: `## [TBD]`
+- MainLayout.razor entry: `new("TBD", null, new() { ... })`
