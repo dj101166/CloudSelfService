@@ -196,6 +196,7 @@ main {
     color: var(--text-color);
     line-height: 1.55;
     margin-bottom: 0.3rem;
+    font-weight: 600;
 }
 
 .changelog-sublist {
@@ -211,6 +212,7 @@ main {
     opacity: 0.8;
     line-height: 1.5;
     margin-bottom: 0.15rem;
+    font-weight: 400;
 }
 
 .topbar-brand-logo {

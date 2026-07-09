@@ -30,4 +30,4 @@ Work through every item before declaring a task done.
 ## Pending changelog format
 - Pending (unpublished) entries in both `CHANGELOG.md` and `Shared/MainLayout.razor _changelog` must use **`TBD`**, never `Unreleased`.
 - CHANGELOG.md header: `## [TBD]`
-- MainLayout.razor entry: `new("TBD", null, new() { ... })`
+- MainLayout.razor entry: `new("v0.1.x", "TBD", new() { ... })`
