@@ -111,6 +111,23 @@ html[data-theme='dark'] .kpi-value--healthy  { color: #34d399; }
 html[data-theme='dark'] .kpi-value--degraded { color: #fbbf24; }
 html[data-theme='dark'] .kpi-value--down     { color: #f87171; }
 
+/* ── card / alert dark surfaces ──────────────────────────────────────────── */
+
+html[data-theme='dark'] .card,
+html[data-theme='dark'] .card-body,
+html[data-theme='dark'] .card-header,
+html[data-theme='dark'] .card-footer {
+    background-color: var(--surface-1) !important;
+    border-color: var(--border-color) !important;
+    color: var(--text-color) !important;
+}
+
+html[data-theme='dark'] .alert-danger {
+    background-color: rgba(69, 10, 10, 0.8) !important;
+    border-color: #991b1b !important;
+    color: #fca5a5 !important;
+}
+
 .kpi-sub {
     font-size: 0.78rem;
     color: var(--text-color);
