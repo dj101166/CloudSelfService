@@ -37,17 +37,28 @@
             <p class="reconnect-modal-text reconnect-modal-text--show">Rejoining the server&hellip;</p>
             <p class="reconnect-modal-text reconnect-modal-text--failed">Reconnection failed. Try <a href="" class="reconnect-modal-link">reloading</a> the page.</p>
             <p class="reconnect-modal-text reconnect-modal-text--rejected">Could not reconnect to the server. <a href="" class="reconnect-modal-link">Reload</a> the page to restore functionality.</p>
+            <p class="reconnect-modal-text reconnect-modal-text--reloading">Restoring your session&hellip;</p>
         </div>
     </div>
 
     <script src="_content/MudBlazor/MudBlazor.min.js"></script>
     <script src="js/theme-manager.js" asp-append-version="true"></script>
+    <script src="js/session-guard.js" asp-append-version="true"></script>
     <script src="_framework/blazor.server.js" autostart="false"></script>
     <script>
         Blazor.start({
             configureSignalR: function (builder) {
                 builder.withUrl('/_blazor', { transport: 4 }); // 4 = LongPolling
+            },
+            circuit: {
+                reconnectionOptions: {
+                    maxRetries: 8,
+                    retryIntervalMilliseconds: Array.prototype.at.bind(
+                        [0, 2000, 5000, 10000, 15000, 20000, 30000, 45000, 60000])
+                }
             }
+        }).then(function () {
+            window.SessionGuard.initReconnectRecovery();
         });
     </script>
 </body>

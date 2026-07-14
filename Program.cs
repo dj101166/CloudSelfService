@@ -11,6 +11,7 @@ builder.Services.AddRazorPages();
 builder.Services.AddServerSideBlazor();
 builder.Services.AddMudServices();
 builder.Services.AddSingleton<AppVersionService>();
+builder.Services.AddHsts(options => { options.MaxAge = TimeSpan.FromDays(365); });
 
 // ── Auth placeholder ─────────────────────────────────────────────────────────
 // Auth is intentionally disabled during initial development.
@@ -45,6 +46,7 @@ app.Use(async (ctx, next) =>
     ctx.Response.Headers["X-Content-Type-Options"] = "nosniff";
     ctx.Response.Headers["X-Frame-Options"] = "DENY";
     ctx.Response.Headers["Referrer-Policy"] = "strict-origin-when-cross-origin";
+    ctx.Response.Headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(), payment=()";
     ctx.Response.Headers["Content-Security-Policy"] =
         "default-src 'self'; " +
         "script-src 'self' 'unsafe-inline' 'unsafe-eval'; " +
@@ -54,7 +56,8 @@ app.Use(async (ctx, next) =>
         "connect-src 'self' wss: ws:; " +
         "frame-ancestors 'none'; " +
         "object-src 'none'; " +
-        "base-uri 'self';";
+        "base-uri 'self'; " +
+        "form-action 'self';";
     await next();
 });
 

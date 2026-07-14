@@ -589,3 +589,12 @@ html[data-theme='dark'] .reconnect-modal-card {
 #components-reconnect-modal.components-reconnect-rejected .reconnect-modal-spinner {
     display: none;
 }
+
+/* Reconnect auto-reload (session-guard.js): show "Restoring…" and hide the manual links. */
+.reconnect-modal-text--reloading { display: none; }
+#components-reconnect-modal.reconnect-modal.session-guard-reloading { display: flex; }
+#components-reconnect-modal.session-guard-reloading .reconnect-modal-text--show,
+#components-reconnect-modal.session-guard-reloading .reconnect-modal-text--failed,
+#components-reconnect-modal.session-guard-reloading .reconnect-modal-text--rejected { display: none; }
+#components-reconnect-modal.session-guard-reloading .reconnect-modal-text--reloading { display: block; }
+#components-reconnect-modal.session-guard-reloading .reconnect-modal-spinner { display: block; }
