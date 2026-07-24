@@ -1,5 +1,10 @@
 # Changelog — Advanced Cloud Self Service
 
+## [0.1.1] - TBD
+
+### 🐛 Fixed
+- **Reconnect dialog no longer gets stuck after a stop/start** — when the app's container is stopped and started the live connection drops and the server-side session is lost, which previously left the "Reconnecting to the server…" dialog up until the tab had to be closed. The page now waits for the server to come back and reloads itself automatically to restore a working session.
+
 ## [0.1.0] - July 13, 2026
 
 ### ✨ Added

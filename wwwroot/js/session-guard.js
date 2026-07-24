@@ -10,9 +10,27 @@
   "use strict";
 
   // ---- 1. Reconnect auto-recovery -----------------------------------------
+  // Goal: when the server restarts (redeploy / App Service restart / worker
+  // recycle) the Blazor circuit is lost and the client shows the "Rejoining
+  // the server…" modal. Left alone Blazor retries for minutes; a tab stuck
+  // reconnecting that long can exhaust and crash its renderer ("Aw snap"),
+  // after which neither a manual refresh nor any script can recover it.
+  //
+  // So we don't wait it out. On disconnect we give Blazor a few seconds to
+  // self-heal a transient blip, then poll the app until the server answers
+  // again and reload the page ONCE — promptly, while the tab is still healthy.
+  // That's exactly what opening a fresh tab does, and it's the only thing that
+  // reliably recovers. Polling until the server responds (rather than reloading
+  // blindly) avoids reloading into a still-restarting server.
+  //
+  //   rejected      -> server reached but our circuit is gone -> reload now.
+  //   show / failed -> poll the app root until it serves, then reload once.
+  //
+  // A reload budget stops an endless reload loop against a server that keeps
+  // dropping the circuit; it is cleared after any healthy load.
   const RELOAD_KEY = "sessionGuard.reloads";
   const RELOAD_WINDOW_MS = 60000;
-  const RELOAD_MAX = 3;
+  const RELOAD_MAX = 5;
 
   function recentReloads() {
     try {
@@ -23,28 +41,68 @@
     } catch (e) { return []; }
   }
 
-  function autoReload() {
-    const reloads = recentReloads();
-    if (reloads.length >= RELOAD_MAX) return false; // give up; keep manual link
-    reloads.push(Date.now());
-    try { sessionStorage.setItem(RELOAD_KEY, JSON.stringify(reloads)); } catch (e) {}
-    location.reload();
-    return true;
-  }
-
   function initReconnectRecovery() {
     const modal = document.getElementById("components-reconnect-modal");
     if (!modal) return;
-    const observer = new MutationObserver(function () {
+
+    let reloading = false, graceTimer = null, pollTimer = null;
+
+    function clearTimers() {
+      if (graceTimer !== null) { clearTimeout(graceTimer);  graceTimer = null; }
+      if (pollTimer  !== null) { clearInterval(pollTimer);  pollTimer  = null; }
+    }
+
+    function reloadNow() {
+      if (reloading) return;
+      const reloads = recentReloads();
+      if (reloads.length >= RELOAD_MAX) return; // storm guard; leave the manual "Reload" link
+      reloading = true;
+      reloads.push(Date.now());
+      try { sessionStorage.setItem(RELOAD_KEY, JSON.stringify(reloads)); } catch (e) {}
+      clearTimers();
+      modal.classList.add("session-guard-reloading");
+      location.reload();
+    }
+
+    function stillDisconnected() {
       const cl = modal.classList;
-      if (cl.contains("components-reconnect-failed") ||
-          cl.contains("components-reconnect-rejected")) {
-        modal.classList.add("session-guard-reloading");
-        setTimeout(function () {
-          if (!autoReload()) modal.classList.remove("session-guard-reloading");
-        }, 1500);
+      return cl.contains("components-reconnect-show") ||
+             cl.contains("components-reconnect-failed") ||
+             cl.contains("components-reconnect-rejected");
+    }
+
+    // Disconnected: wait a short grace for Blazor to self-heal a transient blip
+    // (a silent reconnect preserves page state; a reload does not), then poll the
+    // app root until it serves again and reload ONCE — while the tab is healthy.
+    function beginRecovery() {
+      if (reloading || graceTimer !== null || pollTimer !== null) return;
+      graceTimer = setTimeout(function () {
+        graceTimer = null;
+        if (!stillDisconnected()) return;              // recovered on its own
+        pollTimer = setInterval(function () {
+          if (!stillDisconnected()) { clearTimers(); return; }
+          fetch(window.location.pathname, { method: "GET", cache: "no-store", credentials: "same-origin" })
+            .then(function (r) { if (r && r.status < 500) reloadNow(); })  // server answering -> reload
+            .catch(function () { /* still down — keep polling */ });
+        }, 3000);
+      }, 5000);
+    }
+
+    function evaluate() {
+      const cl = modal.classList;
+      if (cl.contains("components-reconnect-rejected")) {
+        reloadNow();                                   // circuit gone, server up -> reload immediately
+      } else if (cl.contains("components-reconnect-show") ||
+                 cl.contains("components-reconnect-failed")) {
+        beginRecovery();                               // reconnecting -> reload once the server is back
+      } else {
+        clearTimers();                                 // reconnected/hidden -> cancel pending recovery
       }
-    });
+    }
+
+    // .NET 9/10 dispatches this event; the MutationObserver covers class-only runtimes.
+    modal.addEventListener("components-reconnect-state-changed", evaluate);
+    const observer = new MutationObserver(evaluate);
     observer.observe(modal, { attributes: true, attributeFilter: ["class"] });
   }
 
