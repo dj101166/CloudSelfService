@@ -16,7 +16,7 @@ dotnet build
 ## Container build
 
 ```powershell
-$version = "0.1.0"
+$version = "1.0.0"
 podman build -t cloudselfservice:$version --build-arg APP_VERSION=$version .
 podman tag cloudselfservice:$version auscacprdcregsvc73a13ca2.azurecr.io/cloudselfservice:latest
 podman push auscacprdcregsvc73a13ca2.azurecr.io/cloudselfservice:latest
@@ -31,23 +31,19 @@ podman push auscacprdcregsvc73a13ca2.azurecr.io/cloudselfservice:latest
 
 ## Auth placeholder
 
-Auth is intentionally disabled during initial development. The `App.razor` uses a plain `<Router>` with `<RouteView>` (no `CascadingAuthenticationState` or `AuthorizeRouteView`). Pages do **not** carry `@attribute [Authorize]`.
-
-### To enable GitHub OAuth
-
-1. Add `Microsoft.AspNetCore.Authentication.OpenIdConnect` to the `.csproj`.
-2. Add config to `appsettings.Development.json` (git-ignored):
-   ```json
-   { "GitHub": { "ClientId": "", "ClientSecret": "", "Organization": "Advanced-Utility" } }
-   ```
-3. Follow `EscapedDefects/Program.cs` for the full OAuth round-trip wiring.
-4. Add `@attribute [Authorize]` to all pages.
-5. Replace `<RouteView>` with `<AuthorizeRouteView>` (and `<CascadingAuthenticationState>` wrapper) in `App.razor`.
-6. Update `.claude/settings.json` to re-enable the page-authorization hook.
+Auth is intentionally disabled during initial development (`Auth:Provider = None`). The `App.razor` uses a plain `<Router>` with `<RouteView>` (no `CascadingAuthenticationState` or `AuthorizeRouteView`). Pages do **not** carry `@attribute [Authorize]`. Sign-in, when enabled, is Microsoft Entra OIDC only (GitHub OAuth was retired suite-wide in the August 6, 2026 legacy cleanup).
 
 ### To enable Microsoft Entra OIDC
 
-Same pattern as GitHub above but follow the Entra section in `EscapedDefects/Program.cs`.
+1. Add `Microsoft.AspNetCore.Authentication.OpenIdConnect` and `Azure.Identity` to the `.csproj`.
+2. Set `Auth:Provider = "Entra"` and add config to `appsettings.Development.json` (git-ignored):
+   ```json
+   { "Entra": { "TenantId": "", "ClientId": "", "ClientSecret": "", "AllowedEmailDomain": "advancedutility.com" } }
+   ```
+3. Follow the Entra section in `EscapedDefects/Program.cs` for the full OIDC + Graph wiring.
+4. Add `@attribute [Authorize]` to all pages.
+5. Replace `<RouteView>` with `<AuthorizeRouteView>` (and `<CascadingAuthenticationState>` wrapper) in `App.razor`.
+6. Update `.claude/settings.json` to re-enable the page-authorization hook.
 
 ## Configuration (appsettings.json or Azure App Service settings)
 

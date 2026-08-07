@@ -14,13 +14,10 @@ builder.Services.AddSingleton<AppVersionService>();
 builder.Services.AddHsts(options => { options.MaxAge = TimeSpan.FromDays(365); });
 
 // ── Auth placeholder ─────────────────────────────────────────────────────────
-// Auth is intentionally disabled during initial development.
+// Auth is intentionally disabled during initial development (Auth:Provider = None).
 //
-// To enable GitHub OAuth, add to appsettings.json:
-//   "GitHub": { "ClientId": "", "ClientSecret": "", "Organization": "" }
-// and reference EscapedDefects/Program.cs for the full OAuth round-trip wiring.
-//
-// To enable Microsoft Entra OIDC, add:
+// To enable Microsoft Entra OIDC, add to appsettings.json:
+//   "Auth":  { "Provider": "Entra" },
 //   "Entra": { "TenantId": "", "ClientId": "", "ClientSecret": "", "AllowedEmailDomain": "" }
 // and reference EscapedDefects/Program.cs for the full OIDC + Graph wiring.
 //
