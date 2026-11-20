@@ -25,7 +25,7 @@ public static class StoragePath
         var segments = raw.Split('/', StringSplitOptions.RemoveEmptyEntries);
         foreach (var segment in segments)
         {
-            if (!TryValidateSegment(segment, out error))
+            if (!TryValidateSegment(segment, out error, strict: false))
                 return false;
         }
 
@@ -62,6 +62,26 @@ public static class StoragePath
     private static bool IsInvisible(Rune r) =>
         r.Value is >= 0x80 and <= 0x9F || Rune.GetUnicodeCategory(r) == UnicodeCategory.Format;
 
+    /// <summary>
+    /// The shortest prefix of <paramref name="folder"/> holding every segment that fails the strict new-name check,
+    /// skipping the leading segments shared with <paramref name="existingFolder"/> (those exist already); null when
+    /// none fails. Storage creates missing folders implicitly, so that prefix is acceptable only if it already exists.
+    /// </summary>
+    public static string? NonStrictFolderPrefix(string folder, string existingFolder = "")
+    {
+        if (folder.Length == 0) return null;
+        var segments = folder.Split('/');
+        var existing = existingFolder.Length == 0 ? Array.Empty<string>() : existingFolder.Split('/');
+        var shared = 0;
+        while (shared < segments.Length && shared < existing.Length && segments[shared] == existing[shared]) shared++;
+        var last = -1;
+        for (var i = shared; i < segments.Length; i++)
+        {
+            if (!TryValidateSegment(segments[i], out _, strict: true)) last = i;
+        }
+        return last < 0 ? null : string.Join('/', segments, 0, last + 1);
+    }
+
     public static string Combine(string folder, string name) =>
         folder.Length == 0 ? name : folder + "/" + name;
 
@@ -77,7 +97,7 @@ public static class StoragePath
         return i < 0 ? path : path[(i + 1)..];
     }
 
-    public static bool TryValidateSegment(string segment, out string? error, bool strict = false)
+    public static bool TryValidateSegment(string segment, out string? error, bool strict)
     {
         error = null;
         if (segment is "." or "..")

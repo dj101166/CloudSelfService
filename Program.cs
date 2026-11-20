@@ -7,6 +7,7 @@ using CloudSelfService.Services.Access;
 using CloudSelfService.Services.Data;
 using CloudSelfService.Services.Identity;
 using CloudSelfService.Services.Storage;
+using CloudSelfService.Services.Transfers;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authentication.OpenIdConnect;
 using Microsoft.AspNetCore.Authorization;
@@ -31,6 +32,7 @@ if (!string.IsNullOrWhiteSpace(builder.Configuration.GetConnectionString("Defaul
     builder.Services.AddSingleton<ITargetStore, PgTargetStore>();
     builder.Services.AddSingleton<IGrantStore, PgGrantStore>();
     builder.Services.AddSingleton<IAuditStore, PgAuditStore>();
+    builder.Services.AddSingleton<IUploadSessionStore, PgUploadSessionStore>();
 }
 else
 {
@@ -40,6 +42,7 @@ else
     builder.Services.AddSingleton<ITargetStore>(sp => sp.GetRequiredService<InMemoryTargetStore>());
     builder.Services.AddSingleton<IGrantStore, InMemoryGrantStore>();
     builder.Services.AddSingleton<IAuditStore, InMemoryAuditStore>();
+    builder.Services.AddSingleton<IUploadSessionStore, InMemoryUploadSessionStore>();
 }
 builder.Services.AddSingleton<AuditService>();
 if (DevSignIn.UseFakeStorage(builder.Configuration) && builder.Environment.IsDevelopment())
@@ -55,6 +58,8 @@ else
     builder.Services.AddSingleton<IStorageBackendResolver, StorageBackendResolver>();
 }
 builder.Services.AddScoped<StorageAccessService>();
+builder.Services.AddScoped<UploadSessionService>();
+builder.Services.AddHostedService<UploadCleanupService>();
 builder.Services.AddRateLimiter(o => RateLimits.Configure(o, builder.Configuration));
 builder.Services.AddHsts(options => { options.MaxAge = TimeSpan.FromDays(365); });
 
@@ -207,6 +212,7 @@ app.UseAntiforgery();
 
 AuthEndpoints.Map(app);
 app.MapDownloadEndpoints();
+app.MapUploadEndpoints();
 app.MapRazorComponents<App>().AddInteractiveServerRenderMode();
 
 app.Run();

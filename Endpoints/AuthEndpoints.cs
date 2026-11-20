@@ -3,6 +3,7 @@ using CloudSelfService.Authorization;
 using CloudSelfService.Models;
 using CloudSelfService.Services.Data;
 using CloudSelfService.Services.Identity;
+using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authentication.OpenIdConnect;
@@ -107,6 +108,14 @@ public static class AuthEndpoints
         // Hitting this slides the auth cookie; session-guard.js pings it on user activity because
         // an interactive circuit otherwise makes almost no HTTP requests.
         app.MapGet("/keepalive", () => Results.NoContent()).RequireAuthorization();
+
+        // uploader.js sends this token back in the RequestVerificationToken header on every upload call.
+        app.MapGet("/api/antiforgery", (HttpContext ctx, IAntiforgery antiforgery) =>
+        {
+            var tokens = antiforgery.GetAndStoreTokens(ctx);
+            ctx.Response.Headers.CacheControl = "no-store";
+            return Results.Json(new { token = tokens.RequestToken, headerName = tokens.HeaderName });
+        }).RequireAuthorization();
 
         DevSignIn.Map(app);
     }

@@ -138,4 +138,50 @@ public class PgStoresIntegrationTests
         Assert.Single(await store.QueryAsync(new AuditQuery(CustomerId: c1, From: now.AddMinutes(-1.5))));
         Assert.Single(await store.QueryAsync(new AuditQuery(Limit: 1)));
     }
+
+    [PgFact]
+    public async Task UploadSessionStore_RoundTripResumeStatusAndPurge()
+    {
+        await using var ctx = await CtxAsync();
+        var store = new PgUploadSessionStore(ctx);
+        var now = new DateTimeOffset(2026, 11, 20, 9, 0, 0, TimeSpan.Zero);
+        var user = Guid.NewGuid();
+        var target = Guid.NewGuid();
+        var s = new UploadSession(Guid.NewGuid(), user, target, "Docs/a b#.bin", "Docs/.a b#.bin.cssupload-x", 9L * 1024 * 1024 * 1024,
+            4 * 1024 * 1024, false, now, now.AddHours(24), UploadStatus.Open);
+        await store.CreateAsync(s);
+        Assert.Equal(s, await store.GetAsync(s.Id));
+
+        Assert.Equal(s.Id, (await store.FindResumableAsync(user, target, "Docs/a b#.bin", s.Size, now.AddHours(1)))!.Id);
+        Assert.Null(await store.FindResumableAsync(Guid.NewGuid(), target, "Docs/a b#.bin", s.Size, now));
+        Assert.Null(await store.FindResumableAsync(user, target, "Docs/a b#.bin", s.Size + 1, now));
+        Assert.Null(await store.FindResumableAsync(user, target, "Docs/a b#.bin", s.Size, now.AddHours(24)));
+
+        await store.MarkChunkAsync(s.Id, 3);
+        await store.MarkChunkAsync(s.Id, 3);
+        await Task.WhenAll(Enumerable.Range(0, 20).Select(i => store.MarkChunkAsync(s.Id, i)));
+        Assert.Equal(Enumerable.Range(0, 20), (await store.ReceivedChunksAsync(s.Id)).OrderBy(i => i));
+
+        await store.SetOverwriteAsync(s.Id, true);
+        Assert.True((await store.GetAsync(s.Id))!.Overwrite);
+
+        Assert.Contains(await store.ListExpiredOpenAsync(now.AddHours(25)), x => x.Id == s.Id);
+        Assert.True(await store.TrySetStatusAsync(s.Id, UploadStatus.Open, UploadStatus.Completing));
+        Assert.False(await store.TrySetStatusAsync(s.Id, UploadStatus.Open, UploadStatus.Aborted));
+        Assert.DoesNotContain(await store.ListExpiredOpenAsync(now.AddHours(25)), x => x.Id == s.Id);
+        Assert.Null(await store.FindResumableAsync(user, target, "Docs/a b#.bin", s.Size, now));
+        await store.SetStatusAsync(s.Id, UploadStatus.Completed);
+        Assert.Equal(UploadStatus.Completed, (await store.GetAsync(s.Id))!.Status);
+
+        Assert.True(await store.PurgeExpiredBeforeAsync(now.AddHours(24).AddMinutes(1)) >= 1);
+        Assert.Null(await store.GetAsync(s.Id));
+        Assert.Empty(await store.ReceivedChunksAsync(s.Id));
+
+        var other = s with { Id = Guid.NewGuid() };
+        await store.CreateAsync(other);
+        await store.MarkChunkAsync(other.Id, 0);
+        await store.DeleteAsync(other.Id);
+        Assert.Null(await store.GetAsync(other.Id));
+        Assert.Empty(await store.ReceivedChunksAsync(other.Id));
+    }
 }

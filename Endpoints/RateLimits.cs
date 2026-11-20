@@ -4,13 +4,19 @@ using CloudSelfService.Services.Identity;
 
 namespace CloudSelfService.Endpoints;
 
-/// <summary>Per-user limits for the transfer endpoints (downloads now, uploads in Task 9).</summary>
+/// <summary>
+/// Per-user limits for the transfer endpoints. Downloads and the upload control calls share <see cref="Transfers"/>;
+/// chunk PUTs use <see cref="Chunks"/>, concurrency only, because one large file is thousands of chunks
+/// (a 10 GB file is 2,560) and a per-minute bucket would throttle a legitimate upload to a crawl.
+/// </summary>
 public static class RateLimits
 {
     public const string Transfers = "transfers";
+    public const string Chunks = "upload-chunks";
     public const string RejectedMessage = "Too many requests. Please wait a moment and try again.";
     public const int DefaultRequestsPerMinute = 120;
     public const int DefaultMaxConcurrentPerUser = 4;
+    public const int DefaultMaxConcurrentChunksPerUser = 16;
 
     public static string PartitionKey(HttpContext ctx) =>
         AppClaims.UserIdOf(ctx.User) is { } id
@@ -21,6 +27,7 @@ public static class RateLimits
     {
         var perMinute = Math.Max(1, config.GetValue<int?>("Transfers:RequestsPerMinute") ?? DefaultRequestsPerMinute);
         var concurrent = Math.Max(1, config.GetValue<int?>("Transfers:MaxConcurrentPerUser") ?? DefaultMaxConcurrentPerUser);
+        var chunks = Math.Max(1, config.GetValue<int?>("Transfers:MaxConcurrentChunksPerUser") ?? DefaultMaxConcurrentChunksPerUser);
 
         options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
         options.OnRejected = async (context, ct) =>
@@ -41,6 +48,8 @@ public static class RateLimits
                 QueueLimit = 0,
                 AutoReplenishment = true,
             }))));
+        options.AddPolicy<string>(Chunks, ctx => RateLimitPartition.GetConcurrencyLimiter(PartitionKey(ctx),
+            _ => new ConcurrencyLimiterOptions { PermitLimit = chunks, QueueLimit = 0 }));
     }
 
     /// <summary>Both limiters must grant a permit; concurrency is tried first so a request it rejects does not spend a bucket token.</summary>

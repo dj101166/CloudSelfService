@@ -458,6 +458,59 @@ public class StorageAccessServiceTests
     }
 
     [Fact]
+    public async Task Move_IntoNewFolderWithInvisibleCharacter_Invalid()
+    {
+        await SeedFile(_ta, "x.pdf");
+
+        var result = await _svc.MoveAsync(_fullUserA.Id, _ta.Id, "x.pdf", "New‮folder/x.pdf", Ctx);
+
+        Assert.Equal(AccessOutcome.Invalid, result.Outcome);
+        Assert.Equal(StoragePath.InvisibleCharactersMessage, result.Message);
+        Assert.DoesNotContain(_fake.Calls, c => c.StartsWith("Move"));
+    }
+
+    [Fact]
+    public async Task Move_OutOfFolderWithInvisibleCharacter_KeepingSharedPrefix_Ok()
+    {
+        await Seed(_ta, "Q1­reports/Sub");
+        await SeedFile(_ta, "Q1­reports/Sub/x.pdf");
+
+        var result = await _svc.MoveAsync(_fullUserA.Id, _ta.Id, "Q1­reports/Sub/x.pdf", "Q1­reports/x.pdf", Ctx);
+
+        Assert.Equal(AccessOutcome.Ok, result.Outcome);
+    }
+
+    [Fact]
+    public async Task CreateFolder_UnderMissingParentWithInvisibleCharacter_Invalid()
+    {
+        var result = await _svc.CreateFolderAsync(_fullUserA.Id, _ta.Id, "New‮folder", "child", Ctx);
+
+        Assert.Equal(AccessOutcome.Invalid, result.Outcome);
+        Assert.Equal(StoragePath.InvisibleCharactersMessage, result.Message);
+        Assert.DoesNotContain(_fake.Calls, c => c.StartsWith("CreateFolder"));
+    }
+
+    [Fact]
+    public async Task CreateFolder_UnderExistingParentWithInvisibleCharacter_Ok()
+    {
+        await Seed(_ta, "Q1­reports");
+
+        var result = await _svc.CreateFolderAsync(_fullUserA.Id, _ta.Id, "Q1­reports", "child", Ctx);
+
+        Assert.Equal(AccessOutcome.Ok, result.Outcome);
+    }
+
+    [Fact]
+    public void NonStrictFolderPrefix_SkipsSharedPrefixAndReturnsDeepestBadSegment()
+    {
+        Assert.Null(StoragePath.NonStrictFolderPrefix(""));
+        Assert.Null(StoragePath.NonStrictFolderPrefix("a/b/c"));
+        Assert.Equal("a​b/c‮d", StoragePath.NonStrictFolderPrefix("a​b/c‮d/e"));
+        Assert.Null(StoragePath.NonStrictFolderPrefix("a​b/new", "a​b/old"));
+        Assert.Equal("a​b/x​y", StoragePath.NonStrictFolderPrefix("a​b/x​y", "a​b"));
+    }
+
+    [Fact]
     public async Task CreateFolder_NameWithRightToLeftMark_Invalid()
     {
         var result = await _svc.CreateFolderAsync(_fullUserA.Id, _ta.Id, "", "a\u200Fb", Ctx);

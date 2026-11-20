@@ -35,6 +35,9 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
     public Exception? UnexpectedOnGetItem { get; set; }
     public Exception? UnexpectedOnOpenRead { get; set; }
 
+    /// <summary>Test hook: given the recorded call (e.g. "BeginUpload:path"), returns an exception to throw, or null.</summary>
+    public Func<string, Exception?>? FailOnCall { get; set; }
+
     /// <summary>Test hook: wraps every stream OpenRead returns, to simulate slow, short or failing reads.</summary>
     public Func<Stream, Stream>? WrapReadStream { get; set; }
 
@@ -75,6 +78,7 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
     private void Enter(string call)
     {
         lock (_gate) _calls.Add(call);
+        if (FailOnCall?.Invoke(call) is { } fault) throw fault;
         if (ThrowUnreachable)
             throw new StorageFailureException(StorageFailureKind.Unreachable, StorageErrorMapper.UnreachableMessage);
         if (ThrowNotAuthorised)
@@ -262,6 +266,12 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
         lock (_gate)
         {
             var tree = TreeFor(t.Id);
+            // Blob blocks are staged on the final name and stay invisible until committed; Files writes a staging file.
+            if (t.Kind == StorageKind.BlobContainer)
+            {
+                tree.Staging.TryAdd(stagingPath, new Dictionary<string, (long, byte[])>());
+                return Task.CompletedTask;
+            }
             tree.Staging[stagingPath] = new Dictionary<string, (long, byte[])>();
             Put(tree, stagingPath, Array.Empty<byte>());
         }
@@ -301,9 +311,9 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
             if (blockIds.Any(id => !blocks.ContainsKey(id))) throw Fail(StorageFailureKind.Other);
 
             var assembled = blockIds.SelectMany(id => blocks[id].Data).ToArray();
-            Put(tree, finalPath, assembled);
             tree.Staging.Remove(stagingPath);
-            tree.Files.Remove(stagingPath);
+            if (stagingPath != finalPath) tree.Files.Remove(stagingPath);
+            Put(tree, finalPath, assembled);
         }
         return Task.CompletedTask;
     }
@@ -315,7 +325,7 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
         {
             var tree = TreeFor(t.Id);
             tree.Staging.Remove(stagingPath);
-            tree.Files.Remove(stagingPath);
+            if (t.Kind != StorageKind.BlobContainer) tree.Files.Remove(stagingPath);
         }
         return Task.CompletedTask;
     }

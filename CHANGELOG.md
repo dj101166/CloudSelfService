@@ -11,6 +11,7 @@ Initial (unreleased) scaffold. This app has never been published, so all work to
 - Sign in with Microsoft (Entra, single tenant). Advanced staff are admitted on first sign-in with no role and see an "access pending" panel until an administrator grants one; customers (B2B guests) are admitted only when Advanced has already registered them, and anyone else lands on an Access Denied page telling them to contact Advanced support. Every sign-in, admitted or refused, is written to the audit log.
 - Account menu shows who is signed in and offers Sign out; an idle session is signed out after `Auth:IdleTimeoutMinutes` with a countdown warning.
 - A dropped Blazor server connection auto-recovers (auto-reload) instead of showing the "disconnected from server" dialog, and the reconnect dialog self-heals after a container stop/start rather than staying stuck until the tab is closed.
+- Chunked, resumable uploads of files up to 50 GB: each 4 MiB piece is MD5-checked by storage, an interrupted upload resumes where it stopped when the same file is selected again, and abandoned uploads are cleaned up after 24 hours.
 
 ### 🛡️ Security
 - Hardened HTTP security headers: added Permissions-Policy and CSP form-action 'self'; HSTS max-age set to 1 year.

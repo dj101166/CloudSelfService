@@ -174,6 +174,10 @@ public sealed class StorageAccessService
         var r = await ResolveAsync(userId, targetId, ct);
         if (!await AllowedAsync(r, targetId, StorageOperation.CreateFolder, path, ctx))
             return new(AccessOutcome.Denied, DeniedMessage);
+        // The backends create missing parents, so a parent that doesn't exist yet is a new name as well.
+        if (StoragePath.NonStrictFolderPrefix(parentPath) is { } newParents
+            && await RequireExistingFolderAsync(r, StorageOperation.CreateFolder, path, newParents, ctx, ct) is { } parentCheck)
+            return parentCheck;
 
         return await ExecuteAsync(r, StorageOperation.CreateFolder, path, ctx,
             (backend, t) => backend.CreateFolderAsync(t, path, ct));
@@ -205,6 +209,14 @@ public sealed class StorageAccessService
         // Checked after authorisation because it needs the target's kind.
         if (r.Target!.Kind == StorageKind.FileShare && dest.StartsWith(source + "/", StringComparison.OrdinalIgnoreCase))
             return new(AccessOutcome.Invalid, StorageErrorMapper.MoveIntoItselfMessage);
+
+        // A destination folder that does not exist yet would be created by the move, so its name is new too.
+        var newFolders = StoragePath.NonStrictFolderPrefix(StoragePath.Parent(dest), StoragePath.Parent(source));
+        if (newFolders is not null)
+        {
+            var folderCheck = await RequireExistingFolderAsync(r, StorageOperation.Move, auditPath, newFolders, ctx, ct);
+            if (folderCheck is not null) return folderCheck;
+        }
 
         return await ExecuteAsync(r, StorageOperation.Move, auditPath, ctx, async (backend, t) =>
         {
@@ -249,7 +261,25 @@ public sealed class StorageAccessService
         var r = await ResolveAsync(userId, targetId, ct);
         if (!await AllowedAsync(r, targetId, op, normalized, ctx))
             return new(AccessOutcome.Denied, null, DeniedMessage);
-        return new(AccessOutcome.Ok, r.Target);
+        return new(AccessOutcome.Ok, r.Target, null, r.User?.Upn);
+    }
+
+    /// <summary>Null when <paramref name="folder"/> exists; otherwise the result to return (Invalid, or a storage failure).</summary>
+    private async Task<AccessResult?> RequireExistingFolderAsync(Resolution r, StorageOperation op, string auditPath, string folder,
+        AuditContext ctx, CancellationToken ct)
+    {
+        var target = r.Target!;
+        try
+        {
+            var item = await _backends.For(target).GetItemAsync(target, folder, ct);
+            return item is { IsFolder: true } ? null : new AccessResult(AccessOutcome.Invalid, StoragePath.InvisibleCharactersMessage);
+        }
+        catch (StorageFailureException failure)
+        {
+            LogFailure(failure, op, target.Id, auditPath, ctx);
+            await RecordAsync(r, target.Id, op, auditPath, AuditResult.Failed, failure.Message, ctx);
+            return new AccessResult(OutcomeOf(failure), failure.Message);
+        }
     }
 
     private async Task<AppUser?> LoadUserAsync(Guid userId, CancellationToken ct)

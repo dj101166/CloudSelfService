@@ -354,7 +354,7 @@ public sealed class DownloadHardeningTests
 
     [Fact]
     public void TryValidateSegment_OrdinaryUnicode_Accepted() =>
-        Assert.True(StoragePath.TryValidateSegment("Q3 Ünï 日本語 \U0001F600.txt", out _));
+        Assert.True(StoragePath.TryValidateSegment("Q3 Ünï 日本語 \U0001F600.txt", out _, strict: true));
 
     [Fact]
     public void Attachment_BidiOverride_ReplacedInBothFilenames()
