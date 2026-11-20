@@ -18,12 +18,12 @@ public sealed class CurrentUser
     private readonly TimeProvider _time;
 
     public CurrentUser(AuthenticationStateProvider auth, IUserStore users, ICustomerStore customers,
-        IConfiguration config, TimeProvider time)
+        SessionLifetime lifetime, TimeProvider time)
     {
         _auth = auth;
         _users = users;
         _customers = customers;
-        _options = SessionLifetime.FromConfiguration(config);
+        _options = lifetime;
         _time = time;
     }
 

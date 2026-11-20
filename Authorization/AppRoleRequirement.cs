@@ -21,12 +21,19 @@ public sealed class AppRoleRequirement : IAuthorizationRequirement
 public sealed class AppRoleHandler : AuthorizationHandler<AppRoleRequirement>
 {
     private readonly IUserStore _users;
-    private readonly IConfiguration _config;
+    private readonly ICustomerStore _customers;
+    private readonly OwnerConfig _owners;
+    private readonly TimeProvider _time;
+    private readonly SessionLifetime _lifetime;
 
-    public AppRoleHandler(IUserStore users, IConfiguration config)
+    public AppRoleHandler(IUserStore users, ICustomerStore customers, OwnerConfig owners, TimeProvider time,
+        SessionLifetime lifetime)
     {
         _users = users;
-        _config = config;
+        _customers = customers;
+        _owners = owners;
+        _time = time;
+        _lifetime = lifetime;
     }
 
     protected override async Task HandleRequirementAsync(AuthorizationHandlerContext context, AppRoleRequirement requirement)
@@ -36,11 +43,11 @@ public sealed class AppRoleHandler : AuthorizationHandler<AppRoleRequirement>
         // pass, where a navigation becomes a real 302. Move an await above this line and that
         // fragment renders on an async completion instead, where the navigation recurses and
         // kills the host process. Pinned by RoleHandlerSynchronyTests.
-        if (AppClaims.UserIdOf(context.User) is not { } userId) return;
+        if (AppClaims.UserIdOf(context.User) is null) return;
 
-        var user = await _users.GetAsync(userId);
-        if (user is { Active: true, Kind: UserKind.Staff }
-            && OwnerConfig.EffectiveRole(user, _config) >= requirement.MinimumRole)
+        var session = await SessionValidator.ValidateAsync(context.User, _users, _customers, _time.GetUtcNow(), _lifetime);
+        if (session is { Valid: true, User: { Kind: UserKind.Staff } user }
+            && _owners.EffectiveRole(user) >= requirement.MinimumRole)
             context.Succeed(requirement);
     }
 }

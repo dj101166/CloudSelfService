@@ -34,7 +34,10 @@ public static class AuthEndpoints
     public static async Task OnTokenValidatedAsync(TokenValidatedContext ctx)
     {
         var id = ctx.Principal is null ? null : EntraIdentityReader.Read(ctx.Principal);
-        if (id is null)
+        var tenant = AuthPolicy.ParseTenantId(ctx.HttpContext.RequestServices.GetRequiredService<IConfiguration>()["Entra:TenantId"]);
+        // Every token minted for this single-tenant registration carries our tid - guests included,
+        // since they authenticate through our tenant. Anything else is not a token we asked for.
+        if (id is null || !AuthPolicy.IsOurTenant(id.TenantId, tenant))
         {
             ctx.Response.Redirect(DeniedRedirect(AdmissionOutcome.UnknownCustomer)!);
             ctx.HandleResponse();
@@ -65,7 +68,7 @@ public static class AuthEndpoints
         var sp = ctx.HttpContext.RequestServices;
         var result = await SessionValidator.ValidateAsync(ctx.Principal, sp.GetRequiredService<IUserStore>(),
             sp.GetRequiredService<ICustomerStore>(), sp.GetRequiredService<TimeProvider>().GetUtcNow(),
-            SessionLifetime.FromConfiguration(sp.GetRequiredService<IConfiguration>()), ctx.HttpContext.RequestAborted);
+            sp.GetRequiredService<SessionLifetime>(), ctx.HttpContext.RequestAborted);
         if (result.Valid) return;
 
         sp.GetRequiredService<ILoggerFactory>().CreateLogger(typeof(AuthEndpoints))

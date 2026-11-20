@@ -48,13 +48,16 @@ public sealed class IdentityResolver
     private readonly ICustomerStore _customers;
     private readonly AuditService _audit;
     private readonly IConfiguration _config;
+    private readonly OwnerConfig _owners;
 
-    public IdentityResolver(IUserStore users, ICustomerStore customers, AuditService audit, IConfiguration config)
+    public IdentityResolver(IUserStore users, ICustomerStore customers, AuditService audit, IConfiguration config,
+        OwnerConfig owners)
     {
         _users = users;
         _customers = customers;
         _audit = audit;
         _config = config;
+        _owners = owners;
     }
 
     public Task<Admission> AdmitAsync(EntraIdentity id, CancellationToken ct = default) =>
@@ -96,12 +99,15 @@ public sealed class IdentityResolver
             return (Denied(AdmissionOutcome.Deactivated, user), "staff record is inactive");
 
         var now = DateTimeOffset.UtcNow;
-        var role = OwnerConfig.IsOwner(id.Upn, _config) ? StaffRole.Owner
+        if (user is not null)
+            user = await RefreshNamesAsync(user, id, ct) with { EntraObjectId = id.ObjectId, LastSignInAt = now };
+
+        var role = _owners.IsOwner(id.Upn) ? StaffRole.Owner
             : user is null ? StaffRole.None
-            : OwnerConfig.EffectiveRole(user, _config);
+            : _owners.EffectiveRole(user);
         user = user is null
             ? new AppUser(Guid.NewGuid(), UserKind.Staff, null, id.Upn, id.DisplayName, id.ObjectId, role, true, now, now)
-            : user with { EntraObjectId = id.ObjectId, StaffRole = role, LastSignInAt = now };
+            : user with { StaffRole = role };
 
         if (await BindAsync(user, id, ct) is not { } bound)
             return (Denied(AdmissionOutcome.UnknownCustomer, null), "object id bind lost a race");
@@ -140,10 +146,31 @@ public sealed class IdentityResolver
         if (!user.Active || !customer.Active)
             return (Denied(AdmissionOutcome.Deactivated, user), user.Active ? "customer is inactive" : "user is inactive");
 
+        user = await RefreshNamesAsync(user, id, ct);
         if (await BindAsync(user with { EntraObjectId = id.ObjectId, LastSignInAt = DateTimeOffset.UtcNow }, id, ct) is not { } bound)
             return (Denied(AdmissionOutcome.UnknownCustomer, null), "object id bind lost a race");
 
         return (new Admission(AdmissionOutcome.Admitted, bound), "");
+    }
+
+    /// <summary>
+    /// Takes the UPN and display name from the token once the caller is known to own the record, so
+    /// a rename in Entra reaches the record (and with it the Owners check, which is by UPN). An
+    /// email-only identity never renames a record, and neither does a UPN another record holds.
+    /// </summary>
+    private async Task<AppUser> RefreshNamesAsync(AppUser user, EntraIdentity id, CancellationToken ct)
+    {
+        if (id.UpnFromEmail || string.IsNullOrWhiteSpace(id.Upn)) return user;
+
+        var upn = user.Upn;
+        if (!string.Equals(upn, id.Upn, StringComparison.Ordinal))
+        {
+            var holder = await _users.FindByUpnAsync(id.Upn, ct);
+            if (holder is null || holder.Id == user.Id) upn = id.Upn;
+        }
+
+        var name = string.IsNullOrWhiteSpace(id.DisplayName) ? user.DisplayName : id.DisplayName;
+        return user with { Upn = upn, DisplayName = name };
     }
 
     /// <summary>

@@ -129,7 +129,7 @@ public class SessionValidatorTests
     }
 
     private CurrentUser CurrentUserFor(ClaimsPrincipal principal) =>
-        new(new FixedAuth(principal), _users, _customers, new ConfigurationBuilder().Build(), new FixedTime(Now));
+        new(new FixedAuth(principal), _users, _customers, Options, new FixedTime(Now));
 
     [Fact]
     public async Task CurrentUser_InactiveUser_Null()

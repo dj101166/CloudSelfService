@@ -23,7 +23,7 @@ public class RoleHandlerSynchronyTests
     [Fact]
     public void Handle_NoUserIdClaim_ReturnsCompletedTask()
     {
-        var handler = new AppRoleHandler(new InMemoryUserStore(), AppRoleHandlerTests.Owners());
+        var handler = AppRoleHandlerTests.HandlerFor(new InMemoryUserStore(), new InMemoryCustomerStore());
         var context = AppRoleHandlerTests.ContextFor(new ClaimsPrincipal(new ClaimsIdentity()), StaffRole.Staff);
 
         Task task = handler.HandleAsync(context);

@@ -19,8 +19,8 @@ public class IdentityResolverTests
             new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
             {
                 ["Entra:StaffEmailDomain"] = "advancedutility.com",
-                ["Authorization:Owners"] = owners,
-            }).Build());
+            }).Build(),
+            new OwnerConfig(owners));
 
     private static EntraIdentity Staff(string upn = "sam@advancedutility.com", string oid = "oid-sam") =>
         new(oid, "our-tenant", upn, "Sam", IsGuest: false);
@@ -82,6 +82,61 @@ public class IdentityResolverTests
 
         Assert.Equal(AdmissionOutcome.Admitted, result.Outcome);
         Assert.Equal(StaffRole.StaffAdmin, (await _users.FindByObjectIdAsync("oid-boss"))!.StaffRole);
+    }
+
+    [Fact]
+    public async Task Admit_RenamedOwner_StoredUpnUpdated_RemovalFromConfigTakesEffect()
+    {
+        var id = Guid.NewGuid();
+        await _users.UpsertAsync(new AppUser(id, UserKind.Staff, null, "old.name@advancedutility.com", "Old Name",
+            "oid-boss", StaffRole.Owner, true, DateTimeOffset.UtcNow, null));
+        var renamed = Staff("new.name@advancedutility.com", "oid-boss") with { DisplayName = "New Name" };
+
+        // Config still lists only the OLD upn, so the renamed account is no longer an owner.
+        var result = await Resolver(owners: "old.name@advancedutility.com").AdmitAsync(renamed);
+
+        var stored = await _users.GetAsync(id);
+        Assert.Equal("new.name@advancedutility.com", stored!.Upn);
+        Assert.Equal("New Name", stored.DisplayName);
+        Assert.Equal(StaffRole.StaffAdmin, stored.StaffRole);
+        Assert.Equal(AdmissionOutcome.Admitted, result.Outcome);
+    }
+
+    [Fact]
+    public async Task Admit_RenamedCustomer_StoredUpnAndNameUpdated()
+    {
+        var customer = await AddCustomer();
+        var user = await AddCustomerUser(customer.Id, oid: "oid-pat");
+
+        await Resolver().AdmitAsync(Guest("pat.renamed@customer.example", "oid-pat") with { DisplayName = "Pat R" });
+
+        var stored = await _users.GetAsync(user.Id);
+        Assert.Equal("pat.renamed@customer.example", stored!.Upn);
+        Assert.Equal("Pat R", stored.DisplayName);
+    }
+
+    [Fact]
+    public async Task Admit_EmailOnlyIdentityForBoundUser_DoesNotRename()
+    {
+        var customer = await AddCustomer();
+        var user = await AddCustomerUser(customer.Id, oid: "oid-pat");
+
+        await Resolver().AdmitAsync(Guest("spoofed@elsewhere.example", "oid-pat") with { UpnFromEmail = true });
+
+        Assert.Equal("pat@customer.example", (await _users.GetAsync(user.Id))!.Upn);
+    }
+
+    [Fact]
+    public async Task Admit_RenameToUpnHeldByAnotherRecord_KeepsOldUpn()
+    {
+        var customer = await AddCustomer();
+        var user = await AddCustomerUser(customer.Id, oid: "oid-pat");
+        await AddCustomerUser(customer.Id, upn: "taken@customer.example", oid: "oid-other");
+
+        var result = await Resolver().AdmitAsync(Guest("taken@customer.example", "oid-pat"));
+
+        Assert.Equal(AdmissionOutcome.Admitted, result.Outcome);
+        Assert.Equal("pat@customer.example", (await _users.GetAsync(user.Id))!.Upn);
     }
 
     [Fact]

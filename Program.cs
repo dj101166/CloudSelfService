@@ -8,6 +8,7 @@ using CloudSelfService.Services.Identity;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authentication.OpenIdConnect;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Components.Authorization;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.IdentityModel.Protocols.OpenIdConnect;
 
@@ -42,10 +43,13 @@ builder.Services.AddSingleton<AuditService>();
 builder.Services.AddHsts(options => { options.MaxAge = TimeSpan.FromDays(365); });
 
 builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.AddSingleton(SessionLifetime.FromConfiguration(builder.Configuration));
+builder.Services.AddSingleton(new OwnerConfig(DevSignIn.EffectiveOwners(builder.Environment, builder.Configuration)));
 builder.Services.AddScoped<CurrentUser>();
 builder.Services.AddSingleton<IdentityResolver>();
 builder.Services.AddSingleton<IAuthorizationHandler, AppRoleHandler>();
 builder.Services.AddCascadingAuthenticationState();
+builder.Services.AddScoped<AuthenticationStateProvider, SessionRevalidatingStateProvider>();
 
 DevSignIn.AssertSafe(builder.Environment, builder.Configuration);
 var entraEnabled = AuthEndpoints.IsEntraProvider(builder.Configuration);
@@ -62,7 +66,10 @@ if (entraEnabled)
                 $"{key} is required when Auth:Provider is Entra. Set it in appsettings.Development.json (dev) " +
                 "or the App Service configuration (prod), or use Auth:Provider = Dev for local development.");
     }
+    AuthPolicy.ParseTenantId(builder.Configuration["Entra:TenantId"]);
 }
+
+var cookieSettings = AuthPolicy.CookieFor(builder.Environment.IsDevelopment());
 
 var authBuilder = builder.Services
     .AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
@@ -71,8 +78,8 @@ var authBuilder = builder.Services
         options.LoginPath = "/login";
         options.AccessDeniedPath = "/access-denied";
         options.Cookie.SameSite = SameSiteMode.Lax;
-        // SameAsRequest so plain-http dev works; production is Secure via X-Forwarded-Proto.
-        options.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
+        options.Cookie.Name = cookieSettings.Name;
+        options.Cookie.SecurePolicy = cookieSettings.SecurePolicy;
         options.ExpireTimeSpan = TimeSpan.FromMinutes(
             builder.Configuration.GetValue<int?>("Auth:IdleTimeoutMinutes") ?? 60);
         options.SlidingExpiration = true;
@@ -104,9 +111,9 @@ if (entraEnabled)
             OnTokenValidated = AuthEndpoints.OnTokenValidatedAsync,
             OnRemoteFailure = ctx =>
             {
-                // Message only: the exception can carry the protocol message, never log that.
                 ctx.HttpContext.RequestServices.GetRequiredService<ILoggerFactory>().CreateLogger("CloudSelfService.Auth")
-                    .LogWarning("Entra sign-in failed: {Message}", ctx.Failure?.Message ?? "unknown");
+                    .LogWarning("Entra sign-in failed: {Failure} (trace {TraceId})",
+                        AuthPolicy.FailureSummary(ctx.Failure), ctx.HttpContext.TraceIdentifier);
                 ctx.Response.Redirect("/login?error=signin_failed");
                 ctx.HandleResponse();
                 return Task.CompletedTask;
@@ -157,13 +164,17 @@ app.Use(async (ctx, next) =>
     ctx.Response.Headers["X-Frame-Options"] = "DENY";
     ctx.Response.Headers["Referrer-Policy"] = "strict-origin-when-cross-origin";
     ctx.Response.Headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(), payment=()";
+    ctx.Response.Headers["Cross-Origin-Opener-Policy"] = "same-origin";
+    if (AuthPolicy.ShouldDisableCaching(ctx.Request.Path))
+        ctx.Response.Headers.CacheControl = "no-store";
+    // Deliberately tighter than the suite CSP: no eval, and connect/img limited to this origin.
     ctx.Response.Headers["Content-Security-Policy"] =
         "default-src 'self'; " +
-        "script-src 'self' 'unsafe-inline' 'unsafe-eval'; " +
+        "script-src 'self' 'unsafe-inline'; " +
         "style-src 'self' 'unsafe-inline'; " +
-        "img-src 'self' data: https:; " +
+        "img-src 'self' data:; " +
         "font-src 'self' data:; " +
-        "connect-src 'self' wss: ws:; " +
+        "connect-src 'self'; " +
         "frame-ancestors 'none'; " +
         "object-src 'none'; " +
         "base-uri 'self'; " +

@@ -46,6 +46,26 @@ public static class DevSignIn
     public static bool IsEnabled(IHostEnvironment env, IConfiguration config) =>
         IsDevProvider(config) && env.IsDevelopment();
 
+    public static string UpnFor(string personaKey, IConfiguration config)
+    {
+        var p = All.First(x => x.Key == personaKey);
+        return p.Kind == PersonaKind.Staff
+            ? $"dev-{p.Key}@{config["Entra:StaffEmailDomain"] ?? "advancedutility.com"}"
+            : $"dev-{p.Key}@{CustomerDomain}";
+    }
+
+    /// <summary>
+    /// The owners list with the staff-owner persona appended when dev sign-in is enabled. Owner is
+    /// config-authoritative, so without this the persona would be demoted to StaffAdmin on sign-in.
+    /// </summary>
+    public static string EffectiveOwners(IHostEnvironment env, IConfiguration config)
+    {
+        var owners = config["Authorization:Owners"] ?? "";
+        if (!IsEnabled(env, config)) return owners;
+        var devOwner = UpnFor("staff-owner", config);
+        return string.IsNullOrWhiteSpace(owners) ? devOwner : $"{owners},{devOwner}";
+    }
+
     public static void AssertSafe(IHostEnvironment env, IConfiguration config)
     {
         if (IsDevProvider(config) && !env.IsDevelopment())
@@ -64,8 +84,7 @@ public static class DevSignIn
             if (p is null)
                 return Results.BadRequest($"Unknown persona. Use ?as= one of: {string.Join(", ", All.Select(x => x.Key))}");
 
-            var staffDomain = config["Entra:StaffEmailDomain"] ?? "advancedutility.com";
-            var upn = p.Kind == PersonaKind.Staff ? $"dev-{p.Key}@{staffDomain}" : $"dev-{p.Key}@{CustomerDomain}";
+            var upn = UpnFor(p.Key, config);
             var oid = $"dev-oid-{p.Key}";
 
             if (p.Kind == PersonaKind.Staff && p.Role != StaffRole.None)
