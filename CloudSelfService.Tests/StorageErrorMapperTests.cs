@@ -62,6 +62,10 @@ public class StorageErrorMapperTests
             KindOf(new TaskCanceledException("t", new TimeoutException())));
 
     [Fact]
+    public void Map_NonCallerOperationCanceled_Unreachable() =>
+        Assert.Equal(StorageFailureKind.Unreachable, KindOf(new OperationCanceledException("timeout")));
+
+    [Fact]
     public void Map_Md5Mismatch_Conflict()
     {
         var mapped = StorageErrorMapper.Map(new RequestFailedException(400, "bad md5", "Md5Mismatch", null));

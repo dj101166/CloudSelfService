@@ -17,11 +17,14 @@ public class FakeStorageBackendTests
     private async Task PutAsync(string path, string content, bool overwrite = true)
     {
         var bytes = Encoding.UTF8.GetBytes(content);
-        var staging = ".staging/" + Guid.NewGuid();
+        var staging = Stage(path);
         await _fake.BeginUploadAsync(T, staging, bytes.Length, _ct);
         await _fake.WriteChunkAsync(T, staging, path, "b0", 0, new MemoryStream(bytes), bytes.Length, MD5.HashData(bytes), _ct);
         await _fake.CompleteUploadAsync(T, staging, path, new[] { "b0" }, overwrite, _ct);
     }
+
+    private static string Stage(string path) =>
+        StoragePaths.Join(StoragePaths.Parent(path), $".{StoragePaths.Leaf(path)}.cssupload-{Guid.NewGuid():N}");
 
     private static async Task<string> ReadAll(Stream s)
     {
@@ -61,8 +64,9 @@ public class FakeStorageBackendTests
     public async Task Upload_NothingVisibleUntilComplete()
     {
         var bytes = Encoding.UTF8.GetBytes("abc");
-        await _fake.BeginUploadAsync(T, "s", 3, _ct);
-        await _fake.WriteChunkAsync(T, "s", "f.txt", "b0", 0, new MemoryStream(bytes), 3, MD5.HashData(bytes), _ct);
+        var s = Stage("f.txt");
+        await _fake.BeginUploadAsync(T, s, 3, _ct);
+        await _fake.WriteChunkAsync(T, s, "f.txt", "b0", 0, new MemoryStream(bytes), 3, MD5.HashData(bytes), _ct);
         Assert.Null(await _fake.GetItemAsync(T, "f.txt", _ct));
         Assert.Empty((await _fake.ListAsync(T, "", null, 50, _ct)).Items);
     }
@@ -242,6 +246,56 @@ public class FakeStorageBackendTests
         Assert.Equal(3, _fake.BytesWritten);
         Assert.Contains(_fake.Calls, c => c.StartsWith("WriteChunk"));
         Assert.StartsWith("BeginUpload", _fake.Calls[0]);
+    }
+
+    [Fact]
+    public async Task OpenRead_ZeroByteFile_EmptyStream()
+    {
+        await PutAsync("empty.txt", "");
+        Assert.Equal("", await ReadAll(await _fake.OpenReadAsync(T, "empty.txt", 0, null, _ct)));
+        Assert.Equal("", await ReadAll(await _fake.OpenReadAsync(T, "empty.txt", 0, 0, _ct)));
+    }
+
+    [Theory]
+    [InlineData("a", "a")]
+    [InlineData("a", "a/b")]
+    public async Task Move_FolderIntoItself_Conflict(string from, string to)
+    {
+        await _fake.CreateFolderAsync(T, from, _ct);
+        var ex = await Assert.ThrowsAsync<StorageFailureException>(() => _fake.MoveAsync(T, from, to, true, _ct));
+        Assert.Equal(StorageFailureKind.Conflict, ex.Kind);
+        Assert.Equal("Can't move a folder into itself.", ex.Message);
+    }
+
+    [Fact]
+    public async Task Staging_InFlightFileHiddenFromListAndGetItem()
+    {
+        var staging = Stage("docs/f.bin");
+        await _fake.BeginUploadAsync(T, staging, 3, _ct);
+        Assert.Empty((await _fake.ListAsync(T, "docs", null, 50, _ct)).Items);
+        Assert.Null(await _fake.GetItemAsync(T, staging, _ct));
+    }
+
+    [Fact]
+    public async Task WriteChunk_ShortStream_Conflict()
+    {
+        var name = Stage("f");
+        await _fake.BeginUploadAsync(T, name, 5, _ct);
+        var ex = await Assert.ThrowsAsync<StorageFailureException>(() =>
+            _fake.WriteChunkAsync(T, name, "f", "b0", 0, new MemoryStream(new byte[2]), 5, new byte[16], _ct));
+        Assert.Equal(StorageFailureKind.Conflict, ex.Kind);
+        Assert.Equal("Upload piece was shorter than expected.", ex.Message);
+    }
+
+    [Fact]
+    public async Task List_FoldersFirstThenFilesIgnoringCase()
+    {
+        await PutAsync("b.txt", "x");
+        await PutAsync("A.txt", "x");
+        await _fake.CreateFolderAsync(T, "Zed", _ct);
+        await _fake.CreateFolderAsync(T, "alpha", _ct);
+        var names = (await _fake.ListAsync(T, "", null, 50, _ct)).Items.Select(i => i.Name).ToArray();
+        Assert.Equal(new[] { "alpha", "Zed", "A.txt", "b.txt" }, names);
     }
 
     [Fact]

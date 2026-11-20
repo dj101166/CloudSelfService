@@ -34,6 +34,85 @@ public class StoragePathsTests
     public void Rebase_MovesPathUnderNewFolder(string path, string from, string to, string expected) =>
         Assert.Equal(expected, StoragePaths.Rebase(path, from, to));
 
+    [Theory]
+    [InlineData(".big.bin.cssupload-0123456789abcdef0123456789abcdef", true)]
+    [InlineData(".a.cssupload-0123456789abcdef0123456789abcde", false)]
+    [InlineData(".a.cssupload-0123456789ABCDEF0123456789abcdef", false)]
+    [InlineData("big.bin.cssupload-0123456789abcdef0123456789abcdef", false)]
+    [InlineData("report.txt", false)]
+    public void IsStagingName_MatchesOnlyCallerStagingNames(string name, bool expected) =>
+        Assert.Equal(expected, StoragePaths.IsStagingName(name));
+
+    [Fact]
+    public void IsHiddenName_MarkerAndStaging()
+    {
+        Assert.True(StoragePaths.IsHiddenName(".folder"));
+        Assert.True(StoragePaths.IsHiddenName(".x.cssupload-0123456789abcdef0123456789abcdef"));
+        Assert.False(StoragePaths.IsHiddenName("folder"));
+    }
+
+    [Theory]
+    [InlineData("a", "a", true)]
+    [InlineData("a", "a/b", true)]
+    [InlineData("a", "ab", false)]
+    [InlineData("a/b", "a", false)]
+    public void IsMoveIntoItself_Cases(string from, string to, bool expected) =>
+        Assert.Equal(expected, StoragePaths.IsMoveIntoItself(from, to));
+
+    [Fact]
+    public void SortPage_FoldersFirstThenFilesIgnoringCase()
+    {
+        var items = new[]
+        {
+            new CloudSelfService.Models.StorageItem("b.txt", "b.txt", false, 1, null),
+            new CloudSelfService.Models.StorageItem("Zed", "Zed", true, null, null),
+            new CloudSelfService.Models.StorageItem("A.txt", "A.txt", false, 1, null),
+            new CloudSelfService.Models.StorageItem("alpha", "alpha", true, null, null),
+        };
+        Assert.Equal(new[] { "alpha", "Zed", "A.txt", "b.txt" }, StoragePaths.SortPage(items).Select(i => i.Name).ToArray());
+    }
+
+    private const long Mib = 1024 * 1024;
+
+    [Fact]
+    public void BlockPlanner_ZeroBytes_NoBlocks() => Assert.Empty(BlockPlanner.Plan(0));
+
+    [Fact]
+    public void BlockPlanner_OneByte_SingleBlock()
+    {
+        var b = Assert.Single(BlockPlanner.Plan(1));
+        Assert.Equal((0L, 1L), (b.Offset, b.Length));
+    }
+
+    [Fact]
+    public void BlockPlanner_ExactlyMax_SingleBlock()
+    {
+        var b = Assert.Single(BlockPlanner.Plan(4000 * Mib));
+        Assert.Equal(4000 * Mib, b.Length);
+    }
+
+    [Fact]
+    public void BlockPlanner_MaxPlusOne_TwoBlocks()
+    {
+        var blocks = BlockPlanner.Plan(4000 * Mib + 1);
+        Assert.Equal(2, blocks.Count);
+        Assert.Equal(4000 * Mib, blocks[1].Offset);
+        Assert.Equal(1, blocks[1].Length);
+    }
+
+    [Fact]
+    public void BlockPlanner_TenGiB_ContiguousFixedWidthIds()
+    {
+        var size = 10L * 1024 * Mib;
+        var blocks = BlockPlanner.Plan(size);
+        Assert.Equal(3, blocks.Count);
+        Assert.Equal(size, blocks.Sum(b => b.Length));
+        long expected = 0;
+        foreach (var b in blocks) { Assert.Equal(expected, b.Offset); expected += b.Length; }
+        Assert.Single(blocks.Select(b => b.BlockId.Length).Distinct());
+        Assert.Equal(blocks.Count, blocks.Select(b => b.BlockId).Distinct().Count());
+    }
+
     [Fact]
     public void Ancestors_ShallowestFirst() =>
         Assert.Equal(new[] { "a", "a/b", "a/b/c" }, StoragePaths.Ancestors("a/b/c").ToArray());

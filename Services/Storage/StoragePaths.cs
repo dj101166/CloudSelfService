@@ -1,3 +1,6 @@
+using System.Text.RegularExpressions;
+using CloudSelfService.Models;
+
 namespace CloudSelfService.Services.Storage;
 
 /// <summary>Pure path helpers shared by the backends and the fake. Inputs are already-normalised paths.</summary>
@@ -22,6 +25,21 @@ public static class StoragePaths
 
     public static bool IsMarker(string path) => Leaf(path) == FolderMarker;
 
+    private static readonly Regex StagingName = new(@"^\..+\.cssupload-[0-9a-f]{32}$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /// <summary>Caller-chosen upload staging names ("{folder}/.{name}.cssupload-{sessionId:N}") must never be listed.</summary>
+    public static bool IsStagingName(string name) => StagingName.IsMatch(name);
+
+    /// <summary>Entries users must never see: the folder marker and in-flight upload staging files.</summary>
+    public static bool IsHiddenName(string name) => name == FolderMarker || IsStagingName(name);
+
+    public static bool IsMoveIntoItself(string from, string to) =>
+        to == from || to.StartsWith(from + "/", StringComparison.Ordinal);
+
+    /// <summary>Folders first, then files, each ordinal-ignore-case by name. Ordering holds within a page only.</summary>
+    public static List<StorageItem> SortPage(IEnumerable<StorageItem> items) =>
+        items.OrderBy(i => i.IsFolder ? 0 : 1).ThenBy(i => i.Name, StringComparer.OrdinalIgnoreCase).ToList();
+
     /// <summary>A hierarchy-listing prefix such as "a/b/" becomes "a/b".</summary>
     public static string TrimPrefix(string prefix) => prefix.TrimEnd('/');
 
@@ -38,6 +56,26 @@ public static class StoragePaths
             acc = Join(acc, seg);
             yield return acc;
         }
+    }
+}
+
+/// <summary>One server-side copy block: base64 fixed-width id, source offset and length.</summary>
+public readonly record struct CopyBlock(string BlockId, long Offset, long Length);
+
+public static class BlockPlanner
+{
+    public const long MaxBlockBytes = 4000L * 1024 * 1024;
+
+    public static IReadOnlyList<CopyBlock> Plan(long size, long maxBlock = MaxBlockBytes)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(size);
+        var blocks = new List<CopyBlock>();
+        for (long offset = 0; offset < size; offset += maxBlock)
+        {
+            var id = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes($"move-{blocks.Count:D6}"));
+            blocks.Add(new CopyBlock(id, offset, Math.Min(maxBlock, size - offset)));
+        }
+        return blocks;
     }
 }
 

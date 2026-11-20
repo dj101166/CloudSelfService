@@ -45,7 +45,7 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
             if (tree.Seeded) return;
             tree.Seeded = true;
             foreach (var folder in new[] { "Documents", "Reports/2026", "Archive" })
-                AddFolder(tree, folder);
+                AddFolderWithMarker(tree, folder);
             Put(tree, "Welcome.txt", "Sample file seeded for local development."u8.ToArray());
             Put(tree, "Documents/Readme.txt", "Documents folder sample."u8.ToArray());
             Put(tree, "Reports/2026/January.csv", "month,total\nJanuary,42\n"u8.ToArray());
@@ -80,6 +80,12 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
         foreach (var a in StoragePaths.Ancestors(path)) tree.Folders.Add(a);
     }
 
+    private static void AddFolderWithMarker(Tree tree, string path)
+    {
+        AddFolder(tree, path);
+        tree.Files[StoragePaths.MarkerPath(path)] = (Array.Empty<byte>(), DateTimeOffset.UtcNow);
+    }
+
     private static void Put(Tree tree, string path, byte[] data)
     {
         AddFolder(tree, StoragePaths.Parent(path));
@@ -92,6 +98,7 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
     private static StorageItem? Item(Tree tree, string path)
     {
         if (path.Length == 0) return new StorageItem("", "", true, null, null);
+        if (StoragePaths.IsHiddenName(StoragePaths.Leaf(path))) return null;
         if (tree.Files.TryGetValue(path, out var f))
             return new StorageItem(StoragePaths.Leaf(path), path, false, f.Data.LongLength, f.Modified);
         return tree.Folders.Contains(path) ? new StorageItem(StoragePaths.Leaf(path), path, true, null, null) : null;
@@ -105,11 +112,9 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
             var tree = TreeFor(t.Id);
             if (!Exists(tree, folder)) throw Fail(StorageFailureKind.NotFound);
 
-            var children = tree.Folders.Where(p => StoragePaths.Parent(p) == folder).OrderBy(p => p, StringComparer.Ordinal)
-                .Select(p => Item(tree, p)!)
-                .Concat(tree.Files.Keys.Where(p => StoragePaths.Parent(p) == folder && !StoragePaths.IsMarker(p))
-                    .OrderBy(p => p, StringComparer.Ordinal).Select(p => Item(tree, p)!))
-                .ToList();
+            var children = StoragePaths.SortPage(tree.Folders.Where(p => StoragePaths.Parent(p) == folder)
+                .Concat(tree.Files.Keys.Where(p => StoragePaths.Parent(p) == folder && !StoragePaths.IsHiddenName(StoragePaths.Leaf(p))))
+                .Select(p => Item(tree, p)!));
 
             var start = int.TryParse(continuation, out var s) && s > 0 ? s : 0;
             var page = children.Skip(start).Take(pageSize).ToList();
@@ -130,9 +135,9 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
         lock (_gate)
         {
             if (!TreeFor(t.Id).Files.TryGetValue(path, out var f)) throw Fail(StorageFailureKind.NotFound);
-            var start = (int)Math.Min(offset, f.Data.Length);
-            var count = (int)Math.Min(length ?? long.MaxValue, f.Data.Length - start);
-            return Task.FromResult<Stream>(new MemoryStream(f.Data, start, count, writable: false));
+            var start = Math.Min(offset, f.Data.LongLength);
+            var count = Math.Min(length ?? long.MaxValue, f.Data.LongLength - start);
+            return Task.FromResult<Stream>(new MemoryStream(f.Data, checked((int)start), checked((int)count), writable: false));
         }
     }
 
@@ -143,7 +148,7 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
         {
             var tree = TreeFor(t.Id);
             if (Exists(tree, path)) throw Fail(StorageFailureKind.AlreadyExists);
-            AddFolder(tree, path);
+            AddFolderWithMarker(tree, path);
         }
         return Task.CompletedTask;
     }
@@ -155,9 +160,9 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
         {
             var tree = TreeFor(t.Id);
             var sourceExists = isFolder ? tree.Folders.Contains(from) : tree.Files.ContainsKey(from);
+            if (isFolder && StoragePaths.IsMoveIntoItself(from, to)) throw StorageErrorMapper.MoveIntoItself();
             if (!sourceExists) throw Fail(StorageFailureKind.NotFound);
             if (Exists(tree, to)) throw Fail(StorageFailureKind.AlreadyExists);
-            if (isFolder && to.StartsWith(from + "/", StringComparison.Ordinal)) throw Fail(StorageFailureKind.Other);
 
             AddFolder(tree, StoragePaths.Parent(to));
             if (!isFolder)
@@ -205,7 +210,12 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
     public Task BeginUploadAsync(StorageTarget t, string stagingPath, long size, CancellationToken ct)
     {
         Enter($"BeginUpload:{stagingPath}");
-        lock (_gate) TreeFor(t.Id).Staging[stagingPath] = new Dictionary<string, (long, byte[])>();
+        lock (_gate)
+        {
+            var tree = TreeFor(t.Id);
+            tree.Staging[stagingPath] = new Dictionary<string, (long, byte[])>();
+            Put(tree, stagingPath, Array.Empty<byte>());
+        }
         return Task.CompletedTask;
     }
 
@@ -214,7 +224,11 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
     {
         Enter($"WriteChunk:{stagingPath}:{blockId}");
         var buffer = new byte[length];
-        await data.ReadExactlyAsync(buffer, ct);
+        try { await data.ReadExactlyAsync(buffer, ct); }
+        catch (EndOfStreamException)
+        {
+            throw new StorageFailureException(StorageFailureKind.Conflict, StorageErrorMapper.ShortChunkMessage);
+        }
         if (!MD5.HashData(buffer).AsSpan().SequenceEqual(md5)) throw Fail(StorageFailureKind.Conflict);
 
         lock (_gate)
@@ -240,6 +254,7 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
             var assembled = blockIds.SelectMany(id => blocks[id].Data).ToArray();
             Put(tree, finalPath, assembled);
             tree.Staging.Remove(stagingPath);
+            tree.Files.Remove(stagingPath);
         }
         return Task.CompletedTask;
     }
@@ -247,7 +262,12 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
     public Task AbortUploadAsync(StorageTarget t, string stagingPath, CancellationToken ct)
     {
         Enter($"AbortUpload:{stagingPath}");
-        lock (_gate) TreeFor(t.Id).Staging.Remove(stagingPath);
+        lock (_gate)
+        {
+            var tree = TreeFor(t.Id);
+            tree.Staging.Remove(stagingPath);
+            tree.Files.Remove(stagingPath);
+        }
         return Task.CompletedTask;
     }
 

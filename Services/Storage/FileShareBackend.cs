@@ -22,11 +22,13 @@ public sealed class FileShareBackend(StorageClientFactory clients) : IStorageBac
         StorageErrorMapper.RunAsync(async () =>
         {
             var dir = Dir(clients.Share(t), folder);
-            await foreach (var page in dir.GetFilesAndDirectoriesAsync(cancellationToken: ct)
+            var options = new ShareDirectoryGetFilesAndDirectoriesOptions { Traits = ShareFileTraits.Timestamps };
+            await foreach (var page in dir.GetFilesAndDirectoriesAsync(options, ct)
                                .AsPages(continuation, pageSize).ConfigureAwait(false))
             {
-                var items = page.Values.Select(i => new StorageItem(i.Name, StoragePaths.Join(folder, i.Name), i.IsDirectory,
-                    i.IsDirectory ? null : i.FileSize, null)).ToList();
+                var items = StoragePaths.SortPage(page.Values.Where(i => !StoragePaths.IsHiddenName(i.Name)).Select(i =>
+                    new StorageItem(i.Name, StoragePaths.Join(folder, i.Name), i.IsDirectory,
+                        i.IsDirectory ? null : i.FileSize, i.Properties?.LastModified)));
                 return new StorageListing(items, string.IsNullOrEmpty(page.ContinuationToken) ? null : page.ContinuationToken);
             }
             return new StorageListing(Array.Empty<StorageItem>(), null);
@@ -37,6 +39,7 @@ public sealed class FileShareBackend(StorageClientFactory clients) : IStorageBac
         {
             var share = clients.Share(t);
             if (path.Length == 0) return new StorageItem("", "", true, null, null);
+            if (StoragePaths.IsStagingName(StoragePaths.Leaf(path))) return null;
             try
             {
                 var props = await File(share, path).GetPropertiesAsync(cancellationToken: ct).ConfigureAwait(false);
@@ -55,9 +58,12 @@ public sealed class FileShareBackend(StorageClientFactory clients) : IStorageBac
     public Task<Stream> OpenReadAsync(StorageTarget t, string path, long offset, long? length, CancellationToken ct) =>
         StorageErrorMapper.RunAsync(async () =>
         {
-            var range = length is null ? new HttpRange(offset) : new HttpRange(offset, length.Value);
-            var resp = await File(clients.Share(t), path)
-                .DownloadAsync(new ShareFileDownloadOptions { Range = range }, ct).ConfigureAwait(false);
+            if (length == 0) return (Stream)new MemoryStream(Array.Empty<byte>(), writable: false);
+            // A Range header on an empty file is a 416, so a whole-file read must not send one.
+            var options = offset == 0 && length is null
+                ? null
+                : new ShareFileDownloadOptions { Range = length is null ? new HttpRange(offset) : new HttpRange(offset, length.Value) };
+            var resp = await File(clients.Share(t), path).DownloadAsync(options, ct).ConfigureAwait(false);
             return resp.Value.Content;
         }, ct);
 
@@ -72,6 +78,7 @@ public sealed class FileShareBackend(StorageClientFactory clients) : IStorageBac
     public Task MoveAsync(StorageTarget t, string from, string to, bool isFolder, CancellationToken ct) =>
         StorageErrorMapper.RunAsync(async () =>
         {
+            if (isFolder && StoragePaths.IsMoveIntoItself(from, to)) throw StorageErrorMapper.MoveIntoItself();
             var share = clients.Share(t);
             await EnsureFoldersAsync(share, StoragePaths.Parent(to), ct).ConfigureAwait(false);
             var options = new ShareFileRenameOptions { ReplaceIfExists = false };

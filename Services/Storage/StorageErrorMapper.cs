@@ -20,6 +20,8 @@ public static class StorageErrorMapper
     public const string UnreachableMessage = "Storage is temporarily unreachable. Please try again shortly.";
     public const string CorruptedChunkMessage = "A piece of the upload was corrupted in transit and will be retried.";
     public const string OtherMessage = "Something went wrong talking to storage.";
+    public const string MoveIntoItselfMessage = "Can't move a folder into itself.";
+    public const string ShortChunkMessage = "Upload piece was shorter than expected.";
     public const string NotFoundMessage = "That item no longer exists.";
     public const string AlreadyExistsMessage = "An item with that name already exists.";
 
@@ -35,7 +37,7 @@ public static class StorageErrorMapper
                 return MapRequest(rfe);
             case HttpRequestException or SocketException or TimeoutException:
                 return new(StorageFailureKind.Unreachable, UnreachableMessage, ex);
-            case TaskCanceledException { InnerException: TimeoutException }:
+            case OperationCanceledException:
                 return new(StorageFailureKind.Unreachable, UnreachableMessage, ex);
             case AggregateException { InnerExceptions.Count: 1 } agg:
                 return Map(agg.InnerExceptions[0]);
@@ -58,6 +60,9 @@ public static class StorageErrorMapper
             _ => new(StorageFailureKind.Other, OtherMessage, ex),
         };
     }
+
+    public static StorageFailureException MoveIntoItself() =>
+        new(StorageFailureKind.Conflict, MoveIntoItselfMessage);
 
     /// <summary>Runs a storage call, converting SDK failures to <see cref="StorageFailureException"/>; caller cancellation passes through.</summary>
     public static async Task<T> RunAsync<T>(Func<Task<T>> op, CancellationToken ct)

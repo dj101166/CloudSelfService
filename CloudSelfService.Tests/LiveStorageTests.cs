@@ -31,7 +31,7 @@ public class LiveStorageTests
         var content = new byte[ChunkMath.ChunkSize * 2 + 1];
         Random.Shared.NextBytes(content);
         var sessionId = Guid.NewGuid();
-        var staging = $".staging/{sessionId:N}";
+        var staging = $"{run}/.big.bin.cssupload-{sessionId:N}";
         var file = $"{run}/big.bin";
 
         await b.ProbeAsync(t, ct);
