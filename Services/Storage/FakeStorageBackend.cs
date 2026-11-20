@@ -39,6 +39,9 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
     public Exception? UnexpectedOnGetItem { get; set; }
     public Exception? UnexpectedOnOpenRead { get; set; }
 
+    /// <summary>Test hook: GrowStaging waits this long (honouring cancellation) before resizing.</summary>
+    public TimeSpan? GrowStagingDelay { get; set; }
+
     /// <summary>Test hook: given the recorded call (e.g. "BeginUpload:path"), returns an exception to throw, or null.</summary>
     public Func<string, Exception?>? FailOnCall { get; set; }
 
@@ -304,23 +307,25 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
         return Task.CompletedTask;
     }
 
-    public Task GrowStagingAsync(StorageTarget t, string stagingPath, long size, CancellationToken ct)
+    public async Task GrowStagingAsync(StorageTarget t, string stagingPath, long size, CancellationToken ct)
     {
         Enter($"GrowStaging:{stagingPath}:{size}");
-        if (t.Kind == StorageKind.BlobContainer) return Task.CompletedTask;
+        if (t.Kind == StorageKind.BlobContainer) return;
+        if (GrowStagingDelay is { } delay) await Task.Delay(delay, ct);
         lock (_gate)
         {
             var tree = TreeFor(t.Id);
             if (!tree.StagingSizes.ContainsKey(stagingPath)) throw Fail(StorageFailureKind.NotFound);
             tree.StagingSizes[stagingPath] = size;
         }
-        return Task.CompletedTask;
     }
 
     public async Task WriteChunkAsync(StorageTarget t, string stagingPath, string finalPath, string blockId, long offset,
         Stream data, long length, byte[] md5, CancellationToken ct)
     {
         Enter($"WriteChunk:{stagingPath}:{blockId}");
+        if (t.Kind != StorageKind.BlobContainer && !StoragePaths.IsStagingName(StoragePaths.Leaf(stagingPath)))
+            throw Fail(StorageFailureKind.Other);
         // The Azure SDKs reject a non-seekable stream ("stream must be seekable") and send Length - Position bytes.
         if (!data.CanSeek) throw new ArgumentException("stream must be seekable", nameof(data));
         if (data.Length - data.Position != length)
@@ -335,20 +340,24 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
             if (!tree.Staging.TryGetValue(stagingPath, out var blocks)) throw Fail(StorageFailureKind.NotFound);
             // Put Range past the end of an Azure Files file fails (416 InvalidRange); the file must be grown first.
             if (t.Kind != StorageKind.BlobContainer && offset + length > tree.StagingSizes.GetValueOrDefault(stagingPath))
-                throw Fail(StorageFailureKind.Other);
+                throw new StorageFailureException(StorageFailureKind.Conflict, StorageErrorMapper.StagingIncompleteMessage);
             blocks[blockId] = (offset, buffer);
         }
         Interlocked.Add(ref _bytesWritten, length);
     }
 
     public Task CompleteUploadAsync(StorageTarget t, string stagingPath, string finalPath, IReadOnlyList<string> blockIds,
-        bool overwrite, CancellationToken ct, Guid? uploadSessionId = null)
+        bool overwrite, CancellationToken ct, Guid? uploadSessionId = null, long? expectedSize = null)
     {
         Enter($"CompleteUpload:{finalPath}");
+        if (t.Kind != StorageKind.BlobContainer && !StoragePaths.IsStagingName(StoragePaths.Leaf(stagingPath)))
+            throw Fail(StorageFailureKind.Other);
         lock (_gate)
         {
             var tree = TreeFor(t.Id);
             if (!tree.Staging.TryGetValue(stagingPath, out var blocks)) throw Fail(StorageFailureKind.NotFound);
+            if (t.Kind != StorageKind.BlobContainer && expectedSize is { } size && tree.StagingSizes.GetValueOrDefault(stagingPath) != size)
+                throw new StorageFailureException(StorageFailureKind.Conflict, StorageErrorMapper.StagingIncompleteMessage);
             if (tree.Folders.Contains(finalPath) || (!overwrite && tree.Files.ContainsKey(finalPath)))
                 throw Fail(StorageFailureKind.AlreadyExists);
             if (blockIds.Any(id => !blocks.ContainsKey(id))) throw Fail(StorageFailureKind.Other);

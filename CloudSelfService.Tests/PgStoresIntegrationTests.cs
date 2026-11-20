@@ -168,8 +168,13 @@ public class PgStoresIntegrationTests
         Assert.True((await store.GetAsync(s.Id))!.ExistedAtBegin);
 
         Assert.Contains(await store.ListSweepableOpenAsync(now.AddHours(25), now), x => x.Id == s.Id);
-        Assert.Contains(await store.ListSweepableOpenAsync(now, now.AddMinutes(3)), x => x.Id == s.Id);
-        Assert.DoesNotContain(await store.ListSweepableOpenAsync(now, now.AddMinutes(2)), x => x.Id == s.Id);
+        // R33: it has received chunks, so however long it has been idle it is only swept at expiry.
+        Assert.DoesNotContain(await store.ListSweepableOpenAsync(now, now.AddHours(23)), x => x.Id == s.Id);
+        var untouched = s with { Id = Guid.NewGuid(), LastActivityAt = null };
+        await store.CreateAsync(untouched);
+        Assert.Contains(await store.ListSweepableOpenAsync(now, now.AddMinutes(1)), x => x.Id == untouched.Id);
+        Assert.DoesNotContain(await store.ListSweepableOpenAsync(now, now), x => x.Id == untouched.Id);
+        await store.DeleteAsync(untouched.Id);
         Assert.Contains(await store.ListOpenForUserPathAsync(user, target, "Docs/a b#.bin"), x => x.Id == s.Id);
         Assert.Empty(await store.ListOpenForUserPathAsync(Guid.NewGuid(), target, "Docs/a b#.bin"));
         Assert.Equal(1, await store.CountOpenForUserAsync(user, now));
@@ -177,11 +182,16 @@ public class PgStoresIntegrationTests
         Assert.Equal(0, await store.CountOpenForUserAsync(user, now.AddHours(24)));
         Assert.Equal(0L, await store.SumOpenSizeForUserAsync(Guid.NewGuid(), now));
 
+        // Two growers racing to the same size: whichever takes the row lock first grows, the other sees the size already
+        // reached and skips, so exactly one grow runs whatever the order. Then a smaller size never grows.
         var grows = 0;
-        await Task.WhenAll(new[] { 3L, 9L, 6L, 9L }.Select(n => store.EnsureStagingSizeAsync(s.Id, n,
+        await Task.WhenAll(new[] { 9L, 9L }.Select(n => store.EnsureStagingSizeAsync(s.Id, n,
             _ => { Interlocked.Increment(ref grows); return Task.CompletedTask; })));
         Assert.Equal(9, (await store.GetAsync(s.Id))!.StagingSize);
-        Assert.InRange(grows, 1, 2);
+        Assert.Equal(1, grows);
+        await store.EnsureStagingSizeAsync(s.Id, 6, _ => { Interlocked.Increment(ref grows); return Task.CompletedTask; });
+        Assert.Equal(1, grows);
+        Assert.Equal(9, (await store.GetAsync(s.Id))!.StagingSize);
         await Assert.ThrowsAsync<IOException>(() => store.EnsureStagingSizeAsync(s.Id, 20, _ => throw new IOException()));
         Assert.Equal(9, (await store.GetAsync(s.Id))!.StagingSize);
         Assert.Contains(await store.ListActiveForPathAsync(target, "Docs/a b#.bin", now), x => x.Id == s.Id);
@@ -213,7 +223,14 @@ public class PgStoresIntegrationTests
         Assert.Contains(await store.ListAbortedWithStagingAsync(), x => x.Id == aborted.Id);
         await store.PurgeAsync(now.AddHours(25), now.AddDays(-1));
         Assert.NotNull(await store.GetAsync(aborted.Id));
+        var refused = s with { Id = Guid.NewGuid(), Status = UploadStatus.Aborted, StagingPath = "Docs/.z.cssupload-y" };
+        await store.CreateAsync(refused);
+        await store.SetCleanupRefusedAsync(refused.Id);
+        Assert.True((await store.GetAsync(refused.Id))!.CleanupRefused);
+        Assert.DoesNotContain(await store.ListAbortedWithStagingAsync(), x => x.Id == refused.Id);
         var hard = await store.PurgeAsync(now.AddHours(25), now.AddHours(25));
+        Assert.DoesNotContain(hard.Abandoned, a => a.SessionId == refused.Id);
+        Assert.Null(await store.GetAsync(refused.Id));
         Assert.Contains(hard.Abandoned, a => a.SessionId == aborted.Id && a.StagingPath == "Docs/.x.cssupload-y");
         Assert.Null(await store.GetAsync(aborted.Id));
 

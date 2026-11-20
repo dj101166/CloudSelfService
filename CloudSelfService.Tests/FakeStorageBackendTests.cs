@@ -331,7 +331,8 @@ public class FakeStorageBackendTests
         var bytes = new byte[] { 1, 2, 3 };
         var tooFar = await Assert.ThrowsAsync<StorageFailureException>(() =>
             _fake.WriteChunkAsync(T, staging, "big.iso", "b0", 0, new MemoryStream(bytes), 3, MD5.HashData(bytes), _ct));
-        Assert.Equal(StorageFailureKind.Other, tooFar.Kind);
+        Assert.Equal(StorageFailureKind.Conflict, tooFar.Kind);
+        Assert.Equal(StorageErrorMapper.StagingIncompleteMessage, tooFar.Message);
 
         await _fake.GrowStagingAsync(T, staging, 3, _ct);
         await _fake.WriteChunkAsync(T, staging, "big.iso", "b0", 0, new MemoryStream(bytes), 3, MD5.HashData(bytes), _ct);
@@ -366,6 +367,22 @@ public class FakeStorageBackendTests
 
         Assert.True(await _fake.HasLandedAsync(blob, "f", "f", mine, 3, _ct));
         Assert.False(await _fake.HasLandedAsync(blob, "f", "f", Guid.NewGuid(), 3, _ct));
+    }
+
+    [Fact]
+    public async Task WriteAndComplete_Files_RefuseNonStagingSource()
+    {
+        await PutAsync("report.pdf", "keep");
+        var bytes = new byte[] { 1 };
+
+        var write = await Assert.ThrowsAsync<StorageFailureException>(() =>
+            _fake.WriteChunkAsync(T, "report.pdf", "x", "b0", 0, new MemoryStream(bytes), 1, MD5.HashData(bytes), _ct));
+        var complete = await Assert.ThrowsAsync<StorageFailureException>(() =>
+            _fake.CompleteUploadAsync(T, "report.pdf", "moved.pdf", Array.Empty<string>(), true, _ct));
+
+        Assert.Equal(StorageFailureKind.Other, write.Kind);
+        Assert.Equal(StorageFailureKind.Other, complete.Kind);
+        Assert.Equal("keep", await ReadAll(await _fake.OpenReadAsync(T, "report.pdf", 0, null, _ct)));
     }
 
     private sealed class NonSeekable(byte[] data) : MemoryStream(data)

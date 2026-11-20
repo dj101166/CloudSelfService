@@ -249,7 +249,7 @@ public sealed class BlobBackend(StorageClientFactory clients) : IStorageBackend
         }, ct);
 
     public Task CompleteUploadAsync(StorageTarget t, string stagingPath, string finalPath, IReadOnlyList<string> blockIds,
-        bool overwrite, CancellationToken ct, Guid? uploadSessionId = null) =>
+        bool overwrite, CancellationToken ct, Guid? uploadSessionId = null, long? expectedSize = null) =>
         StorageErrorMapper.RunAsync(async () =>
         {
             var options = new CommitBlockListOptions();

@@ -132,9 +132,10 @@ public sealed class UploadCleanupService : BackgroundService
     }
 
     // Deletes only the session's own derived staging name, and only when the target is still the kind it was at Begin.
+    // A refusal is logged once and recorded on the row, so later sweeps don't retry (or re-log) it.
     private async Task RemoveStagingAsync(StorageTarget? target, UploadSession session, CancellationToken ct)
     {
-        if (session.StagingRemoved) return;
+        if (session.StagingRemoved || session.CleanupRefused) return;
         if (session.TargetKind == StorageKind.BlobContainer && target is null or { Kind: StorageKind.BlobContainer })
         {
             await _sessions.SetStagingRemovedAsync(session.Id, ct);
@@ -144,12 +145,14 @@ public sealed class UploadCleanupService : BackgroundService
         {
             _logger.LogError("Upload {SessionId} staging {StagingPath} cannot be removed: target {TargetId} no longer exists.",
                 session.Id, session.StagingPath, session.TargetId);
+            await _sessions.SetCleanupRefusedAsync(session.Id, ct);
             return;
         }
         if (!UploadSessionService.StagingIsOwnedBy(session) || session.TargetKind != target.Kind)
         {
             _logger.LogError("Refusing to remove staging {StagingPath} for upload {SessionId}: it isn't this session's staging name, " +
                              "or target {TargetId} changed kind since the upload began.", session.StagingPath, session.Id, target.Id);
+            await _sessions.SetCleanupRefusedAsync(session.Id, ct);
             return;
         }
         try

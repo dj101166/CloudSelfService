@@ -8,6 +8,11 @@ using CloudSelfService.Services.Transfers;
 using CloudSelfService.Tests.Infrastructure;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Server.Kestrel.Core;
+using Microsoft.AspNetCore.Server.Kestrel.Core.Features;
+using Microsoft.Extensions.Configuration;
+using CloudSelfService.Endpoints;
 using Xunit;
 
 namespace CloudSelfService.Tests;
@@ -501,6 +506,37 @@ public sealed class UploadEndpointTests : IDisposable
         var session = (await JsonOf(await client.SendAsync(Begin(token, target.Id, "", "a.bin", file.Length)))).GetProperty("sessionId").GetGuid();
 
         Assert.Equal(HttpStatusCode.NoContent, (await client.SendAsync(Chunk(token, session, 0, file))).StatusCode);
+    }
+
+    // Kestrel throws NotSupportedException when MinDataRate is set on an HTTP/2 or HTTP/3 request.
+    [Theory]
+    [InlineData("HTTP/1.1", true)]
+    [InlineData("HTTP/2", false)]
+    [InlineData("HTTP/3", false)]
+    [InlineData("HTTP/1.0", false)]
+    public void ApplyMinDataRate_OnlyOnHttp11(string protocol, bool expectSet)
+    {
+        var ctx = new DefaultHttpContext();
+        ctx.Request.Protocol = protocol;
+        var feature = new StrictRateFeature(protocol == "HTTP/1.1");
+        ctx.Features.Set<IHttpMinRequestBodyDataRateFeature>(feature);
+        var config = new ConfigurationBuilder().AddInMemoryCollection(
+            new Dictionary<string, string?> { ["Transfers:MinChunkBytesPerSecond"] = "1000" }).Build();
+
+        UploadEndpoints.ApplyMinDataRate(ctx, config);
+
+        Assert.Equal(expectSet, feature.MinDataRate is not null);
+        if (expectSet) Assert.Equal(1000, feature.MinDataRate!.BytesPerSecond);
+    }
+
+    private sealed class StrictRateFeature(bool supported) : IHttpMinRequestBodyDataRateFeature
+    {
+        private MinDataRate? _rate;
+        public MinDataRate? MinDataRate
+        {
+            get => _rate;
+            set => _rate = supported || value is null ? value : throw new NotSupportedException("HTTP/2 does not support per-request rates.");
+        }
     }
 
     // ---- R29: machine-readable error codes ----

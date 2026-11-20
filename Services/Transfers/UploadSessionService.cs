@@ -26,6 +26,7 @@ public sealed class UploadSessionService
     public const int DefaultBlobLockMinutes = 15;
     public const int DefaultMaxOpenSessionsPerUser = 8;
     public static readonly TimeSpan DefaultPieceReadTimeout = TimeSpan.FromSeconds(120);
+    public static readonly TimeSpan DefaultGrowTimeout = TimeSpan.FromSeconds(30);
     public const string BeginOperation = "UploadBegin";
     public const string CancelledByUserMessage = "Cancelled by user";
     public const string ReplacedMessage = "Replaced by a new upload of the same file";
@@ -39,6 +40,7 @@ public sealed class UploadSessionService
     public const string OtherUserUploadingMessage = "Someone else is uploading this file right now.";
     public const string UploadLostMessage = "This upload's data is no longer in storage. Please start it again.";
     public const string TooManyUploadsMessage = "You have too many uploads in progress. Finish or cancel one, then try again.";
+    public const string StorageSlowMessage = "Storage was slow to respond; the piece will be retried.";
     private const string StagingSuffix = ".cssupload-";
     private const int MaxSegmentLength = 255;
 
@@ -56,6 +58,12 @@ public sealed class UploadSessionService
 
     /// <summary>How long one piece may take to arrive before the read is abandoned. Settable for tests.</summary>
     internal TimeSpan PieceReadTimeout { get; set; } = DefaultPieceReadTimeout;
+
+    /// <summary>
+    /// How long growing the staging file may take. The grow runs inside a database row lock, so an SDK retrying for minutes
+    /// would otherwise hold a pooled connection that long. Settable for tests.
+    /// </summary>
+    internal TimeSpan GrowTimeout { get; set; } = DefaultGrowTimeout;
 
     public UploadSessionService(StorageAccessService access, IUploadSessionStore sessions, IStorageBackendResolver backends,
         AuditService audit, TimeProvider time, IConfiguration config, ILogger<UploadSessionService> logger)
@@ -286,8 +294,22 @@ public sealed class UploadSessionService
             var offset = (long)index * ChunkMath.ChunkSize;
             // Files quota is charged on logical size, so the staging file grows only as far as pieces actually land.
             if (target.Kind == StorageKind.FileShare)
-                await _sessions.EnsureStagingSizeAsync(session.Id, offset + expected,
-                    token => backend.GrowStagingAsync(target, session.StagingPath, offset + expected, token), ct);
+            {
+                using var growTimeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                growTimeout.CancelAfter(GrowTimeout);
+                try
+                {
+                    await _sessions.EnsureStagingSizeAsync(session.Id, offset + expected,
+                        token => backend.GrowStagingAsync(target, session.StagingPath, offset + expected, token), growTimeout.Token);
+                }
+                catch (Exception ex) when (growTimeout.IsCancellationRequested && !ct.IsCancellationRequested
+                                           && ex is OperationCanceledException or StorageFailureException)
+                {
+                    _logger.LogWarning("Growing staging for upload {SessionId} timed out after {Timeout} (correlation {CorrelationId}).",
+                        session.Id, GrowTimeout, ctx.CorrelationId);
+                    return new(AccessOutcome.Invalid, StorageSlowMessage, UploadErrorCodes.Retry);
+                }
+            }
 
             using var piece = new MemoryStream(buffer, 0, length, writable: false);
             await backend.WriteChunkAsync(target, session.StagingPath, session.FinalPath,
@@ -296,10 +318,12 @@ public sealed class UploadSessionService
         catch (StorageFailureException failure)
         {
             LogStorageFailure(failure, "chunk", target.Id, session.FinalPath, ctx);
-            // The staging file (or the session's blocks) is gone; no retry of this piece can succeed.
-            return failure.Kind == StorageFailureKind.NotFound
-                ? new(AccessOutcome.Conflict, UploadLostMessage, UploadErrorCodes.Restart)
-                : new(OutcomeOf(failure), failure.Message);
+            // The staging file (or the session's blocks) is gone or truncated; no retry of this piece can succeed.
+            if (failure.Kind == StorageFailureKind.NotFound)
+                return new(AccessOutcome.Conflict, UploadLostMessage, UploadErrorCodes.Restart);
+            if (failure.Kind == StorageFailureKind.Conflict && failure.Message == StorageErrorMapper.StagingIncompleteMessage)
+                return new(AccessOutcome.Conflict, failure.Message, UploadErrorCodes.Restart);
+            return new(OutcomeOf(failure), failure.Message);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -375,7 +399,7 @@ public sealed class UploadSessionService
         {
             // Not tied to the request: a client that disconnects mid-commit must not leave the session half-claimed.
             await _backends.For(target).CompleteUploadAsync(target, session.StagingPath, session.FinalPath, blockIds,
-                session.Overwrite, CancellationToken.None, session.Id);
+                session.Overwrite, CancellationToken.None, session.Id, session.Size);
         }
         catch (StorageFailureException failure)
         {
@@ -502,6 +526,7 @@ public sealed class UploadSessionService
         {
             _logger.LogError("Refusing to remove staging {StagingPath} for upload {SessionId}: it isn't this session's staging name, " +
                              "or target {TargetId} changed kind since the upload began.", session.StagingPath, session.Id, target.Id);
+            await _sessions.SetCleanupRefusedAsync(session.Id, CancellationToken.None);
             return false;
         }
         try

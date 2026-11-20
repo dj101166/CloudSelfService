@@ -30,6 +30,7 @@ internal sealed class ThrowingSessionStore : IUploadSessionStore
         CancellationToken ct = default) => None();
     public Task<IReadOnlyList<UploadSession>> ListAbortedWithStagingAsync(CancellationToken ct = default) => None();
     public Task SetStagingRemovedAsync(Guid id, CancellationToken ct = default) => throw Down();
+    public Task SetCleanupRefusedAsync(Guid id, CancellationToken ct = default) => throw Down();
     public Task<int> CountOpenForUserAsync(Guid userId, DateTimeOffset now, CancellationToken ct = default) => throw Down();
     public Task<long> SumOpenSizeForUserAsync(Guid userId, DateTimeOffset now, CancellationToken ct = default) => throw Down();
     public Task DeleteAsync(Guid id, CancellationToken ct = default) => throw Down();

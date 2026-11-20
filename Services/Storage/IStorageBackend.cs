@@ -22,9 +22,13 @@ public interface IStorageBackend
     /// <summary>Sets the Files staging file's logical size to exactly <paramref name="size"/> (callers only ever grow it). Blob: no-op.</summary>
     Task GrowStagingAsync(StorageTarget t, string stagingPath, long size, CancellationToken ct);
     Task WriteChunkAsync(StorageTarget t, string stagingPath, string finalPath, string blockId, long offset, Stream data, long length, byte[] md5, CancellationToken ct);
-    /// <summary>Stamps <paramref name="uploadSessionId"/> into the final item's metadata (cssp_upload_session) so a commit can be recognised later.</summary>
+    /// <summary>
+    /// Stamps <paramref name="uploadSessionId"/> into the final item's metadata (cssp_upload_session) so a commit can be
+    /// recognised later. Files: when <paramref name="expectedSize"/> is set, the staging file's length must equal it, or
+    /// the commit fails with Conflict (<see cref="StorageErrorMapper.StagingIncompleteMessage"/>) and nothing is renamed.
+    /// </summary>
     Task CompleteUploadAsync(StorageTarget t, string stagingPath, string finalPath, IReadOnlyList<string> blockIds, bool overwrite,
-        CancellationToken ct, Guid? uploadSessionId = null);
+        CancellationToken ct, Guid? uploadSessionId = null, long? expectedSize = null);
 
     /// <summary>
     /// Whether this session's commit definitely landed. Files: the staging file is gone and the final file exists carrying

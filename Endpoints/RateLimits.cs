@@ -11,7 +11,7 @@ namespace CloudSelfService.Endpoints;
 /// chunks (a 10 GB file is 2,560): a global concurrency cap, then per-user concurrency, then a per-user bucket of
 /// Transfers:ChunksPerMinute (default 600, about 40 MB/s of 4 MiB pieces). Each in-flight chunk PUT buffers one piece,
 /// so the concurrency caps are the memory bound: ChunkSize (4 MiB) x MaxConcurrentChunksPerUser (16) = 64 MiB per user,
-/// and ChunkSize x MaxConcurrentChunksTotal (128) = 512 MiB for the whole app.
+/// and ChunkSize x MaxConcurrentChunksTotal (64) = 256 MiB for the whole app.
 /// </summary>
 public static class RateLimits
 {
@@ -22,7 +22,8 @@ public static class RateLimits
     public const int DefaultMaxConcurrentPerUser = 4;
     public const int DefaultMaxConcurrentChunksPerUser = 16;
     public const int DefaultChunksPerMinute = 600;
-    public const int DefaultMaxConcurrentChunksTotal = 128;
+    // Below Npgsql's default MaxPoolSize (100): every chunk PUT can hold a pooled connection while its staging grows.
+    public const int DefaultMaxConcurrentChunksTotal = 64;
 
     public static string PartitionKey(HttpContext ctx) =>
         AppClaims.UserIdOf(ctx.User) is { } id

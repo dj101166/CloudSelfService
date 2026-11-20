@@ -44,13 +44,8 @@ public static class UploadEndpoints
         // Limits are set before antiforgery, which may read a form body. The chunk PUT is the group's only PUT.
         if (ctx.Features.Get<IHttpMaxRequestBodySizeFeature>() is { IsReadOnly: false } limit)
             limit.MaxRequestBodySize = isChunk ? ChunkMath.ChunkSize : ControlBodyLimit;
-        if (isChunk && ctx.Features.Get<IHttpMinRequestBodyDataRateFeature>() is { } rate)
-        {
-            // A client trickling a piece in would otherwise hold a buffer and a concurrency slot indefinitely.
-            var minRate = Math.Max(1, ctx.RequestServices.GetRequiredService<IConfiguration>()
-                .GetValue<int?>("Transfers:MinChunkBytesPerSecond") ?? DefaultMinChunkBytesPerSecond);
-            rate.MinDataRate = new MinDataRate(minRate, TimeSpan.FromSeconds(5));
-        }
+        if (isChunk)
+            ApplyMinDataRate(ctx, ctx.RequestServices.GetRequiredService<IConfiguration>());
         if (ctx.Request.Headers["Sec-Fetch-Site"].ToString() is "cross-site" or "same-site")
             return Error(StatusCodes.Status403Forbidden, CrossSiteMessage, UploadErrorCodes.Denied);
         if (ctx.Request.ContentLength > (isChunk ? ChunkMath.ChunkSize : ControlBodyLimit))
@@ -78,6 +73,20 @@ public static class UploadEndpoints
         if (AppClaims.UserIdOf(ctx.User) is null)
             return Results.Unauthorized();
         return await next(invocation);
+    }
+
+    /// <summary>
+    /// A client trickling a piece in would otherwise hold a buffer and a concurrency slot indefinitely. Kestrel supports a
+    /// per-request minimum body data rate on HTTP/1.1 only; on HTTP/2 and HTTP/3 setting it throws NotSupportedException,
+    /// and those connections rely on the piece read timeout instead.
+    /// </summary>
+    internal static void ApplyMinDataRate(HttpContext ctx, IConfiguration config)
+    {
+        if (!HttpProtocol.IsHttp11(ctx.Request.Protocol)
+            || ctx.Features.Get<IHttpMinRequestBodyDataRateFeature>() is not { } rate)
+            return;
+        var minRate = Math.Max(1, config.GetValue<int?>("Transfers:MinChunkBytesPerSecond") ?? DefaultMinChunkBytesPerSecond);
+        rate.MinDataRate = new MinDataRate(minRate, TimeSpan.FromSeconds(5));
     }
 
     private static Task<IResult> BeginAsync(HttpContext ctx, UploadSessionService uploads, ILoggerFactory loggers) =>

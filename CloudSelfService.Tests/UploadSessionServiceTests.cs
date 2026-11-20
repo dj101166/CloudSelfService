@@ -8,6 +8,7 @@ using CloudSelfService.Services.Identity;
 using CloudSelfService.Services.Storage;
 using CloudSelfService.Services.Transfers;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
@@ -1326,13 +1327,12 @@ public class UploadSessionServiceTests
     }
 
     [Fact]
-    public async Task Sweep_IdleOpenSession_AbortedBeforeExpiry()
+    public async Task Sweep_SessionThatNeverReceivedAChunk_AbortedWhenIdle()
     {
         var svc = Service();
         var file = Bytes(5 * Mi);
         var idle = await BeginOk(svc, _contrib, _share, "", "idle.bin", file.Length);
         var active = await BeginOk(svc, _contrib, _share, "", "active.bin", file.Length);
-        _time.Now = Start.AddMinutes(100);
         await Put(svc, _contrib.Id, active.SessionId, file, 0);
 
         await Cleanup().SweepAsync(Start.AddMinutes(121), default);
@@ -1342,6 +1342,27 @@ public class UploadSessionServiceTests
         var row = Assert.Single(await UploadAudits());
         Assert.Equal(UploadCleanupService.ExpiredMessage, row.Error);
         Assert.Equal("idle.bin", row.Path);
+    }
+
+    // R33: once a chunk has landed the session keeps its full 24 h, so an upload paused overnight resumes.
+    [Fact]
+    public async Task Sweep_SessionWithAChunk_KeepsFullLifetimeDespiteIdle()
+    {
+        var svc = Service();
+        var file = Bytes(9 * Mi);
+        var begin = await BeginOk(svc, _contrib, _share, "", "a.bin", file.Length);
+        await Put(svc, _contrib.Id, begin.SessionId, file, 0);
+
+        await Cleanup().SweepAsync(Start.AddHours(23), default);
+        Assert.Equal(UploadStatus.Open, (await _sessions.GetAsync(begin.SessionId))!.Status);
+
+        _time.Now = Start.AddHours(23);
+        var resumed = await BeginOk(svc, _contrib, _share, "", "a.bin", file.Length);
+        Assert.Equal(begin.SessionId, resumed.SessionId);
+        Assert.Equal(new[] { 0 }, resumed.Received);
+
+        await Cleanup().SweepAsync(Start.AddHours(24), default);
+        Assert.Equal(UploadStatus.Aborted, (await _sessions.GetAsync(begin.SessionId))!.Status);
     }
 
     [Fact]
@@ -1625,6 +1646,129 @@ public class UploadSessionServiceTests
         public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
         public override void SetLength(long value) => throw new NotSupportedException();
         public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    // ---- Round 4 ----
+
+    [Fact]
+    public async Task Complete_FilesStagingShorterThanSession_RestartAndAborted()
+    {
+        var svc = Service();
+        var data = Bytes(10);
+        var begin = await BeginOk(svc, _contrib, _share, "", "a.bin", data.Length);
+        await Put(svc, _contrib.Id, begin.SessionId, data, 0);
+        var staging = (await _sessions.GetAsync(begin.SessionId))!.StagingPath;
+        await _fake.GrowStagingAsync(_share, staging, 4, default);
+
+        var result = await svc.CompleteAsync(_contrib.Id, begin.SessionId, Ctx);
+
+        Assert.Equal(AccessOutcome.Conflict, result.Outcome);
+        Assert.Equal(UploadErrorCodes.Restart, result.Code);
+        Assert.Equal(StorageErrorMapper.StagingIncompleteMessage, result.Message);
+        var session = (await _sessions.GetAsync(begin.SessionId))!;
+        Assert.Equal(UploadStatus.Aborted, session.Status);
+        Assert.True(session.StagingRemoved);
+        Assert.Null(await _fake.GetItemAsync(_share, "a.bin", default));
+        Assert.Equal(AuditResult.Failed, Assert.Single(await UploadAudits()).Result);
+    }
+
+    [Fact]
+    public async Task Complete_FilesStagingLongerThanSession_Restart()
+    {
+        var svc = Service();
+        var data = Bytes(10);
+        var begin = await BeginOk(svc, _contrib, _share, "", "a.bin", data.Length);
+        await Put(svc, _contrib.Id, begin.SessionId, data, 0);
+        await _fake.GrowStagingAsync(_share, (await _sessions.GetAsync(begin.SessionId))!.StagingPath, 4096, default);
+
+        var result = await svc.CompleteAsync(_contrib.Id, begin.SessionId, Ctx);
+
+        Assert.Equal(UploadErrorCodes.Restart, result.Code);
+        Assert.Null(await _fake.GetItemAsync(_share, "a.bin", default));
+    }
+
+    [Fact]
+    public async Task PutChunk_FilesStagingTruncatedExternally_ConflictRestart()
+    {
+        var svc = Service();
+        var file = Bytes(9 * Mi);
+        var begin = await BeginOk(svc, _contrib, _share, "", "a.bin", file.Length);
+        await Put(svc, _contrib.Id, begin.SessionId, file, 1);
+        // Shrunk outside the portal; the recorded size still says 8 MiB, so the next piece isn't grown first.
+        await _fake.GrowStagingAsync(_share, (await _sessions.GetAsync(begin.SessionId))!.StagingPath, 0, default);
+
+        var result = await Put(svc, _contrib.Id, begin.SessionId, file, 0);
+
+        Assert.Equal(AccessOutcome.Conflict, result.Outcome);
+        Assert.Equal(UploadErrorCodes.Restart, result.Code);
+    }
+
+    [Fact]
+    public async Task PutChunk_GrowTimesOut_RetryAndChunkNotWritten()
+    {
+        var svc = Service();
+        svc.GrowTimeout = TimeSpan.FromMilliseconds(100);
+        _fake.GrowStagingDelay = TimeSpan.FromSeconds(30);
+        var data = Bytes(10);
+        var begin = await BeginOk(svc, _contrib, _share, "", "a.bin", data.Length);
+
+        var result = await Put(svc, _contrib.Id, begin.SessionId, data, 0);
+
+        Assert.Equal(AccessOutcome.Invalid, result.Outcome);
+        Assert.Equal(UploadErrorCodes.Retry, result.Code);
+        Assert.Equal(UploadSessionService.StorageSlowMessage, result.Message);
+        Assert.DoesNotContain(_fake.Calls, c => c.StartsWith("WriteChunk"));
+        Assert.Equal(0, (await _sessions.GetAsync(begin.SessionId))!.StagingSize);
+        Assert.Empty(await _sessions.ReceivedChunksAsync(begin.SessionId));
+
+        _fake.GrowStagingDelay = null;
+        Assert.Equal(AccessOutcome.Ok, (await Put(svc, _contrib.Id, begin.SessionId, data, 0)).Outcome);
+    }
+
+    [Fact]
+    public async Task Sweep_RefusedCleanup_LoggedOnceAndNotRetried()
+    {
+        var begin = await BeginOk(Service(), _contrib, _share, "", "a.bin", 3);
+        await _targets.UpsertAsync(_share with { Kind = StorageKind.BlobContainer });
+        var log = new CountingLogger();
+        var cleanup = new UploadCleanupService(_sessions, _targets, _users, _fake, new AuditService(_audit, NullLogger<AuditService>.Instance),
+            _time, new ConfigurationBuilder().Build(), log);
+
+        await cleanup.SweepAsync(Start.AddHours(25), default);
+        await cleanup.SweepAsync(Start.AddHours(26), default);
+        await cleanup.SweepAsync(Start.AddHours(27), default);
+
+        var session = (await _sessions.GetAsync(begin.SessionId))!;
+        Assert.True(session.CleanupRefused);
+        Assert.False(session.StagingRemoved);
+        Assert.Empty(await _sessions.ListAbortedWithStagingAsync());
+        Assert.Equal(1, log.Errors);
+        Assert.DoesNotContain(_fake.Calls, c => c.StartsWith("AbortUpload"));
+    }
+
+    [Fact]
+    public async Task Sweep_TargetDeleted_RefusalRecorded()
+    {
+        var begin = await BeginOk(Service(), _contrib, _share, "", "a.bin", 3);
+        var emptyTargets = new InMemoryTargetStore();
+        var cleanup = new UploadCleanupService(_sessions, emptyTargets, _users, _fake, new AuditService(_audit, NullLogger<AuditService>.Instance),
+            _time, new ConfigurationBuilder().Build(), NullLogger<UploadCleanupService>.Instance);
+
+        await cleanup.SweepAsync(Start.AddHours(25), default);
+
+        Assert.True((await _sessions.GetAsync(begin.SessionId))!.CleanupRefused);
+    }
+
+    private sealed class CountingLogger : ILogger<UploadCleanupService>
+    {
+        public int Errors;
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            if (logLevel >= LogLevel.Error) Interlocked.Increment(ref Errors);
+        }
     }
 
     // ---- Cleanup ----

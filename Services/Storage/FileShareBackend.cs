@@ -146,15 +146,31 @@ public sealed class FileShareBackend(StorageClientFactory clients) : IStorageBac
         Stream data, long length, byte[] md5, CancellationToken ct) =>
         StorageErrorMapper.RunAsync(async () =>
         {
-            await File(clients.Share(t), stagingPath).UploadRangeAsync(new HttpRange(offset, length), data,
-                new ShareFileUploadRangeOptions { TransactionalContentHash = md5 }, ct).ConfigureAwait(false);
+            RequireStagingName(stagingPath);
+            try
+            {
+                await File(clients.Share(t), stagingPath).UploadRangeAsync(new HttpRange(offset, length), data,
+                    new ShareFileUploadRangeOptions { TransactionalContentHash = md5 }, ct).ConfigureAwait(false);
+            }
+            catch (RequestFailedException ex) when (ex.Status == 416)
+            {
+                // The staging file is shorter than this range: it was truncated or replaced outside the portal.
+                throw new StorageFailureException(StorageFailureKind.Conflict, StorageErrorMapper.StagingIncompleteMessage, ex);
+            }
         }, ct);
 
     public Task CompleteUploadAsync(StorageTarget t, string stagingPath, string finalPath, IReadOnlyList<string> blockIds,
-        bool overwrite, CancellationToken ct, Guid? uploadSessionId = null) =>
+        bool overwrite, CancellationToken ct, Guid? uploadSessionId = null, long? expectedSize = null) =>
         StorageErrorMapper.RunAsync(async () =>
         {
+            RequireStagingName(stagingPath);
             var share = clients.Share(t);
+            if (expectedSize is { } size)
+            {
+                var props = await File(share, stagingPath).GetPropertiesAsync(cancellationToken: ct).ConfigureAwait(false);
+                if (props.Value.ContentLength != size)
+                    throw new StorageFailureException(StorageFailureKind.Conflict, StorageErrorMapper.StagingIncompleteMessage);
+            }
             await EnsureFoldersAsync(share, StoragePaths.Parent(finalPath), ct).ConfigureAwait(false);
             // The stamp is passed explicitly rather than relying on Rename carrying the staging file's metadata across.
             await File(share, stagingPath).RenameAsync(finalPath,
