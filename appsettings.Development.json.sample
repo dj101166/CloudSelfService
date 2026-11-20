@@ -1,4 +1,7 @@
 {
+  "ConnectionStrings": {
+    "Default": "Host=auseusdevpgsql.infinitycis.com;Port=5432;Database=cloudselfservice_dev;Username=app_cloudselfservice_dev;Password=;SSL Mode=Require"
+  },
   "Kestrel": {
     "Endpoints": {
       "Http": {
@@ -13,6 +16,11 @@
     }
   },
   "Auth": {
-    "Provider": "None"
+    "Provider": "Dev"
+  },
+  "Entra": {
+    "TenantId": "",
+    "ClientId": "",
+    "ClientSecret": ""
   }
 }

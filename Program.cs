@@ -1,5 +1,6 @@
 using CloudSelfService;
 using CloudSelfService.Services;
+using CloudSelfService.Services.Data;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -10,6 +11,24 @@ System.Globalization.CultureInfo.DefaultThreadCurrentUICulture = usCulture;
 
 builder.Services.AddRazorComponents().AddInteractiveServerComponents();
 builder.Services.AddSingleton<AppVersionService>();
+builder.Services.AddSingleton<PgsqlContext>();
+if (!string.IsNullOrWhiteSpace(builder.Configuration.GetConnectionString("Default")))
+{
+    builder.Services.AddSingleton<IUserStore, PgUserStore>();
+    builder.Services.AddSingleton<ICustomerStore, PgCustomerStore>();
+    builder.Services.AddSingleton<ITargetStore, PgTargetStore>();
+    builder.Services.AddSingleton<IGrantStore, PgGrantStore>();
+    builder.Services.AddSingleton<IAuditStore, PgAuditStore>();
+}
+else
+{
+    builder.Services.AddSingleton<IUserStore, InMemoryUserStore>();
+    builder.Services.AddSingleton<ICustomerStore, InMemoryCustomerStore>();
+    builder.Services.AddSingleton<ITargetStore, InMemoryTargetStore>();
+    builder.Services.AddSingleton<IGrantStore, InMemoryGrantStore>();
+    builder.Services.AddSingleton<IAuditStore, InMemoryAuditStore>();
+}
+builder.Services.AddSingleton<AuditService>();
 builder.Services.AddHsts(options => { options.MaxAge = TimeSpan.FromDays(365); });
 
 // ── Auth placeholder ─────────────────────────────────────────────────────────
@@ -31,6 +50,12 @@ if (!app.Environment.IsDevelopment())
 {
     app.UseExceptionHandler("/Error", createScopeForErrors: true);
     app.UseHsts();
+}
+
+{
+    var pg = app.Services.GetRequiredService<PgsqlContext>();
+    if (pg.IsAvailable) await pg.EnsureSchemaAsync();
+    else app.Logger.LogWarning("ConnectionStrings:Default is not set; using in-memory stores. Data is not persisted.");
 }
 
 app.UseHttpsRedirection();
