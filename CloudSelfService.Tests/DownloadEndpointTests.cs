@@ -4,6 +4,7 @@ using CloudSelfService.Services.Data;
 using CloudSelfService.Tests.Infrastructure;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
+using CloudSelfService.Services.Access;
 using Xunit;
 
 namespace CloudSelfService.Tests;
@@ -233,6 +234,159 @@ public sealed class DownloadEndpointTests : IDisposable
 
         Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
         Assert.Equal("The service is temporarily unavailable.", await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task Download_BackendThrowsUnexpectedOnOpen_503_AuditsFailed()
+    {
+        var (client, target) = await ReaderWithFileAsync("a.bin", Bytes(10));
+        _factory.Storage.UnexpectedOnOpenRead = new InvalidOperationException("sdk blew up");
+
+        var response = await client.GetAsync(Url(target, "a.bin"));
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.DoesNotContain("sdk blew up", await response.Content.ReadAsStringAsync());
+        var row = Assert.Single(await DownloadAuditAsync());
+        Assert.Equal((AuditResult.Failed, "a.bin"), (row.Result, row.Path));
+    }
+
+    [Fact]
+    public async Task Download_BackendThrowsUnexpectedOnGetItem_503_AuditsFailed()
+    {
+        var (client, target) = await ReaderWithFileAsync("a.bin", Bytes(10));
+        _factory.Storage.UnexpectedOnGetItem = new InvalidOperationException("sdk blew up");
+
+        var response = await client.GetAsync(Url(target, "a.bin"));
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        var row = Assert.Single(await DownloadAuditAsync());
+        Assert.Equal((AuditResult.Failed, target.CustomerId), (row.Result, row.CustomerId));
+    }
+
+    [Fact]
+    public async Task Download_AuditPath_IsNormalised()
+    {
+        var (client, target) = await ReaderWithFileAsync("Docs/a.bin", Bytes(10));
+
+        await (await client.GetAsync(Url(target, "/Docs//a.bin"))).Content.ReadAsByteArrayAsync();
+
+        Assert.Equal("Docs/a.bin", Assert.Single(await DownloadAuditAsync()).Path);
+    }
+
+    [Fact]
+    public async Task Download_ShortRead_AbortsAndAuditsFailedWithBytesSoFar()
+    {
+        var (client, target) = await ReaderWithFileAsync("a.bin", Bytes(1000));
+        _factory.Storage.WrapReadStream = s => new TruncatingStream(s, 400);
+
+        await Assert.ThrowsAnyAsync<Exception>(async () =>
+            await (await client.GetAsync(Url(target, "a.bin"))).Content.ReadAsByteArrayAsync());
+
+        var row = await SingleAuditEventuallyAsync();
+        Assert.Equal((AuditResult.Failed, 400L), (row.Result, row.Bytes));
+    }
+
+    [Fact]
+    public async Task Download_BackendFailsMidStream_AbortsAndAuditsFailed()
+    {
+        var (client, target) = await ReaderWithFileAsync("a.bin", Bytes(1000));
+        _factory.Storage.WrapReadStream = s => new TruncatingStream(s, 300, throwAtEnd: true);
+
+        await Assert.ThrowsAnyAsync<Exception>(async () =>
+            await (await client.GetAsync(Url(target, "a.bin"))).Content.ReadAsByteArrayAsync());
+
+        var row = await SingleAuditEventuallyAsync();
+        Assert.Equal((AuditResult.Failed, 300L), (row.Result, row.Bytes));
+    }
+
+    [Fact]
+    public async Task Download_ClientDisconnects_AuditsFailedCancelled()
+    {
+        var (client, target) = await ReaderWithFileAsync("a.bin", Bytes(1000));
+        var firstChunkSent = new TaskCompletionSource();
+        _factory.Storage.WrapReadStream = s => new BlockingAfterFirstReadStream(s, 100, firstChunkSent);
+        using var cts = new CancellationTokenSource();
+
+        using var response = await client.GetAsync(Url(target, "a.bin"), HttpCompletionOption.ResponseHeadersRead, cts.Token);
+        await firstChunkSent.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        cts.Cancel();
+        response.Dispose();
+
+        var row = await SingleAuditEventuallyAsync();
+        Assert.Equal(AuditResult.Failed, row.Result);
+        Assert.Equal(StorageAccessService.CancelledMessage, row.Error);
+        Assert.Equal(100L, row.Bytes);
+    }
+
+    private async Task<AuditEvent> SingleAuditEventuallyAsync()
+    {
+        for (var i = 0; i < 100; i++)
+        {
+            if ((await DownloadAuditAsync()).Count > 0)
+            {
+                await Task.Delay(50);
+                return Assert.Single(await DownloadAuditAsync());
+            }
+            await Task.Delay(50);
+        }
+        throw new TimeoutException("No download audit row was written.");
+    }
+
+    private sealed class TruncatingStream(Stream inner, int limit, bool throwAtEnd = false) : Stream
+    {
+        private int _served;
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct = default)
+        {
+            if (_served >= limit)
+            {
+                if (throwAtEnd) throw new IOException("backend connection reset");
+                return 0;
+            }
+            var n = await inner.ReadAsync(buffer[..Math.Min(buffer.Length, limit - _served)], ct);
+            _served += n;
+            return n;
+        }
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    private sealed class BlockingAfterFirstReadStream(Stream inner, int firstChunk, TaskCompletionSource signal) : Stream
+    {
+        private bool _first = true;
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct = default)
+        {
+            if (_first)
+            {
+                _first = false;
+                var n = await inner.ReadAsync(buffer[..firstChunk], ct);
+                signal.TrySetResult();
+                return n;
+            }
+            await Task.Delay(Timeout.Infinite, ct);
+            return 0;
+        }
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
     private sealed class ThrowingTargetStore : ITargetStore

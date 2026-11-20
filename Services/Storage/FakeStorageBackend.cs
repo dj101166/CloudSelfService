@@ -31,6 +31,13 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
     public bool ThrowUnreachable { get; set; }
     public bool ThrowNotAuthorised { get; set; }
 
+    /// <summary>Test hooks: a non-storage exception (as a raw SDK or backend bug would throw) from GetItem / OpenRead.</summary>
+    public Exception? UnexpectedOnGetItem { get; set; }
+    public Exception? UnexpectedOnOpenRead { get; set; }
+
+    /// <summary>Test hook: wraps every stream OpenRead returns, to simulate slow, short or failing reads.</summary>
+    public Func<Stream, Stream>? WrapReadStream { get; set; }
+
     /// <summary>Test hook: a folder move fails (Unreachable) after copying this many files, leaving a partial move.</summary>
     public int? FailFolderMoveAfterFiles { get; set; }
 
@@ -136,18 +143,21 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
     public Task<StorageItem?> GetItemAsync(StorageTarget t, string path, CancellationToken ct)
     {
         Enter($"GetItem:{path}");
+        if (UnexpectedOnGetItem is { } getItemFault) throw getItemFault;
         lock (_gate) return Task.FromResult(Item(TreeFor(t.Id), path));
     }
 
     public Task<Stream> OpenReadAsync(StorageTarget t, string path, long offset, long? length, CancellationToken ct)
     {
         Enter($"OpenRead:{path}");
+        if (UnexpectedOnOpenRead is { } openFault) throw openFault;
         lock (_gate)
         {
             if (!TreeFor(t.Id).Files.TryGetValue(path, out var f)) throw Fail(StorageFailureKind.NotFound);
             var start = Math.Min(offset, f.Data.LongLength);
             var count = Math.Min(length ?? long.MaxValue, f.Data.LongLength - start);
-            return Task.FromResult<Stream>(new MemoryStream(f.Data, checked((int)start), checked((int)count), writable: false));
+            Stream stream = new MemoryStream(f.Data, checked((int)start), checked((int)count), writable: false);
+            return Task.FromResult(WrapReadStream?.Invoke(stream) ?? stream);
         }
     }
 

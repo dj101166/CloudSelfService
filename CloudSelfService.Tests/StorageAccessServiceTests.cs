@@ -371,6 +371,36 @@ public class StorageAccessServiceTests
     }
 
     [Fact]
+    public async Task AuthorizeDownload_BackendThrowsUnexpected_UnavailableAndLogsError()
+    {
+        _fake.UnexpectedOnGetItem = new InvalidOperationException("sdk blew up");
+
+        var result = await _svc.AuthorizeDownloadAsync(_fullUserA.Id, _ta.Id, "a.txt", Ctx);
+
+        Assert.Equal(AccessOutcome.Unavailable, result.Outcome);
+        Assert.Equal(StorageErrorMapper.UnreachableMessage, result.Message);
+        Assert.Equal(_ta.Id, result.Value.Target.Id);
+        Assert.Equal("a.txt", result.Value.Item.Path);
+        Assert.Equal(LogLevel.Error, Assert.Single(_log.Entries).Level);
+    }
+
+    [Fact]
+    public async Task AuthorizeDownload_StoreFailure_Propagates()
+    {
+        var svc = Service(grants: new ThrowingGrantStore());
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => svc.AuthorizeDownloadAsync(_fullUserA.Id, _ta.Id, "a.txt", Ctx));
+    }
+
+    [Fact]
+    public async Task AuthorizeDownload_Folder_ReturnsFolderItem()
+    {
+        await Seed(_ta, "Docs");
+        var result = await _svc.AuthorizeDownloadAsync(_fullUserA.Id, _ta.Id, "Docs", Ctx);
+        Assert.True(result.Value.Item.IsFolder);
+    }
+
+    [Fact]
     public async Task Delete_BackendFailure_LogsWarningAndAuditsFailed()
     {
         _fake.ThrowNotAuthorised = true;
@@ -845,6 +875,14 @@ public class StorageAccessServiceTests
             Task.FromResult<IReadOnlyList<Grant>>(new[] { grant });
         public Task SetAsync(Grant g, CancellationToken ct = default) => throw new NotSupportedException();
         public Task RemoveAsync(Guid customerId, Guid targetId, CancellationToken ct = default) => throw new NotSupportedException();
+    }
+
+    private sealed class ThrowingGrantStore : IGrantStore
+    {
+        public Task<Grant?> GetAsync(Guid customerId, Guid targetId, CancellationToken ct = default) => throw new InvalidOperationException("db down");
+        public Task<IReadOnlyList<Grant>> ListForCustomerAsync(Guid customerId, CancellationToken ct = default) => throw new InvalidOperationException("db down");
+        public Task SetAsync(Grant g, CancellationToken ct = default) => throw new InvalidOperationException("db down");
+        public Task RemoveAsync(Guid customerId, Guid targetId, CancellationToken ct = default) => throw new InvalidOperationException("db down");
     }
 
     private sealed class ThrowingBackend(Exception ex) : IStorageBackend, IStorageBackendResolver

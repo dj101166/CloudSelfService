@@ -132,19 +132,29 @@ public sealed class StorageAccessService
         if (!await AllowedAsync(r, targetId, StorageOperation.Download, normalized, ctx))
             return new(AccessOutcome.Denied, default, DeniedMessage);
 
+        // After authorisation every result carries the target and the normalised path, so the endpoint can audit
+        // without another lookup. Invalid with Item.IsFolder set is the explicit "that is a folder" signal.
+        var known = (r.Target!, new StorageItem(StoragePath.Leaf(normalized), normalized, false, null, null));
         try
         {
             var item = await _backends.For(r.Target!).GetItemAsync(r.Target!, normalized, ct);
             if (item is null)
-                return new(AccessOutcome.NotFound, default, StorageErrorMapper.NotFoundMessage);
+                return new(AccessOutcome.NotFound, known, StorageErrorMapper.NotFoundMessage);
             if (item.IsFolder)
-                return new(AccessOutcome.Invalid, default, NotAFileMessage);
+                return new(AccessOutcome.Invalid, (r.Target!, item), NotAFileMessage);
             return new(AccessOutcome.Ok, (r.Target!, item));
         }
         catch (StorageFailureException failure)
         {
             LogFailure(failure, StorageOperation.Download, targetId, normalized, ctx);
-            return new(OutcomeOf(failure), default, failure.Message);
+            return new(OutcomeOf(failure), known, failure.Message);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Only store (database) failures may propagate; anything from the backend is storage trouble.
+            _logger.LogError(ex, "Storage {Operation} failed unexpectedly on target {TargetId} at {Path} (correlation {CorrelationId}).",
+                StorageOperation.Download, targetId, normalized, ctx.CorrelationId);
+            return new(AccessOutcome.Unavailable, known, StorageErrorMapper.UnreachableMessage);
         }
     }
 
