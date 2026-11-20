@@ -401,6 +401,71 @@ public class StorageAccessServiceTests
         Assert.True(result.Value.Item.IsFolder);
     }
 
+    // ---- names with invisible characters: existing items stay reachable, new names are strict ----
+
+    private async Task SeedFile(StorageTarget t, string path)
+    {
+        var data = new byte[] { 1, 2, 3 };
+        var staging = path + ".up";
+        await _fake.BeginUploadAsync(t, staging, 3, default);
+        await _fake.WriteChunkAsync(t, staging, path, "b0", 0, new MemoryStream(data), 3,
+            System.Security.Cryptography.MD5.HashData(data), default);
+        await _fake.CompleteUploadAsync(t, staging, path, new[] { "b0" }, true, default);
+    }
+
+    [Fact]
+    public async Task ExistingFileWithZeroWidthSpace_DownloadableRenamableAndDeletable()
+    {
+        const string name = "report\u200B.pdf";
+        await SeedFile(_ta, name);
+
+        Assert.Equal(AccessOutcome.Ok, (await _svc.AuthorizeDownloadAsync(_fullUserA.Id, _ta.Id, name, Ctx)).Outcome);
+        Assert.Equal(AccessOutcome.Ok, (await _svc.MoveAsync(_fullUserA.Id, _ta.Id, name, "report.pdf", Ctx)).Outcome);
+        await SeedFile(_ta, name);
+        Assert.Equal(AccessOutcome.Ok, (await _svc.DeleteAsync(_fullUserA.Id, _ta.Id, name, Ctx)).Outcome);
+    }
+
+    [Fact]
+    public async Task ExistingFolderWithSoftHyphen_Listable()
+    {
+        await Seed(_ta, "Q1\u00ADreports");
+
+        var result = await _svc.ListAsync(_fullUserA.Id, _ta.Id, "Q1\u00ADreports", null, Ctx);
+
+        Assert.Equal(AccessOutcome.Ok, result.Outcome);
+    }
+
+    [Fact]
+    public async Task Move_RenameToNameWithBidiOverride_Invalid()
+    {
+        await SeedFile(_ta, "x.pdf");
+
+        var result = await _svc.MoveAsync(_fullUserA.Id, _ta.Id, "x.pdf", "x\u202Eexe.pdf", Ctx);
+
+        Assert.Equal(AccessOutcome.Invalid, result.Outcome);
+        Assert.Equal(StoragePath.InvisibleCharactersMessage, result.Message);
+    }
+
+    [Fact]
+    public async Task Move_ToFolderWithExistingInvisibleCharacterName_KeepingLeaf_Ok()
+    {
+        await SeedFile(_ta, "x.pdf");
+        await Seed(_ta, "Q1\u00ADreports");
+
+        var result = await _svc.MoveAsync(_fullUserA.Id, _ta.Id, "x.pdf", "Q1\u00ADreports/x.pdf", Ctx);
+
+        Assert.Equal(AccessOutcome.Ok, result.Outcome);
+    }
+
+    [Fact]
+    public async Task CreateFolder_NameWithRightToLeftMark_Invalid()
+    {
+        var result = await _svc.CreateFolderAsync(_fullUserA.Id, _ta.Id, "", "a\u200Fb", Ctx);
+
+        Assert.Equal(AccessOutcome.Invalid, result.Outcome);
+        Assert.Empty(_fake.Calls);
+    }
+
     [Fact]
     public async Task Delete_BackendFailure_LogsWarningAndAuditsFailed()
     {

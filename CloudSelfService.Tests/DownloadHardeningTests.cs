@@ -67,9 +67,48 @@ public sealed class DownloadHardeningTests
 
         Assert.Equal(HttpStatusCode.TooManyRequests, fifth.StatusCode);
         Assert.Equal(RateLimits.RejectedMessage, await fifth.Content.ReadAsStringAsync());
+        Assert.Equal("5", fifth.Headers.GetValues("Retry-After").Single());
         Assert.Equal("text/plain", fifth.Content.Headers.ContentType?.MediaType);
         Assert.Equal(HttpStatusCode.OK, otherUser.StatusCode);
         Assert.All(finished, r => Assert.Equal(HttpStatusCode.OK, r.StatusCode));
+    }
+
+    [Fact]
+    public async Task Download_ConcurrencyRejections_DoNotSpendBucketTokens()
+    {
+        using var factory = new TestAppFactory(("Transfers:RequestsPerMinute", "6"), ("Transfers:MaxConcurrentPerUser", "1"));
+        var client = await factory.CreateClientAs("customer-read");
+        var target = await factory.DemoTargetAsync("Read");
+        await factory.SeedFileAsync(target, "a.bin", Bytes(100));
+        var gate = new TaskCompletionSource();
+        var opened = new TaskCompletionSource();
+        factory.Storage.WrapReadStream = s => { opened.TrySetResult(); return new GatedStream(s, gate.Task); };
+
+        var running = client.GetAsync(Url(target, "a.bin"));
+        await opened.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        for (var i = 0; i < 10; i++)
+            Assert.Equal(HttpStatusCode.TooManyRequests, (await client.GetAsync(Url(target, "a.bin"))).StatusCode);
+        gate.SetResult();
+        await running;
+        factory.Storage.WrapReadStream = null;
+
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync(Url(target, "a.bin"))).StatusCode);
+    }
+
+    [Fact]
+    public async Task Download_BlobPreconditionFailsMidStream_AuditsChangedDuringRead()
+    {
+        using var factory = new TestAppFactory();
+        var client = await factory.CreateClientAs("customer-read");
+        var target = await factory.DemoTargetAsync("Read");
+        await factory.SeedFileAsync(target, "a.bin", Bytes(1000));
+        factory.Storage.WrapReadStream = s => new FailingStream(new Azure.RequestFailedException(412, "changed"));
+
+        await Assert.ThrowsAnyAsync<Exception>(async () =>
+            await (await client.GetAsync(Url(target, "a.bin"))).Content.ReadAsByteArrayAsync());
+
+        var row = await SingleAuditEventuallyAsync(factory);
+        Assert.Equal((AuditResult.Failed, StorageErrorMapper.ChangedDuringReadMessage), (row.Result, row.Error));
     }
 
     [Fact]
@@ -248,24 +287,69 @@ public sealed class DownloadHardeningTests
         Assert.Equal("dev-customer-read@customer.example", Assert.Single(await AuditAsync(factory)).UserDisplay);
     }
 
+    // ---- existing names with invisible characters stay usable ----
+
+    [Fact]
+    public async Task Download_ExistingFileWithZeroWidthSpace_200()
+    {
+        using var factory = new TestAppFactory();
+        var client = await factory.CreateClientAs("customer-read");
+        var target = await factory.DemoTargetAsync("Read");
+        const string name = "report\u200B.pdf";
+        await factory.SeedFileAsync(target, name, Bytes(10));
+
+        var response = await client.GetAsync(Url(target, name));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("filename*=UTF-8''report_.pdf", response.Content.Headers.ContentDisposition!.ToString().Replace("\"", ""));
+    }
+
     // ---- name hardening ----
 
     [Theory]
-    [InlineData("invoice‮fdp.exe")]
-    [InlineData("a‎b")]
-    [InlineData("a‏b")]
-    [InlineData("a‪b")]
-    [InlineData("a⁦b")]
-    [InlineData("a⁩b")]
-    [InlineData("a﻿b")]
+    [InlineData("invoice\u202Efdp.exe")]
+    [InlineData("a\u200Eb")]
+    [InlineData("a\u200Fb")]
+    [InlineData("a\u202Ab")]
+    [InlineData("a\u2066b")]
+    [InlineData("a\u2069b")]
+    [InlineData("a\uFEFFb")]
     [InlineData("a\u0080b")]
     [InlineData("a\u009Fb")]
     public void TryValidateSegment_InvisibleOrBidiCharacter_Rejected(string name)
     {
-        Assert.False(StoragePath.TryValidateSegment(name, out var error));
+        Assert.False(StoragePath.TryValidateSegment(name, out var error, strict: true));
         Assert.Equal(StoragePath.InvisibleCharactersMessage, error);
         Assert.False(StoragePath.TryValidateName(name, out _));
+    }
+
+    // Existing items must stay reachable: the lenient path used to locate them accepts format and C1 characters.
+    [Theory]
+    [InlineData("invoice\u202Efdp.exe")]
+    [InlineData("a\u200Bb")]
+    [InlineData("a\u00ADb")]
+    [InlineData("a\uFEFFb")]
+    [InlineData("a\u0085b")]
+    public void TryNormalizePath_ExistingNameWithInvisibleCharacter_Accepted(string name)
+    {
+        Assert.True(StoragePath.TryNormalizePath("Docs/" + name, out var normalized, out _));
+        Assert.Equal("Docs/" + name, normalized);
+    }
+
+    [Theory]
+    [InlineData("a\u0001b")]
+    [InlineData("a\u007Fb")]
+    [InlineData("a:b")]
+    public void TryNormalizePath_StillRejectsControlAndReservedCharacters(string name) =>
         Assert.False(StoragePath.TryNormalizePath("Docs/" + name, out _, out _));
+
+    [Fact]
+    public void DisplayName_ReplacesInvisibleCharactersWithUnderscore()
+    {
+        Assert.Equal("report_.pdf", StoragePath.DisplayName("report\u200B.pdf"));
+        Assert.Equal("x_exe.pdf", StoragePath.DisplayName("x\u202Eexe.pdf"));
+        Assert.Equal("a_b", StoragePath.DisplayName("a\u0085b"));
+        Assert.Equal("Q3 Ünï.txt", StoragePath.DisplayName("Q3 Ünï.txt"));
     }
 
     [Fact]
@@ -275,7 +359,7 @@ public sealed class DownloadHardeningTests
     [Fact]
     public void Attachment_BidiOverride_ReplacedInBothFilenames()
     {
-        var header = ContentDispositionHeader.Attachment("invoice‮fdp.exe");
+        var header = ContentDispositionHeader.Attachment("invoice\u202Efdp.exe");
 
         Assert.Contains("filename=\"invoice_fdp.exe\"", header);
         Assert.Contains("filename*=UTF-8''invoice_fdp.exe", header);
@@ -283,8 +367,8 @@ public sealed class DownloadHardeningTests
     }
 
     [Theory]
-    [InlineData("a‎b")]
-    [InlineData("a﻿b")]
+    [InlineData("a\u200Eb")]
+    [InlineData("a\uFEFFb")]
     [InlineData("a\u0085b")]
     public void Attachment_InvisibleCharacters_Replaced(string name) =>
         Assert.Contains("filename*=UTF-8''a_b", ContentDispositionHeader.Attachment(name));
@@ -297,6 +381,21 @@ public sealed class DownloadHardeningTests
     [InlineData("x.cſſupload-0123456789abcdef0123456789abcdef", false)]
     public void IsHiddenName_UsesUpperInvariantFolding(string name, bool hidden) =>
         Assert.Equal(hidden, StoragePaths.IsHiddenName(name));
+
+    private sealed class FailingStream(Exception fault) : Stream
+    {
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct = default) => throw fault;
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw fault;
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
 
     private sealed class GatedStream(Stream inner, Task gate, int chunk = 80 * 1024, TaskCompletionSource? afterFirstChunk = null) : Stream
     {

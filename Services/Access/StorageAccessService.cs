@@ -185,6 +185,11 @@ public sealed class StorageAccessService
     {
         if (!TryNormalize(from, out var source, out var error) || !TryNormalize(to, out var dest, out error))
             return new(AccessOutcome.Invalid, error);
+        // The destination name is being created, so it gets the strict check; an unchanged leaf (a plain move) is not
+        // a new name, and the folders on the way already exist.
+        if (dest.Length > 0 && StoragePath.Leaf(dest) != StoragePath.Leaf(source)
+            && !StoragePath.TryValidateName(StoragePath.Leaf(dest), out error))
+            return new(AccessOutcome.Invalid, error);
         if (source.Length == 0 || dest.Length == 0)
             return new(AccessOutcome.Invalid, RootNotAllowedMessage);
         if (source == dest)

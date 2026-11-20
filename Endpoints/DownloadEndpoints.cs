@@ -197,6 +197,7 @@ public static class DownloadEndpoints
         }
         catch (Exception ex)
         {
+            var changed = ex is Azure.RequestFailedException { Status: 412 };
             var disconnected = !revoked && (ex is OperationCanceledException or IOException) && ctx.RequestAborted.IsCancellationRequested;
             if (revoked)
                 log.LogWarning("Download of {Path} on target {TargetId} stopped after {Bytes} bytes: access revoked (correlation {CorrelationId}).",
@@ -206,7 +207,7 @@ public static class DownloadEndpoints
                     auditPath, targetId, written, auditCtx.CorrelationId);
             // Headers are already sent, so the only honest signal left is a truncated, aborted response.
             await Record(customerId, auditPath, written, AuditResult.Failed,
-                revoked ? RevokedMessage : disconnected ? StorageAccessService.CancelledMessage : StorageErrorMapper.UnreachableMessage);
+                revoked ? RevokedMessage : changed ? StorageErrorMapper.ChangedDuringReadMessage : disconnected ? StorageAccessService.CancelledMessage : StorageErrorMapper.UnreachableMessage);
             ctx.Abort();
         }
         finally

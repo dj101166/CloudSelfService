@@ -27,10 +27,12 @@ public static class RateLimits
         {
             context.HttpContext.Response.StatusCode = StatusCodes.Status429TooManyRequests;
             context.HttpContext.Response.Headers.CacheControl = "no-store";
+            context.HttpContext.Response.Headers.RetryAfter = "5";
             context.HttpContext.Response.ContentType = "text/plain; charset=utf-8";
             await context.HttpContext.Response.WriteAsync(RejectedMessage, ct);
         };
         options.AddPolicy<string>(Transfers, ctx => RateLimitPartition.Get(PartitionKey(ctx), _ => new ChainedLimiter(
+            new ConcurrencyLimiter(new ConcurrencyLimiterOptions { PermitLimit = concurrent, QueueLimit = 0 }),
             new TokenBucketRateLimiter(new TokenBucketRateLimiterOptions
             {
                 TokenLimit = perMinute,
@@ -38,16 +40,15 @@ public static class RateLimits
                 ReplenishmentPeriod = TimeSpan.FromMinutes(1),
                 QueueLimit = 0,
                 AutoReplenishment = true,
-            }),
-            new ConcurrencyLimiter(new ConcurrencyLimiterOptions { PermitLimit = concurrent, QueueLimit = 0 }))));
+            }))));
     }
 
-    /// <summary>Both limiters must grant a permit; the concurrency permit is held until the request ends.</summary>
+    /// <summary>Both limiters must grant a permit; concurrency is tried first so a request it rejects does not spend a bucket token.</summary>
     private sealed class ChainedLimiter(RateLimiter first, RateLimiter second) : RateLimiter
     {
         public override TimeSpan? IdleDuration => Min(first.IdleDuration, second.IdleDuration);
 
-        public override RateLimiterStatistics? GetStatistics() => second.GetStatistics();
+        public override RateLimiterStatistics? GetStatistics() => first.GetStatistics();
 
         protected override RateLimitLease AttemptAcquireCore(int permitCount)
         {
