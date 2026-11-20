@@ -2,45 +2,54 @@ using System.Globalization;
 
 namespace CloudSelfService.Services.Transfers;
 
+public enum RangeParseKind { None, Satisfiable, Unsatisfiable }
+
+public readonly record struct RangeParseResult(RangeParseKind Kind, long Start, long End);
+
 public static class RangeHeader
 {
-    public static bool TryParse(string? header, long length, out long start, out long end)
+    private static readonly RangeParseResult NoRange = new(RangeParseKind.None, 0, 0);
+    private static readonly RangeParseResult Unsatisfiable = new(RangeParseKind.Unsatisfiable, 0, 0);
+
+    /// <summary>
+    /// RFC 9110: an absent, malformed or multi-range header is ignored (None, serve the whole file);
+    /// a syntactically valid single range that selects nothing is Unsatisfiable (416).
+    /// </summary>
+    public static RangeParseResult Parse(string? header, long length)
     {
-        start = end = 0;
         const string prefix = "bytes=";
-        if (length <= 0 || header is null || !header.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-            return false;
+        if (header is null || !header.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            return NoRange;
 
         var spec = header[prefix.Length..].Trim();
         if (spec.Contains(','))
-            return false;
+            return NoRange;
 
         var dash = spec.IndexOf('-');
         if (dash < 0)
-            return false;
+            return NoRange;
         var first = spec[..dash].Trim();
         var last = spec[(dash + 1)..].Trim();
 
         if (first.Length == 0)
         {
-            if (!TryNumber(last, out var suffix) || suffix <= 0)
-                return false;
-            start = Math.Max(0, length - suffix);
-            end = length - 1;
-            return true;
+            if (!TryNumber(last, out var suffix))
+                return NoRange;
+            if (suffix <= 0 || length <= 0)
+                return Unsatisfiable;
+            return new(RangeParseKind.Satisfiable, Math.Max(0, length - suffix), length - 1);
         }
 
-        if (!TryNumber(first, out start) || start >= length)
-            return false;
-        if (last.Length == 0)
-        {
-            end = length - 1;
-            return true;
-        }
-        if (!TryNumber(last, out end) || end < start)
-            return false;
-        end = Math.Min(end, length - 1);
-        return true;
+        if (!TryNumber(first, out var start))
+            return NoRange;
+        long end = 0;
+        var openEnded = last.Length == 0;
+        if (!openEnded && (!TryNumber(last, out end) || end < start))
+            return NoRange;
+
+        if (start >= length)
+            return Unsatisfiable;
+        return new(RangeParseKind.Satisfiable, start, openEnded ? length - 1 : Math.Min(end, length - 1));
     }
 
     private static bool TryNumber(string s, out long value) =>

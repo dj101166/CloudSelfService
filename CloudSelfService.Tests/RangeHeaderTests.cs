@@ -5,65 +5,65 @@ namespace CloudSelfService.Tests;
 
 public class RangeHeaderTests
 {
-    [Fact]
-    public void TryParse_BytesStartEnd()
+    private static void AssertRange(string header, long length, long start, long end)
     {
-        Assert.True(RangeHeader.TryParse("bytes=0-99", 1000, out var s, out var e));
-        Assert.Equal((0L, 99L), (s, e));
+        var r = RangeHeader.Parse(header, length);
+        Assert.Equal(RangeParseKind.Satisfiable, r.Kind);
+        Assert.Equal((start, end), (r.Start, r.End));
     }
 
     [Fact]
-    public void TryParse_OpenEnded()
-    {
-        Assert.True(RangeHeader.TryParse("bytes=500-", 1000, out var s, out var e));
-        Assert.Equal((500L, 999L), (s, e));
-    }
+    public void Parse_BytesStartEnd() => AssertRange("bytes=0-99", 1000, 0, 99);
 
     [Fact]
-    public void TryParse_Suffix()
-    {
-        Assert.True(RangeHeader.TryParse("bytes=-100", 1000, out var s, out var e));
-        Assert.Equal((900L, 999L), (s, e));
-    }
+    public void Parse_OpenEnded() => AssertRange("bytes=500-", 1000, 500, 999);
 
     [Fact]
-    public void TryParse_EndBeyondLength_Clamped()
-    {
-        Assert.True(RangeHeader.TryParse("bytes=900-5000", 1000, out var s, out var e));
-        Assert.Equal((900L, 999L), (s, e));
-    }
+    public void Parse_Suffix() => AssertRange("bytes=-100", 1000, 900, 999);
 
     [Fact]
-    public void TryParse_SuffixLargerThanLength_WholeFile()
-    {
-        Assert.True(RangeHeader.TryParse("bytes=-5000", 1000, out var s, out var e));
-        Assert.Equal((0L, 999L), (s, e));
-    }
+    public void Parse_EndBeyondLength_Clamped() => AssertRange("bytes=900-5000", 1000, 900, 999);
 
     [Fact]
-    public void TryParse_MultiRange_False() =>
-        Assert.False(RangeHeader.TryParse("bytes=0-10,20-30", 1000, out _, out _));
+    public void Parse_SuffixLargerThanLength_WholeFile() => AssertRange("bytes=-5000", 1000, 0, 999);
 
     [Fact]
-    public void TryParse_StartBeyondLength_False() =>
-        Assert.False(RangeHeader.TryParse("bytes=1000-", 1000, out _, out _));
+    public void Parse_MultiRange_None() =>
+        Assert.Equal(RangeParseKind.None, RangeHeader.Parse("bytes=0-10,20-30", 1000).Kind);
 
     [Fact]
-    public void TryParse_EndBeforeStart_False() =>
-        Assert.False(RangeHeader.TryParse("bytes=50-10", 1000, out _, out _));
+    public void Parse_StartBeyondLength_Unsatisfiable() =>
+        Assert.Equal(RangeParseKind.Unsatisfiable, RangeHeader.Parse("bytes=1000-", 1000).Kind);
 
     [Fact]
-    public void TryParse_Null_False() => Assert.False(RangeHeader.TryParse(null, 1000, out _, out _));
+    public void Parse_EndBeforeStart_NoneBecauseMalformed() =>
+        Assert.Equal(RangeParseKind.None, RangeHeader.Parse("bytes=50-10", 1000).Kind);
+
+    [Fact]
+    public void Parse_Null_None() => Assert.Equal(RangeParseKind.None, RangeHeader.Parse(null, 1000).Kind);
 
     [Theory]
     [InlineData("")]
     [InlineData("items=0-9")]
     [InlineData("bytes=abc-")]
     [InlineData("bytes=-")]
-    [InlineData("bytes=-0")]
-    public void TryParse_Malformed_False(string header) =>
-        Assert.False(RangeHeader.TryParse(header, 1000, out _, out _));
+    [InlineData("bytes=5-3")]
+    [InlineData("bytes=0")]
+    public void Parse_Malformed_None(string header) =>
+        Assert.Equal(RangeParseKind.None, RangeHeader.Parse(header, 1000).Kind);
 
     [Fact]
-    public void TryParse_ZeroLength_False() => Assert.False(RangeHeader.TryParse("bytes=0-", 0, out _, out _));
+    public void Parse_ZeroSuffix_Unsatisfiable() =>
+        Assert.Equal(RangeParseKind.Unsatisfiable, RangeHeader.Parse("bytes=-0", 1000).Kind);
+
+    [Theory]
+    [InlineData("bytes=0-")]
+    [InlineData("bytes=0-9")]
+    [InlineData("bytes=-5")]
+    public void Parse_ZeroLengthFile_Unsatisfiable(string header) =>
+        Assert.Equal(RangeParseKind.Unsatisfiable, RangeHeader.Parse(header, 0).Kind);
+
+    [Fact]
+    public void Parse_ZeroLengthFile_MalformedStillNone() =>
+        Assert.Equal(RangeParseKind.None, RangeHeader.Parse("garbage", 0).Kind);
 }

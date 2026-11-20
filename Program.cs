@@ -204,6 +204,7 @@ app.UseAuthorization();
 app.UseAntiforgery();
 
 AuthEndpoints.Map(app);
+app.MapDownloadEndpoints();
 app.MapRazorComponents<App>().AddInteractiveServerRenderMode();
 
 app.Run();
