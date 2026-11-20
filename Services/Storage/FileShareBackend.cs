@@ -134,13 +134,22 @@ public sealed class FileShareBackend(StorageClientFactory clients) : IStorageBac
         }, ct);
 
     public Task CompleteUploadAsync(StorageTarget t, string stagingPath, string finalPath, IReadOnlyList<string> blockIds,
-        bool overwrite, CancellationToken ct) =>
+        bool overwrite, CancellationToken ct, Guid? uploadSessionId = null) =>
         StorageErrorMapper.RunAsync(async () =>
         {
             var share = clients.Share(t);
             await EnsureFoldersAsync(share, StoragePaths.Parent(finalPath), ct).ConfigureAwait(false);
             await File(share, stagingPath).RenameAsync(finalPath,
                 new ShareFileRenameOptions { ReplaceIfExists = overwrite }, ct).ConfigureAwait(false);
+        }, ct);
+
+    public Task<bool> HasLandedAsync(StorageTarget t, string stagingPath, string finalPath, Guid sessionId, long size,
+        CancellationToken ct) =>
+        StorageErrorMapper.RunAsync(async () =>
+        {
+            var share = clients.Share(t);
+            if ((await File(share, stagingPath).ExistsAsync(ct).ConfigureAwait(false)).Value) return false;
+            return (await File(share, finalPath).ExistsAsync(ct).ConfigureAwait(false)).Value;
         }, ct);
 
     public Task AbortUploadAsync(StorageTarget t, string stagingPath, CancellationToken ct) =>

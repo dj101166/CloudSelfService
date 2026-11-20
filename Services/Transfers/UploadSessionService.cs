@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Globalization;
 using System.Security.Cryptography;
+using CloudSelfService.Endpoints;
 using CloudSelfService.Models;
 using CloudSelfService.Services.Access;
 using CloudSelfService.Services.Data;
@@ -23,6 +24,7 @@ public sealed class UploadSessionService
     public const long DefaultMaxUploadBytes = 53_687_091_200;
     public const int DefaultParallelChunks = 4;
     public const int DefaultSessionHours = 24;
+    public const int DefaultBlobLockMinutes = 15;
     public const string CancelledByUserMessage = "Cancelled by user";
     public const string NegativeSizeMessage = "File size can't be negative.";
     public const string Md5RequiredMessage = "Each piece needs a Content-MD5 header holding its base64 MD5 hash.";
@@ -45,6 +47,7 @@ public sealed class UploadSessionService
     private readonly long _maxBytes;
     private readonly int _parallel;
     private readonly TimeSpan _lifetime;
+    private readonly TimeSpan _blobLock;
 
     public UploadSessionService(StorageAccessService access, IUploadSessionStore sessions, IStorageBackendResolver backends,
         AuditService audit, TimeProvider time, IConfiguration config, ILogger<UploadSessionService> logger)
@@ -58,6 +61,7 @@ public sealed class UploadSessionService
         _maxBytes = Math.Max(0, config.GetValue<long?>("Transfers:MaxUploadBytes") ?? DefaultMaxUploadBytes);
         _parallel = Math.Clamp(config.GetValue<int?>("Transfers:ParallelChunks") ?? DefaultParallelChunks, 1, 16);
         _lifetime = TimeSpan.FromHours(Math.Max(1, config.GetValue<int?>("Transfers:SessionHours") ?? DefaultSessionHours));
+        _blobLock = TimeSpan.FromMinutes(Math.Max(1, config.GetValue<int?>("Transfers:BlobLockMinutes") ?? DefaultBlobLockMinutes));
     }
 
     public static string TooLargeMessage(long maxBytes) =>
@@ -125,10 +129,12 @@ public sealed class UploadSessionService
 
         var now = _time.GetUtcNow();
         // Blob blocks are staged on the final name, so two users' sessions there share one uncommitted block list and
-        // whichever commits first discards the other's blocks.
+        // whichever commits first discards the other's blocks. Only a recently active session holds the name: a stalled
+        // one would otherwise lock the file for a day, and its owner gets a clean "restart" if they come back.
         if (target.Kind == StorageKind.BlobContainer
-            && (await _sessions.ListActiveForPathAsync(target.Id, finalPath, now, ct)).Any(o => o.UserId != userId))
-            return new(AccessOutcome.Conflict, null, OtherUserUploadingMessage);
+            && (await _sessions.ListActiveForPathAsync(target.Id, finalPath, now, ct))
+                .Any(o => o.UserId != userId && HoldsBlobName(o, now)))
+            return new(AccessOutcome.Conflict, null, OtherUserUploadingMessage, Code: UploadErrorCodes.InProgress);
 
         var resumable = await _sessions.FindResumableAsync(userId, target.Id, finalPath, req.Size, now, ct);
         if (resumable is not null)
@@ -205,7 +211,7 @@ public sealed class UploadSessionService
             if (read.Outcome != AccessOutcome.Ok)
                 return read;
             if (!MD5.HashData(buffer.AsSpan(0, length)).AsSpan().SequenceEqual(md5))
-                return new(AccessOutcome.Invalid, ChunkCorruptedMessage);
+                return new(AccessOutcome.Invalid, ChunkCorruptedMessage, UploadErrorCodes.Retry);
 
             using var piece = new MemoryStream(buffer, 0, length, writable: false);
             await _backends.For(target).WriteChunkAsync(target, session.StagingPath, session.FinalPath,
@@ -223,10 +229,10 @@ public sealed class UploadSessionService
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(buffer);
+            ArrayPool<byte>.Shared.Return(buffer, clearArray: true);
         }
 
-        await _sessions.MarkChunkAsync(session.Id, index, ct);
+        await _sessions.MarkChunkAsync(session.Id, index, _time.GetUtcNow(), ct);
         return new(AccessOutcome.Ok);
     }
 
@@ -255,7 +261,7 @@ public sealed class UploadSessionService
             // problem, not storage's: no error-level noise, and the client simply retries the piece.
             _logger.LogInformation("Upload piece for target {TargetId} at {Path} was not received completely: {Reason} (correlation {CorrelationId}).",
                 targetId, path, ex.Message, ctx.CorrelationId);
-            return new(AccessOutcome.Invalid, ChunkIncompleteMessage);
+            return new(AccessOutcome.Invalid, ChunkIncompleteMessage, UploadErrorCodes.Retry);
         }
     }
 
@@ -283,16 +289,17 @@ public sealed class UploadSessionService
         string? failureMessage = null;
         var outcome = AccessOutcome.Ok;
         var lost = false;
+        StorageFailureKind? failedKind = null;
         try
         {
             // Not tied to the request: a client that disconnects mid-commit must not leave the session half-claimed.
             await _backends.For(target).CompleteUploadAsync(target, session.StagingPath, session.FinalPath, blockIds,
-                session.Overwrite, CancellationToken.None);
+                session.Overwrite, CancellationToken.None, session.Id);
         }
         catch (StorageFailureException failure)
         {
             LogStorageFailure(failure, "complete", target.Id, session.FinalPath, ctx);
-            (outcome, failureMessage) = (OutcomeOf(failure), failure.Message);
+            (outcome, failureMessage, failedKind) = (OutcomeOf(failure), failure.Message, failure.Kind);
             // The staged data is gone (Files staging removed, or blob blocks discarded by another commit), so a retry
             // can never succeed: end the session and tell the client to start again.
             if (failure.Kind is StorageFailureKind.NotFound or StorageFailureKind.Conflict)
@@ -308,12 +315,41 @@ public sealed class UploadSessionService
             (outcome, failureMessage) = (AccessOutcome.Unavailable, StorageErrorMapper.UnreachableMessage);
         }
 
+        // These failures can also mean an earlier attempt's commit landed and only its reply was lost (a Files rename
+        // already done, or a no-overwrite blob commit now finding its own blob). Storage is asked definitively before
+        // the upload is written off or the user is shown a name clash.
+        if (failedKind is StorageFailureKind.NotFound or StorageFailureKind.Conflict or StorageFailureKind.AlreadyExists)
+        {
+            try
+            {
+                if (await _backends.For(target).HasLandedAsync(target, session.StagingPath, session.FinalPath, session.Id,
+                        session.Size, CancellationToken.None))
+                    (lost, failureMessage, outcome) = (false, null, AccessOutcome.Ok);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Could not confirm whether upload {SessionId} landed on target {TargetId}; leaving it open.",
+                    session.Id, target.Id);
+                (lost, outcome, failureMessage) = (false, AccessOutcome.Unavailable, StorageErrorMapper.UnreachableMessage);
+            }
+        }
+
         if (failureMessage is not null)
         {
             if (lost)
             {
-                await _sessions.TrySetStatusAsync(session.Id, UploadStatus.Completing, UploadStatus.Aborted, ct: CancellationToken.None);
+                // Losing this race means the cleanup sweep already settled the session (and wrote its row).
+                if (!await _sessions.TrySetStatusAsync(session.Id, UploadStatus.Completing, UploadStatus.Aborted, ct: CancellationToken.None))
+                {
+                    _logger.LogWarning("Upload {SessionId} was settled by cleanup while its commit was failing.", session.Id);
+                    var settled = await _sessions.GetAsync(session.Id, CancellationToken.None);
+                    return settled?.Status == UploadStatus.Completed
+                        ? new(AccessOutcome.Ok)
+                        : new(AccessOutcome.Conflict, failureMessage, UploadErrorCodes.Restart);
+                }
                 await AbortQuietlyAsync(target, session);
+                await RecordAsync(userId, auth.UserUpn, target, session.FinalPath, 0, AuditResult.Failed, failureMessage, ctx);
+                return new(AccessOutcome.Conflict, failureMessage, UploadErrorCodes.Restart);
             }
             else
             {
@@ -327,6 +363,8 @@ public sealed class UploadSessionService
         // Conditional so that if the cleanup sweep already settled a stuck commit, the Success row isn't written twice.
         if (await _sessions.TrySetStatusAsync(session.Id, UploadStatus.Completing, UploadStatus.Completed, ct: CancellationToken.None))
             await RecordAsync(userId, auth.UserUpn, target, session.FinalPath, session.Size, AuditResult.Success, "", ctx);
+        else
+            _logger.LogWarning("Upload {SessionId} committed but was already settled by cleanup; no second audit row written.", session.Id);
         return new(AccessOutcome.Ok);
     }
 
@@ -389,6 +427,10 @@ public sealed class UploadSessionService
 
     private BeginUploadResponse Response(Guid id, long size, IReadOnlyList<int> received) =>
         new(id, ChunkMath.ChunkSize, ChunkMath.ChunkCount(size), _parallel, received);
+
+    private bool HoldsBlobName(UploadSession s, DateTimeOffset now) =>
+        s.Status == UploadStatus.Completing || now - s.CreatedAt < _blobLock
+        || (s.LastActivityAt is { } active && now - active < _blobLock);
 
     private static StorageOperation OperationOf(UploadSession s) => s.Overwrite ? StorageOperation.Overwrite : StorageOperation.Upload;
 

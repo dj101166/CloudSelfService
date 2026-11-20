@@ -14,7 +14,16 @@ public interface IStorageBackend
     Task DeleteAsync(StorageTarget t, string path, bool isFolder, CancellationToken ct);
     Task BeginUploadAsync(StorageTarget t, string stagingPath, long size, CancellationToken ct);
     Task WriteChunkAsync(StorageTarget t, string stagingPath, string finalPath, string blockId, long offset, Stream data, long length, byte[] md5, CancellationToken ct);
-    Task CompleteUploadAsync(StorageTarget t, string stagingPath, string finalPath, IReadOnlyList<string> blockIds, bool overwrite, CancellationToken ct);
+    /// <summary>Blob stamps <paramref name="uploadSessionId"/> into the committed blob's metadata so a zero-byte commit can be recognised later.</summary>
+    Task CompleteUploadAsync(StorageTarget t, string stagingPath, string finalPath, IReadOnlyList<string> blockIds, bool overwrite,
+        CancellationToken ct, Guid? uploadSessionId = null);
+
+    /// <summary>
+    /// Whether this session's commit definitely landed. Files: the staging file is gone and the final file exists (the
+    /// rename is atomic). Blob: the final blob's committed block list starts with this session's block 0, or, for a
+    /// zero-byte session, it has no blocks and carries this session's metadata stamp.
+    /// </summary>
+    Task<bool> HasLandedAsync(StorageTarget t, string stagingPath, string finalPath, Guid sessionId, long size, CancellationToken ct);
     Task AbortUploadAsync(StorageTarget t, string stagingPath, CancellationToken ct);
     Task ProbeAsync(StorageTarget t, CancellationToken ct);
 }

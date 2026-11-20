@@ -298,6 +298,33 @@ public class FakeStorageBackendTests
         Assert.Contains("seekable", ex.Message);
     }
 
+    [Fact]
+    public async Task HasLanded_Files_StagingGoneAndFinalPresent()
+    {
+        var staging = Stage("f.txt");
+        await _fake.BeginUploadAsync(T, staging, 0, _ct);
+        Assert.False(await _fake.HasLandedAsync(T, staging, "f.txt", Guid.NewGuid(), 0, _ct));
+        await _fake.CompleteUploadAsync(T, staging, "f.txt", Array.Empty<string>(), false, _ct);
+        Assert.True(await _fake.HasLandedAsync(T, staging, "f.txt", Guid.NewGuid(), 0, _ct));
+        Assert.False(await _fake.HasLandedAsync(T, staging, "other.txt", Guid.NewGuid(), 0, _ct));
+    }
+
+    [Fact]
+    public async Task HasLanded_Blob_FirstCommittedBlockIdentifiesSession()
+    {
+        var blob = T with { Id = Guid.NewGuid(), Kind = StorageKind.BlobContainer };
+        var mine = Guid.NewGuid();
+        var bytes = new byte[] { 1, 2, 3 };
+        var block = CloudSelfService.Services.Transfers.ChunkMath.BlockId(mine, 0);
+        await _fake.BeginUploadAsync(blob, "f", 3, _ct);
+        await _fake.WriteChunkAsync(blob, "f", "f", block, 0, new MemoryStream(bytes), 3, MD5.HashData(bytes), _ct);
+        Assert.False(await _fake.HasLandedAsync(blob, "f", "f", mine, 3, _ct));
+        await _fake.CompleteUploadAsync(blob, "f", "f", new[] { block }, false, _ct, mine);
+
+        Assert.True(await _fake.HasLandedAsync(blob, "f", "f", mine, 3, _ct));
+        Assert.False(await _fake.HasLandedAsync(blob, "f", "f", Guid.NewGuid(), 3, _ct));
+    }
+
     private sealed class NonSeekable(byte[] data) : MemoryStream(data)
     {
         public override bool CanSeek => false;

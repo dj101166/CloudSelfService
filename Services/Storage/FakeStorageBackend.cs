@@ -18,6 +18,8 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
         public readonly Dictionary<string, Dictionary<string, (long Offset, byte[] Data)>> Staging = new(StringComparer.Ordinal);
         public readonly Dictionary<string, (string Source, long Version)> MovedFrom = new(StringComparer.Ordinal);
         public readonly Dictionary<string, long> Versions = new(StringComparer.Ordinal);
+        // Blob only: what the last commit at a path wrote, valid while the path's version is unchanged.
+        public readonly Dictionary<string, (IReadOnlyList<string> BlockIds, Guid? Session, long Version)> Committed = new(StringComparer.Ordinal);
         public long Counter;
         public long Bump(string path) => Versions[path] = ++Counter;
         public bool Seeded;
@@ -287,11 +289,7 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
         if (data.Length - data.Position != length)
             throw new ArgumentException($"stream holds {data.Length - data.Position} bytes, expected {length}", nameof(data));
         var buffer = new byte[length];
-        try { await data.ReadExactlyAsync(buffer, ct); }
-        catch (EndOfStreamException)
-        {
-            throw new StorageFailureException(StorageFailureKind.Conflict, StorageErrorMapper.ShortChunkMessage);
-        }
+        await data.ReadExactlyAsync(buffer, ct);
         if (!MD5.HashData(buffer).AsSpan().SequenceEqual(md5)) throw Fail(StorageFailureKind.Conflict);
 
         lock (_gate)
@@ -303,7 +301,7 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
     }
 
     public Task CompleteUploadAsync(StorageTarget t, string stagingPath, string finalPath, IReadOnlyList<string> blockIds,
-        bool overwrite, CancellationToken ct)
+        bool overwrite, CancellationToken ct, Guid? uploadSessionId = null)
     {
         Enter($"CompleteUpload:{finalPath}");
         lock (_gate)
@@ -318,8 +316,28 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
             tree.Staging.Remove(stagingPath);
             if (stagingPath != finalPath) tree.Files.Remove(stagingPath);
             Put(tree, finalPath, assembled);
+            if (t.Kind == StorageKind.BlobContainer)
+                tree.Committed[finalPath] = (blockIds.ToArray(), uploadSessionId, tree.Versions[finalPath]);
         }
         return Task.CompletedTask;
+    }
+
+    public Task<bool> HasLandedAsync(StorageTarget t, string stagingPath, string finalPath, Guid sessionId, long size,
+        CancellationToken ct)
+    {
+        Enter($"HasLanded:{finalPath}");
+        lock (_gate)
+        {
+            var tree = TreeFor(t.Id);
+            if (t.Kind != StorageKind.BlobContainer)
+                return Task.FromResult(!tree.Files.ContainsKey(stagingPath) && tree.Files.ContainsKey(finalPath));
+            if (!tree.Files.ContainsKey(finalPath)
+                || !tree.Committed.TryGetValue(finalPath, out var c) || c.Version != tree.Versions.GetValueOrDefault(finalPath))
+                return Task.FromResult(false);
+            return Task.FromResult(size > 0
+                ? c.BlockIds.Count > 0 && c.BlockIds[0] == CloudSelfService.Services.Transfers.ChunkMath.BlockId(sessionId, 0)
+                : c.BlockIds.Count == 0 && c.Session == sessionId);
+        }
     }
 
     public Task AbortUploadAsync(StorageTarget t, string stagingPath, CancellationToken ct)

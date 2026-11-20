@@ -38,7 +38,7 @@ public static class UploadEndpoints
             && ctx.Features.Get<IHttpMaxRequestBodySizeFeature>() is { IsReadOnly: false } limit)
             limit.MaxRequestBodySize = ChunkMath.ChunkSize;
         if (ctx.Request.Headers["Sec-Fetch-Site"].ToString() is "cross-site" or "same-site")
-            return Error(StatusCodes.Status403Forbidden, CrossSiteMessage);
+            return Error(StatusCodes.Status403Forbidden, CrossSiteMessage, UploadErrorCodes.Denied);
         // ValidateRequestAsync, not IsRequestValidAsync: the latter waves GET through, and the status route is a GET.
         try
         {
@@ -46,7 +46,7 @@ public static class UploadEndpoints
         }
         catch (AntiforgeryValidationException)
         {
-            return Error(StatusCodes.Status400BadRequest, AntiforgeryMessage);
+            return Error(StatusCodes.Status400BadRequest, AntiforgeryMessage, UploadErrorCodes.Invalid);
         }
         if (AppClaims.UserIdOf(ctx.User) is null)
             return Results.Unauthorized();
@@ -57,7 +57,7 @@ public static class UploadEndpoints
         RunAsync(ctx, loggers, "begin", async (userId, audit, ct) =>
         {
             if (!ctx.Request.HasJsonContentType())
-                return Error(StatusCodes.Status400BadRequest, BadBodyMessage);
+                return Error(StatusCodes.Status400BadRequest, BadBodyMessage, UploadErrorCodes.Invalid);
             BeginUploadRequest? request;
             try
             {
@@ -65,13 +65,13 @@ public static class UploadEndpoints
             }
             catch (JsonException)
             {
-                return Error(StatusCodes.Status400BadRequest, BadBodyMessage);
+                return Error(StatusCodes.Status400BadRequest, BadBodyMessage, UploadErrorCodes.Invalid);
             }
             if (request is null)
-                return Error(StatusCodes.Status400BadRequest, BadBodyMessage);
+                return Error(StatusCodes.Status400BadRequest, BadBodyMessage, UploadErrorCodes.Invalid);
 
             var result = await uploads.BeginAsync(userId, request, audit, ct);
-            return result.Outcome == AccessOutcome.Ok ? Results.Json(result.Value) : ErrorFor(result.Outcome, result.Message);
+            return result.Outcome == AccessOutcome.Ok ? Results.Json(result.Value) : ErrorFor(result.Outcome, result.Message, result.Code);
         });
 
     private static Task<IResult> StatusAsync(Guid id, HttpContext ctx, UploadSessionService uploads, ILoggerFactory loggers) =>
@@ -80,7 +80,7 @@ public static class UploadEndpoints
             var result = await uploads.StatusAsync(userId, id, ct);
             return result.Outcome == AccessOutcome.Ok
                 ? Results.Json(new { received = result.Value })
-                : ErrorFor(result.Outcome, result.Message);
+                : ErrorFor(result.Outcome, result.Message, result.Code);
         });
 
     private static Task<IResult> PutChunkAsync(Guid id, int index, HttpContext ctx, UploadSessionService uploads, ILoggerFactory loggers) =>
@@ -89,25 +89,25 @@ public static class UploadEndpoints
             // A declared length over the piece size is refused before reading. A body with no declared length can't
             // pass the service's exact-length check, so Kestrel's body limit is a backstop rather than a reachable path.
             if (ctx.Request.ContentLength > ChunkMath.ChunkSize)
-                return Error(StatusCodes.Status413PayloadTooLarge, TooLargeMessage);
+                return Error(StatusCodes.Status413PayloadTooLarge, TooLargeMessage, UploadErrorCodes.TooLarge);
 
             var result = await uploads.PutChunkAsync(userId, id, index, ctx.Request.Body, ctx.Request.ContentLength,
                 ctx.Request.Headers["Content-MD5"].ToString(), audit, ct);
-            return result.Outcome == AccessOutcome.Ok ? Results.NoContent() : ErrorFor(result.Outcome, result.Message);
+            return result.Outcome == AccessOutcome.Ok ? Results.NoContent() : ErrorFor(result.Outcome, result.Message, result.Code);
         });
 
     private static Task<IResult> CompleteAsync(Guid id, HttpContext ctx, UploadSessionService uploads, ILoggerFactory loggers) =>
         RunAsync(ctx, loggers, "complete", async (userId, audit, ct) =>
         {
             var result = await uploads.CompleteAsync(userId, id, audit, ct);
-            return result.Outcome == AccessOutcome.Ok ? Results.NoContent() : ErrorFor(result.Outcome, result.Message);
+            return result.Outcome == AccessOutcome.Ok ? Results.NoContent() : ErrorFor(result.Outcome, result.Message, result.Code);
         });
 
     private static Task<IResult> AbortAsync(Guid id, HttpContext ctx, UploadSessionService uploads, ILoggerFactory loggers) =>
         RunAsync(ctx, loggers, "abort", async (userId, audit, ct) =>
         {
             var result = await uploads.AbortAsync(userId, id, audit, ct);
-            return result.Outcome == AccessOutcome.Ok ? Results.NoContent() : ErrorFor(result.Outcome, result.Message);
+            return result.Outcome == AccessOutcome.Ok ? Results.NoContent() : ErrorFor(result.Outcome, result.Message, result.Code);
         });
 
     // Store (database) failures escape the services by design; here they become a 503, never a 500.
@@ -128,19 +128,21 @@ public static class UploadEndpoints
         {
             loggers.CreateLogger("CloudSelfService.Upload").LogError(ex,
                 "Upload {Step} failed (correlation {CorrelationId}).", step, audit.CorrelationId);
-            return Error(StatusCodes.Status503ServiceUnavailable, DownloadEndpoints.UnavailableMessage);
+            return Error(StatusCodes.Status503ServiceUnavailable, DownloadEndpoints.UnavailableMessage, UploadErrorCodes.Unavailable);
         }
     }
 
-    private static IResult ErrorFor(AccessOutcome outcome, string? message) => outcome switch
+    // A service-supplied code refines the outcome (retry vs invalid, restart vs in_progress); otherwise the outcome decides.
+    internal static IResult ErrorFor(AccessOutcome outcome, string? message, string? code = null) => outcome switch
     {
-        AccessOutcome.Denied => Error(StatusCodes.Status403Forbidden, message),
-        AccessOutcome.NotFound => Error(StatusCodes.Status404NotFound, message),
-        AccessOutcome.Invalid => Error(StatusCodes.Status400BadRequest, message),
-        AccessOutcome.AlreadyExists or AccessOutcome.Conflict => Error(StatusCodes.Status409Conflict, message),
-        _ => Error(StatusCodes.Status503ServiceUnavailable, message ?? DownloadEndpoints.UnavailableMessage),
+        AccessOutcome.Denied => Error(StatusCodes.Status403Forbidden, message, UploadErrorCodes.Denied),
+        AccessOutcome.NotFound => Error(StatusCodes.Status404NotFound, message, UploadErrorCodes.NotFound),
+        AccessOutcome.Invalid => Error(StatusCodes.Status400BadRequest, message, code ?? UploadErrorCodes.Invalid),
+        AccessOutcome.AlreadyExists => Error(StatusCodes.Status409Conflict, message, UploadErrorCodes.Exists),
+        AccessOutcome.Conflict => Error(StatusCodes.Status409Conflict, message, code ?? UploadErrorCodes.Restart),
+        _ => Error(StatusCodes.Status503ServiceUnavailable, message ?? DownloadEndpoints.UnavailableMessage, UploadErrorCodes.Unavailable),
     };
 
-    private static IResult Error(int status, string? message) =>
-        Results.Json(new { error = message ?? "" }, statusCode: status);
+    internal static IResult Error(int status, string? message, string code) =>
+        Results.Json(new { error = message ?? "", code }, statusCode: status);
 }

@@ -37,6 +37,12 @@ public static class RateLimits
             context.HttpContext.Response.StatusCode = StatusCodes.Status429TooManyRequests;
             context.HttpContext.Response.Headers.CacheControl = "no-store";
             context.HttpContext.Response.Headers.RetryAfter = "5";
+            // uploader.js branches on a JSON code; downloads are plain browser navigations and keep text.
+            if (context.HttpContext.Request.Path.StartsWithSegments("/api/uploads"))
+            {
+                await context.HttpContext.Response.WriteAsJsonAsync(new { error = RejectedMessage, code = UploadErrorCodes.Busy }, ct);
+                return;
+            }
             context.HttpContext.Response.ContentType = "text/plain; charset=utf-8";
             await context.HttpContext.Response.WriteAsync(RejectedMessage, ct);
         };

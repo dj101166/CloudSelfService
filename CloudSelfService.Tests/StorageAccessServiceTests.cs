@@ -1311,7 +1311,9 @@ public class StorageAccessServiceTests
         public Task WriteChunkAsync(StorageTarget t, string stagingPath, string finalPath, string blockId, long offset,
             Stream data, long length, byte[] md5, CancellationToken ct) => Fail<bool>();
         public Task CompleteUploadAsync(StorageTarget t, string stagingPath, string finalPath, IReadOnlyList<string> blockIds,
-            bool overwrite, CancellationToken ct) => Fail<bool>();
+            bool overwrite, CancellationToken ct, Guid? uploadSessionId = null) => Fail<bool>();
+        public Task<bool> HasLandedAsync(StorageTarget t, string stagingPath, string finalPath, Guid sessionId, long size,
+            CancellationToken ct) => Fail<bool>();
         public Task AbortUploadAsync(StorageTarget t, string stagingPath, CancellationToken ct) => Fail<bool>();
         public Task ProbeAsync(StorageTarget t, CancellationToken ct) => Fail<bool>();
     }

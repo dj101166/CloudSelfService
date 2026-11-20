@@ -143,6 +143,7 @@ public sealed class PgsqlContext : IAsyncDisposable
         );
 
         ALTER TABLE upload_sessions ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ NULL;
+        ALTER TABLE upload_sessions ADD COLUMN IF NOT EXISTS last_activity_at TIMESTAMPTZ NULL;
         CREATE INDEX IF NOT EXISTS idx_upload_sessions_owner_path ON upload_sessions (user_id, target_id, final_path);
         CREATE INDEX IF NOT EXISTS idx_upload_sessions_target_path ON upload_sessions (target_id, final_path);
         CREATE INDEX IF NOT EXISTS idx_upload_sessions_status_expiry ON upload_sessions (status, expires_at);

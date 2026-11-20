@@ -246,12 +246,37 @@ public sealed class BlobBackend(StorageClientFactory clients) : IStorageBackend
         }, ct);
 
     public Task CompleteUploadAsync(StorageTarget t, string stagingPath, string finalPath, IReadOnlyList<string> blockIds,
-        bool overwrite, CancellationToken ct) =>
+        bool overwrite, CancellationToken ct, Guid? uploadSessionId = null) =>
         StorageErrorMapper.RunAsync(async () =>
         {
             var options = new CommitBlockListOptions();
             if (!overwrite) options.Conditions = new BlobRequestConditions { IfNoneMatch = ETag.All };
+            if (uploadSessionId is { } id)
+                options.Metadata = new Dictionary<string, string> { [UploadSessionKey] = id.ToString("N") };
             await clients.Container(t).GetBlockBlobClient(finalPath).CommitBlockListAsync(blockIds, options, ct).ConfigureAwait(false);
+        }, ct);
+
+    public const string UploadSessionKey = "cssp_upload_session";
+
+    public Task<bool> HasLandedAsync(StorageTarget t, string stagingPath, string finalPath, Guid sessionId, long size,
+        CancellationToken ct) =>
+        StorageErrorMapper.RunAsync(async () =>
+        {
+            var blob = clients.Container(t).GetBlockBlobClient(finalPath);
+            try
+            {
+                var committed = (await blob.GetBlockListAsync(BlockListTypes.Committed, cancellationToken: ct).ConfigureAwait(false))
+                    .Value.CommittedBlocks.ToList();
+                if (size > 0)
+                    return committed.Count > 0 && committed[0].Name == CloudSelfService.Services.Transfers.ChunkMath.BlockId(sessionId, 0);
+                if (committed.Count > 0) return false;
+                var props = await blob.GetPropertiesAsync(cancellationToken: ct).ConfigureAwait(false);
+                return props.Value.Metadata.TryGetValue(UploadSessionKey, out var stamped) && stamped == sessionId.ToString("N");
+            }
+            catch (RequestFailedException ex) when (ex.Status == 404)
+            {
+                return false;
+            }
         }, ct);
 
     public Task AbortUploadAsync(StorageTarget t, string stagingPath, CancellationToken ct) => Task.CompletedTask;

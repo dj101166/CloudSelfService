@@ -8,10 +8,11 @@ namespace CloudSelfService.Services.Access;
 /// <summary>Conflict: the operation clashed with another one in flight and must be started again (HTTP 409, unlike AlreadyExists).</summary>
 public enum AccessOutcome { Ok, Denied, NotFound, Invalid, AlreadyExists, Unavailable, Conflict }
 
-public sealed record AccessResult(AccessOutcome Outcome, string? Message = null);
+/// <summary>Code is an optional machine-readable refinement of Outcome for API clients (see Endpoints.UploadErrorCodes).</summary>
+public sealed record AccessResult(AccessOutcome Outcome, string? Message = null, string? Code = null);
 
 /// <summary>UserUpn is the store-read user, set only once the caller has been authorised, so a denial never carries it.</summary>
-public sealed record AccessResult<T>(AccessOutcome Outcome, T? Value, string? Message = null, string? UserUpn = null);
+public sealed record AccessResult<T>(AccessOutcome Outcome, T? Value, string? Message = null, string? UserUpn = null, string? Code = null);
 
 public sealed record ReachableTarget(StorageTarget Target, Customer? Customer, AccessLevel Level);
 

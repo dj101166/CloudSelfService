@@ -157,9 +157,10 @@ public class PgStoresIntegrationTests
         Assert.Null(await store.FindResumableAsync(user, target, "Docs/a b#.bin", s.Size + 1, now));
         Assert.Null(await store.FindResumableAsync(user, target, "Docs/a b#.bin", s.Size, now.AddHours(24)));
 
-        await store.MarkChunkAsync(s.Id, 3);
-        await store.MarkChunkAsync(s.Id, 3);
-        await Task.WhenAll(Enumerable.Range(0, 20).Select(i => store.MarkChunkAsync(s.Id, i)));
+        await store.MarkChunkAsync(s.Id, 3, now.AddMinutes(2));
+        await store.MarkChunkAsync(s.Id, 3, now.AddMinutes(1));
+        Assert.Equal(now.AddMinutes(2), (await store.GetAsync(s.Id))!.LastActivityAt);
+        await Task.WhenAll(Enumerable.Range(0, 20).Select(i => store.MarkChunkAsync(s.Id, i, now)));
         Assert.Equal(Enumerable.Range(0, 20), (await store.ReceivedChunksAsync(s.Id)).OrderBy(i => i));
 
         await store.SetOverwriteAsync(s.Id, true);
@@ -173,6 +174,10 @@ public class PgStoresIntegrationTests
         Assert.Equal(claimed, (await store.GetAsync(s.Id))!.ClaimedAt);
         Assert.Contains(await store.ListActiveForPathAsync(target, "Docs/a b#.bin", now), x => x.Id == s.Id);
         Assert.Contains(await store.ListStuckCompletingAsync(claimed.AddMinutes(1)), x => x.Id == s.Id);
+        Assert.False(await store.TrySetStatusAsync(s.Id, UploadStatus.Completing, UploadStatus.Completing,
+            requireClaim: true, expectedClaim: claimed.AddSeconds(1)));
+        Assert.True(await store.TrySetStatusAsync(s.Id, UploadStatus.Completing, UploadStatus.Completing,
+            requireClaim: true, expectedClaim: claimed));
         Assert.DoesNotContain(await store.ListStuckCompletingAsync(claimed), x => x.Id == s.Id);
         Assert.False(await store.TrySetStatusAsync(s.Id, UploadStatus.Open, UploadStatus.Aborted));
         Assert.DoesNotContain(await store.ListExpiredOpenAsync(now.AddHours(25)), x => x.Id == s.Id);
@@ -186,7 +191,7 @@ public class PgStoresIntegrationTests
 
         var other = s with { Id = Guid.NewGuid() };
         await store.CreateAsync(other);
-        await store.MarkChunkAsync(other.Id, 0);
+        await store.MarkChunkAsync(other.Id, 0, now);
         await store.DeleteAsync(other.Id);
         Assert.Null(await store.GetAsync(other.Id));
         Assert.Empty(await store.ReceivedChunksAsync(other.Id));

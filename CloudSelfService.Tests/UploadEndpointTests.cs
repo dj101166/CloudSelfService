@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text.Json;
+using CloudSelfService.Endpoints;
 using CloudSelfService.Models;
 using CloudSelfService.Services.Data;
 using CloudSelfService.Services.Transfers;
@@ -51,6 +52,15 @@ public sealed class UploadEndpointTests : IDisposable
     {
         using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
         return json.RootElement.Clone();
+    }
+
+    private static async Task AssertError(HttpResponseMessage response, HttpStatusCode status, string code)
+    {
+        Assert.Equal(status, response.StatusCode);
+        Assert.Equal("application/json", response.Content.Headers.ContentType?.MediaType);
+        var body = await JsonOf(response);
+        Assert.Equal(code, body.GetProperty("code").GetString());
+        Assert.False(string.IsNullOrEmpty(body.GetProperty("error").GetString()));
     }
 
     private async Task<(HttpClient Client, string Token, StorageTarget Target)> ContributorAsync()
@@ -340,6 +350,127 @@ public sealed class UploadEndpointTests : IDisposable
         Assert.Equal(HttpStatusCode.TooManyRequests, third.StatusCode);
     }
 
+    // ---- R29: machine-readable error codes ----
+
+    [Fact]
+    public async Task ErrorCodes_Begin()
+    {
+        var (client, token, target) = await ContributorAsync();
+        await _factory.SeedFileAsync(target, "Uploads/a.bin", Bytes(3));
+        var reader = await _factory.CreateClientAs("customer-read");
+        var readTarget = await _factory.DemoTargetAsync("Read");
+
+        await AssertError(await client.SendAsync(Begin(token, target.Id, "Uploads", "a.bin", 5)), HttpStatusCode.Conflict, UploadErrorCodes.Exists);
+        await AssertError(await client.SendAsync(Begin(token, target.Id, "", "a\u202Eb.bin", 5)), HttpStatusCode.BadRequest, UploadErrorCodes.Invalid);
+        await AssertError(await client.SendAsync(Begin(token, target.Id, "", "huge.bin", long.MaxValue)), HttpStatusCode.BadRequest, UploadErrorCodes.Invalid);
+        await AssertError(await reader.SendAsync(Begin(await TokenAsync(reader), readTarget.Id, "", "a.bin", 1)), HttpStatusCode.Forbidden, UploadErrorCodes.Denied);
+        await AssertError(await client.SendAsync(Begin(null, target.Id, "", "a.bin", 1)), HttpStatusCode.BadRequest, UploadErrorCodes.Invalid);
+        var cross = Begin(token, target.Id, "", "a.bin", 1);
+        cross.Headers.Add("Sec-Fetch-Site", "cross-site");
+        await AssertError(await client.SendAsync(cross), HttpStatusCode.Forbidden, UploadErrorCodes.Denied);
+    }
+
+    [Fact]
+    public async Task ErrorCodes_Chunk()
+    {
+        var (client, token, target) = await ContributorAsync();
+        var data = Bytes(10);
+        var session = await BeginOkAsync(client, token, target, "a.bin", data.Length);
+
+        await AssertError(await client.SendAsync(Chunk(token, session, 0, data, Convert.ToBase64String(new byte[16]))),
+            HttpStatusCode.BadRequest, UploadErrorCodes.Retry);
+        await AssertError(await client.SendAsync(Chunk(token, session, 0, data, "nope")), HttpStatusCode.BadRequest, UploadErrorCodes.Invalid);
+        await AssertError(await client.SendAsync(Chunk(token, session, 0, Bytes(9))), HttpStatusCode.BadRequest, UploadErrorCodes.Invalid);
+        await AssertError(await client.SendAsync(Chunk(token, session, 5, data)), HttpStatusCode.BadRequest, UploadErrorCodes.Invalid);
+        await AssertError(await client.SendAsync(Chunk(token, Guid.NewGuid(), 0, data)), HttpStatusCode.NotFound, UploadErrorCodes.NotFound);
+        await AssertError(await client.SendAsync(Chunk(token, session, 0, Bytes(ChunkMath.ChunkSize + 1))),
+            HttpStatusCode.RequestEntityTooLarge, UploadErrorCodes.TooLarge);
+        _factory.Storage.ThrowUnreachable = true;
+        await AssertError(await client.SendAsync(Chunk(token, session, 0, data)), HttpStatusCode.ServiceUnavailable, UploadErrorCodes.Unavailable);
+    }
+
+    [Fact]
+    public async Task ErrorCodes_CompleteAndStatus()
+    {
+        var (client, token, target) = await ContributorAsync();
+        var session = await BeginOkAsync(client, token, target, "a.bin", 10);
+
+        await AssertError(await client.SendAsync(Request(HttpMethod.Post, $"/api/uploads/{session}/complete", token)),
+            HttpStatusCode.BadRequest, UploadErrorCodes.Invalid);
+        await AssertError(await client.SendAsync(Request(HttpMethod.Get, $"/api/uploads/{Guid.NewGuid()}", token)),
+            HttpStatusCode.NotFound, UploadErrorCodes.NotFound);
+        await AssertError(await client.SendAsync(Request(HttpMethod.Delete, $"/api/uploads/{Guid.NewGuid()}", token)),
+            HttpStatusCode.NotFound, UploadErrorCodes.NotFound);
+    }
+
+    [Fact]
+    public async Task ErrorCodes_CompleteLost_Restart()
+    {
+        var (client, token, target) = await ContributorAsync();
+        var session = await BeginOkAsync(client, token, target, "a.bin", 0);
+        var staging = (await _factory.Services.GetRequiredService<IUploadSessionStore>().GetAsync(session))!.StagingPath;
+        await _factory.Storage.AbortUploadAsync(target, staging, default);
+
+        await AssertError(await client.SendAsync(Request(HttpMethod.Post, $"/api/uploads/{session}/complete", token)),
+            HttpStatusCode.Conflict, UploadErrorCodes.Restart);
+    }
+
+    [Fact]
+    public async Task ErrorCodes_StoreFailure_Unavailable()
+    {
+        using var failing = _factory.WithWebHostBuilder(b => b.ConfigureTestServices(s =>
+            s.AddSingleton<IUploadSessionStore, ThrowingSessionStore>()));
+        var client = failing.CreateClient(new() { AllowAutoRedirect = false, HandleCookies = true });
+        await client.GetAsync("/dev/signin?as=customer-contribute");
+        var target = (await failing.Services.GetRequiredService<ITargetStore>().ListAsync()).Single(t => t.DisplayName == "Demo share (Contribute)");
+
+        await AssertError(await client.SendAsync(Begin(await TokenAsync(client), target.Id, "", "a.bin", 1)),
+            HttpStatusCode.ServiceUnavailable, UploadErrorCodes.Unavailable);
+    }
+
+    [Fact]
+    public async Task ErrorCodes_RateLimited_BusyJsonOnUploads_TextOnDownloads()
+    {
+        using var factory = new TestAppFactory(("Transfers:RequestsPerMinute", "1"));
+        var client = await factory.CreateClientAs("customer-contribute");
+        var token = await TokenAsync(client);
+        var target = await factory.DemoTargetAsync("Contribute");
+        await factory.SeedFileAsync(target, "d.bin", Bytes(3));
+
+        Assert.Equal(HttpStatusCode.OK, (await client.SendAsync(Begin(token, target.Id, "", "a.bin", 1))).StatusCode);
+        var busy = await client.SendAsync(Begin(token, target.Id, "", "b.bin", 1));
+        var download = await client.GetAsync($"/api/files/{target.Id}/download?path=d.bin");
+
+        await AssertError(busy, HttpStatusCode.TooManyRequests, UploadErrorCodes.Busy);
+        Assert.Equal("5", busy.Headers.GetValues("Retry-After").Single());
+        Assert.Equal(HttpStatusCode.TooManyRequests, download.StatusCode);
+        Assert.Equal("text/plain", download.Content.Headers.ContentType?.MediaType);
+    }
+
+    [Fact]
+    public async Task ErrorCodes_OtherUserUploadingBlob_InProgress()
+    {
+        var full = await _factory.CreateClientAs("customer-full");
+        var targets = _factory.Services.GetRequiredService<ITargetStore>();
+        var users = _factory.Services.GetRequiredService<IUserStore>();
+        var grants = _factory.Services.GetRequiredService<IGrantStore>();
+        var fullTarget = await _factory.DemoTargetAsync("Full");
+        var blob = fullTarget with { Id = Guid.NewGuid(), DisplayName = "Shared blob", Kind = StorageKind.BlobContainer, ContainerName = "shared-blob" };
+        await targets.UpsertAsync(blob);
+        await grants.SetAsync(new Grant(blob.CustomerId!.Value, blob.Id, AccessLevel.Full, "test", DateTimeOffset.UtcNow));
+        // A second user of the same customer.
+        var fullUser = (await users.ListAsync(UserKind.Customer, blob.CustomerId)).Single();
+        var colleague = fullUser with { Id = Guid.NewGuid(), Upn = "colleague@customer.example", EntraObjectId = null };
+        await users.UpsertAsync(colleague);
+        var sessions = _factory.Services.GetRequiredService<IUploadSessionStore>();
+        var now = DateTimeOffset.UtcNow;
+        await sessions.CreateAsync(new UploadSession(Guid.NewGuid(), colleague.Id, blob.Id, "a.bin", "a.bin", 1, ChunkMath.ChunkSize,
+            false, now, now.AddHours(24), UploadStatus.Open));
+
+        await AssertError(await full.SendAsync(Begin(await TokenAsync(full), blob.Id, "", "a.bin", 1)),
+            HttpStatusCode.Conflict, UploadErrorCodes.InProgress);
+    }
+
     private sealed class ThrowingSessionStore : IUploadSessionStore
     {
         private static Exception Down() => new InvalidOperationException("db down");
@@ -347,11 +478,11 @@ public sealed class UploadEndpointTests : IDisposable
         public Task<UploadSession?> GetAsync(Guid id, CancellationToken ct = default) => throw Down();
         public Task<UploadSession?> FindResumableAsync(Guid userId, Guid targetId, string finalPath, long size, DateTimeOffset now,
             CancellationToken ct = default) => throw Down();
-        public Task MarkChunkAsync(Guid id, int index, CancellationToken ct = default) => throw Down();
+        public Task MarkChunkAsync(Guid id, int index, DateTimeOffset at, CancellationToken ct = default) => throw Down();
         public Task<IReadOnlyList<int>> ReceivedChunksAsync(Guid id, CancellationToken ct = default) => throw Down();
         public Task SetStatusAsync(Guid id, string status, CancellationToken ct = default) => throw Down();
         public Task<bool> TrySetStatusAsync(Guid id, string expected, string next, DateTimeOffset? claimedAt = null,
-            CancellationToken ct = default) => throw Down();
+            CancellationToken ct = default, bool requireClaim = false, DateTimeOffset? expectedClaim = null) => throw Down();
         public Task<IReadOnlyList<UploadSession>> ListActiveForPathAsync(Guid targetId, string finalPath, DateTimeOffset now,
             CancellationToken ct = default) => throw Down();
         public Task<IReadOnlyList<UploadSession>> ListStuckCompletingAsync(DateTimeOffset claimedBefore, CancellationToken ct = default) =>

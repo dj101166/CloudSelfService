@@ -14,6 +14,8 @@ public sealed class UploadCleanupService : BackgroundService
     public static readonly TimeSpan Interval = TimeSpan.FromMinutes(30);
     public static readonly TimeSpan RowRetention = TimeSpan.FromDays(7);
     public const int DefaultCompletingTimeoutMinutes = 30;
+    /// <summary>A commit of the largest file finishes well inside this, so a live Complete is never settled underneath.</summary>
+    public const int MinCompletingTimeoutMinutes = 10;
     public const string InterruptedCommitMessage = "The upload was interrupted while it was being finished.";
     private static readonly string Operation = StorageOperation.Upload.ToString();
 
@@ -36,7 +38,7 @@ public sealed class UploadCleanupService : BackgroundService
         _audit = audit;
         _time = time;
         _logger = logger;
-        _completingTimeout = TimeSpan.FromMinutes(Math.Max(1,
+        _completingTimeout = TimeSpan.FromMinutes(Math.Max(MinCompletingTimeoutMinutes,
             config.GetValue<int?>("Transfers:CompletingTimeoutMinutes") ?? DefaultCompletingTimeoutMinutes));
     }
 
@@ -64,7 +66,8 @@ public sealed class UploadCleanupService : BackgroundService
     {
         foreach (var session in await _sessions.ListExpiredOpenAsync(now, ct))
         {
-            if (!await _sessions.TrySetStatusAsync(session.Id, UploadStatus.Open, UploadStatus.Aborted, ct: ct))
+            if (!await _sessions.TrySetStatusAsync(session.Id, UploadStatus.Open, UploadStatus.Aborted, ct: ct,
+                    requireClaim: true, expectedClaim: session.ClaimedAt))
                 continue;
             if (await _targets.GetAsync(session.TargetId, ct) is { } target)
                 await AbortQuietlyAsync(target, session, ct);
@@ -79,16 +82,18 @@ public sealed class UploadCleanupService : BackgroundService
     }
 
     // The process died (or the status write failed) between claiming Completing and recording the result. If the final
-    // file is there with the right size the commit landed; otherwise it did not, and the staged data is removed.
+    // commit landed (asked definitively, see IStorageBackend.HasLandedAsync) it is Completed; otherwise the staged data
+    // is removed.
     private async Task SettleStuckAsync(UploadSession session, CancellationToken ct)
     {
         var target = await _targets.GetAsync(session.TargetId, ct);
-        StorageItem? item = null;
+        var landed = false;
         if (target is not null)
         {
             try
             {
-                item = await _backends.For(target).GetItemAsync(target, session.FinalPath, ct);
+                landed = await _backends.For(target).HasLandedAsync(target, session.StagingPath, session.FinalPath, session.Id,
+                    session.Size, ct);
             }
             catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
             {
@@ -98,8 +103,9 @@ public sealed class UploadCleanupService : BackgroundService
             }
         }
 
-        var landed = item is { IsFolder: false } && item.Size == session.Size;
-        if (!await _sessions.TrySetStatusAsync(session.Id, UploadStatus.Completing, landed ? UploadStatus.Completed : UploadStatus.Aborted, ct: ct))
+        // Requiring the listed claim time means a session re-claimed by a retried Complete since it was listed is left alone.
+        if (!await _sessions.TrySetStatusAsync(session.Id, UploadStatus.Completing, landed ? UploadStatus.Completed : UploadStatus.Aborted,
+                ct: ct, requireClaim: true, expectedClaim: session.ClaimedAt))
             return;
         if (!landed && target is not null)
             await AbortQuietlyAsync(target, session, ct);

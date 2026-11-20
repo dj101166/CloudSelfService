@@ -14,10 +14,13 @@ public static class UploadStatus
     public const string Aborted = "Aborted";
 }
 
-/// <summary>ClaimedAt is when the session last entered Completing, so the sweep can spot a commit that never finished.</summary>
+/// <summary>
+/// ClaimedAt is when the session last entered Completing, so the sweep can spot a commit that never finished.
+/// LastActivityAt is when a chunk last landed, so a stalled blob upload stops holding the file name.
+/// </summary>
 public sealed record UploadSession(Guid Id, Guid UserId, Guid TargetId, string FinalPath, string StagingPath,
     long Size, int ChunkSize, bool Overwrite, DateTimeOffset CreatedAt, DateTimeOffset ExpiresAt, string Status,
-    DateTimeOffset? ClaimedAt = null);
+    DateTimeOffset? ClaimedAt = null, DateTimeOffset? LastActivityAt = null);
 
 public interface IUploadSessionStore
 {
@@ -28,16 +31,19 @@ public interface IUploadSessionStore
     Task<UploadSession?> FindResumableAsync(Guid userId, Guid targetId, string finalPath, long size, DateTimeOffset now,
         CancellationToken ct = default);
 
-    /// <summary>Idempotent: marking a received chunk twice is not an error.</summary>
-    Task MarkChunkAsync(Guid id, int index, CancellationToken ct = default);
+    /// <summary>Idempotent: marking a received chunk twice is not an error. Also stamps LastActivityAt with <paramref name="at"/>.</summary>
+    Task MarkChunkAsync(Guid id, int index, DateTimeOffset at, CancellationToken ct = default);
     Task<IReadOnlyList<int>> ReceivedChunksAsync(Guid id, CancellationToken ct = default);
     Task SetStatusAsync(Guid id, string status, CancellationToken ct = default);
 
     /// <summary>
     /// Moves the session to <paramref name="next"/> only if it is still <paramref name="expected"/>. A non-null
-    /// <paramref name="claimedAt"/> is stored as the claim time (set when entering Completing).
+    /// <paramref name="claimedAt"/> is stored as the claim time (set when entering Completing). When
+    /// <paramref name="requireClaim"/> is true the update also requires the stored claim time to equal
+    /// <paramref name="expectedClaim"/>, so a sweep never acts on a session re-claimed since it was listed.
     /// </summary>
-    Task<bool> TrySetStatusAsync(Guid id, string expected, string next, DateTimeOffset? claimedAt = null, CancellationToken ct = default);
+    Task<bool> TrySetStatusAsync(Guid id, string expected, string next, DateTimeOffset? claimedAt = null, CancellationToken ct = default,
+        bool requireClaim = false, DateTimeOffset? expectedClaim = null);
 
     /// <summary>Open or Completing, unexpired sessions on this exact target and final path, for any user.</summary>
     Task<IReadOnlyList<UploadSession>> ListActiveForPathAsync(Guid targetId, string finalPath, DateTimeOffset now,
@@ -86,13 +92,14 @@ public sealed class InMemoryUploadSessionStore : IUploadSessionStore
                 .FirstOrDefault());
     }
 
-    public Task MarkChunkAsync(Guid id, int index, CancellationToken ct = default)
+    public Task MarkChunkAsync(Guid id, int index, DateTimeOffset at, CancellationToken ct = default)
     {
         lock (_lock)
         {
             if (!_chunks.TryGetValue(id, out var set))
                 throw new InvalidOperationException("Upload session not found.");
             set.Add(index);
+            if (_sessions.TryGetValue(id, out var s)) _sessions[id] = s with { LastActivityAt = at };
         }
         return Task.CompletedTask;
     }
@@ -115,11 +122,12 @@ public sealed class InMemoryUploadSessionStore : IUploadSessionStore
     }
 
     public Task<bool> TrySetStatusAsync(Guid id, string expected, string next, DateTimeOffset? claimedAt = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default, bool requireClaim = false, DateTimeOffset? expectedClaim = null)
     {
         lock (_lock)
         {
             if (!_sessions.TryGetValue(id, out var s) || s.Status != expected) return Task.FromResult(false);
+            if (requireClaim && s.ClaimedAt != expectedClaim) return Task.FromResult(false);
             _sessions[id] = s with { Status = next, ClaimedAt = claimedAt ?? s.ClaimedAt };
             return Task.FromResult(true);
         }
@@ -186,20 +194,21 @@ public sealed class InMemoryUploadSessionStore : IUploadSessionStore
 
 public sealed class PgUploadSessionStore : IUploadSessionStore
 {
-    private const string Cols = "id, user_id, target_id, final_path, staging_path, size, chunk_size, overwrite, created_at, expires_at, status, claimed_at";
+    private const string Cols = "id, user_id, target_id, final_path, staging_path, size, chunk_size, overwrite, created_at, expires_at, status, claimed_at, last_activity_at";
     private readonly PgsqlContext _db;
     public PgUploadSessionStore(PgsqlContext db) => _db = db;
 
     private static UploadSession Map(NpgsqlDataReader r) => new(r.GetGuid(0), r.GetGuid(1), r.GetGuid(2), r.GetString(3),
         r.GetString(4), r.GetInt64(5), r.GetInt32(6), r.GetBoolean(7), r.GetFieldValue<DateTimeOffset>(8),
-        r.GetFieldValue<DateTimeOffset>(9), r.GetString(10), r.IsDBNull(11) ? null : r.GetFieldValue<DateTimeOffset>(11));
+        r.GetFieldValue<DateTimeOffset>(9), r.GetString(10), r.IsDBNull(11) ? null : r.GetFieldValue<DateTimeOffset>(11),
+        r.IsDBNull(12) ? null : r.GetFieldValue<DateTimeOffset>(12));
 
     public async Task CreateAsync(UploadSession s, CancellationToken ct = default)
     {
         await using var conn = await _db.DataSource.OpenConnectionAsync(ct);
         await using var cmd = new NpgsqlCommand($"""
             INSERT INTO upload_sessions ({Cols})
-            VALUES (@id, @uid, @tid, @final, @staging, @size, @chunk, @overwrite, @created, @expires, @status, @claimed)
+            VALUES (@id, @uid, @tid, @final, @staging, @size, @chunk, @overwrite, @created, @expires, @status, @claimed, @activity)
             """, conn);
         cmd.Parameters.AddWithValue("id", s.Id);
         cmd.Parameters.AddWithValue("uid", s.UserId);
@@ -213,6 +222,7 @@ public sealed class PgUploadSessionStore : IUploadSessionStore
         cmd.Parameters.AddWithValue("expires", s.ExpiresAt.ToUniversalTime());
         cmd.Parameters.AddWithValue("status", s.Status);
         cmd.Parameters.AddWithValue("claimed", NpgsqlTypes.NpgsqlDbType.TimestampTz, (object?)s.ClaimedAt?.ToUniversalTime() ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("activity", NpgsqlTypes.NpgsqlDbType.TimestampTz, (object?)s.LastActivityAt?.ToUniversalTime() ?? DBNull.Value);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -243,13 +253,16 @@ public sealed class PgUploadSessionStore : IUploadSessionStore
         return await cmd.ReadOneAsync(Map, ct);
     }
 
-    public async Task MarkChunkAsync(Guid id, int index, CancellationToken ct = default)
+    public async Task MarkChunkAsync(Guid id, int index, DateTimeOffset at, CancellationToken ct = default)
     {
         await using var conn = await _db.DataSource.OpenConnectionAsync(ct);
-        await using var cmd = new NpgsqlCommand(
-            "INSERT INTO upload_chunks (session_id, idx) VALUES (@id, @idx) ON CONFLICT (session_id, idx) DO NOTHING", conn);
+        await using var cmd = new NpgsqlCommand("""
+            INSERT INTO upload_chunks (session_id, idx) VALUES (@id, @idx) ON CONFLICT (session_id, idx) DO NOTHING;
+            UPDATE upload_sessions SET last_activity_at = GREATEST(COALESCE(last_activity_at, @at), @at) WHERE id = @id;
+            """, conn);
         cmd.Parameters.AddWithValue("id", id);
         cmd.Parameters.AddWithValue("idx", index);
+        cmd.Parameters.AddWithValue("at", at.ToUniversalTime());
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -271,12 +284,15 @@ public sealed class PgUploadSessionStore : IUploadSessionStore
     }
 
     public async Task<bool> TrySetStatusAsync(Guid id, string expected, string next, DateTimeOffset? claimedAt = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default, bool requireClaim = false, DateTimeOffset? expectedClaim = null)
     {
         await using var conn = await _db.DataSource.OpenConnectionAsync(ct);
         await using var cmd = new NpgsqlCommand(
-            "UPDATE upload_sessions SET status = @next, claimed_at = COALESCE(@claimed, claimed_at) WHERE id = @id AND status = @expected",
+            "UPDATE upload_sessions SET status = @next, claimed_at = COALESCE(@claimed, claimed_at) WHERE id = @id AND status = @expected" +
+            (requireClaim ? " AND claimed_at IS NOT DISTINCT FROM @expectedClaim" : ""),
             conn);
+        cmd.Parameters.AddWithValue("expectedClaim", NpgsqlTypes.NpgsqlDbType.TimestampTz,
+            (object?)expectedClaim?.ToUniversalTime() ?? DBNull.Value);
         cmd.Parameters.AddWithValue("id", id);
         cmd.Parameters.AddWithValue("expected", expected);
         cmd.Parameters.AddWithValue("next", next);
