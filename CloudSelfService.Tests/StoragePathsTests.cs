@@ -114,6 +114,14 @@ public class StoragePathsTests
     }
 
     [Fact]
+    public void MoveTag_BindsPathAndETag_StripsQuotes()
+    {
+        Assert.Equal(StoragePaths.MoveTag("a/b.txt", "\"0x8D1\""), StoragePaths.MoveTag("a/b.txt", "0x8D1"));
+        Assert.NotEqual(StoragePaths.MoveTag("a.txt", "0x8D1"), StoragePaths.MoveTag("a.txt", "0x8D2"));
+        Assert.DoesNotContain('"', StoragePaths.MoveTag("a b.txt", "\"0x8D1\""));
+    }
+
+    [Fact]
     public void Ancestors_ShallowestFirst() =>
         Assert.Equal(new[] { "a", "a/b", "a/b/c" }, StoragePaths.Ancestors("a/b/c").ToArray());
 

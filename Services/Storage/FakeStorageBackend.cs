@@ -16,7 +16,10 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
         public readonly Dictionary<string, (byte[] Data, DateTimeOffset Modified)> Files = new(StringComparer.Ordinal);
         public readonly HashSet<string> Folders = new(StringComparer.Ordinal);
         public readonly Dictionary<string, Dictionary<string, (long Offset, byte[] Data)>> Staging = new(StringComparer.Ordinal);
-        public readonly Dictionary<string, string> MovedFrom = new(StringComparer.Ordinal);
+        public readonly Dictionary<string, (string Source, long Version)> MovedFrom = new(StringComparer.Ordinal);
+        public readonly Dictionary<string, long> Versions = new(StringComparer.Ordinal);
+        public long Counter;
+        public long Bump(string path) => Versions[path] = ++Counter;
         public bool Seeded;
     }
 
@@ -87,13 +90,16 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
     private static void AddFolderWithMarker(Tree tree, string path)
     {
         AddFolder(tree, path);
-        tree.Files[StoragePaths.MarkerPath(path)] = (Array.Empty<byte>(), DateTimeOffset.UtcNow);
+        var marker = StoragePaths.MarkerPath(path);
+        tree.Files[marker] = (Array.Empty<byte>(), DateTimeOffset.UtcNow);
+        tree.Bump(marker);
     }
 
     private static void Put(Tree tree, string path, byte[] data)
     {
         AddFolder(tree, StoragePaths.Parent(path));
         tree.Files[path] = (data, DateTimeOffset.UtcNow);
+        tree.Bump(path);
     }
 
     private static bool Exists(Tree tree, string path) =>
@@ -174,6 +180,8 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
             {
                 tree.Files[to] = tree.Files[from];
                 tree.Files.Remove(from);
+                tree.Versions.Remove(from);
+                tree.Bump(to);
                 return Task.CompletedTask;
             }
 
@@ -186,7 +194,8 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
                 var src = tree.Files[p];
                 if (tree.Files.TryGetValue(dest, out var existing))
                 {
-                    var ours = tree.MovedFrom.TryGetValue(dest, out var tag) && tag == p && existing.Data.LongLength == src.Data.LongLength;
+                    var ours = tree.MovedFrom.TryGetValue(dest, out var tag) && tag == (p, tree.Versions[p])
+                        && existing.Data.LongLength == src.Data.LongLength;
                     if (!ours) throw Fail(StorageFailureKind.AlreadyExists);
                 }
                 else
@@ -195,10 +204,13 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
                         throw new StorageFailureException(StorageFailureKind.Unreachable, StorageErrorMapper.UnreachableMessage);
                     AddFolder(tree, StoragePaths.Parent(dest));
                     tree.Files[dest] = src;
-                    tree.MovedFrom[dest] = p;
+                    tree.MovedFrom[dest] = (p, tree.Versions[p]);
+                    tree.Bump(dest);
                     copied++;
                 }
                 tree.Files.Remove(p);
+                tree.Versions.Remove(p);
+                tree.MovedFrom.Remove(dest);
             }
             foreach (var p in tree.Folders.Where(Under).ToList())
             {

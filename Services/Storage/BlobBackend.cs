@@ -96,8 +96,9 @@ public sealed class BlobBackend(StorageClientFactory clients) : IStorageBackend
         }, ct);
 
     // Folder moves are resumable: a destination blob counts as "already copied" only if this mover wrote it
-    // (metadata cssp_move_src equals the source path) and the length matches. Any other existing destination
-    // is AlreadyExists and the source is kept, so a move can never delete a user's file it did not copy.
+    // for this exact source instance (cssp_move_src = path|source ETag, ETag re-read live) and the length
+    // matches. Any other existing destination is AlreadyExists and the source is kept. Single-file moves never
+    // resume: a move can never delete a user's file it did not copy.
     public Task MoveAsync(StorageTarget t, string from, string to, bool isFolder, CancellationToken ct) =>
         StorageErrorMapper.RunAsync(async () =>
         {
@@ -106,7 +107,7 @@ public sealed class BlobBackend(StorageClientFactory clients) : IStorageBackend
 
             if (!isFolder)
             {
-                await CopyThenDeleteAsync(container, from, to, ct).ConfigureAwait(false);
+                await CopyThenDeleteAsync(container, from, to, resumable: false, ct).ConfigureAwait(false);
                 return;
             }
 
@@ -120,7 +121,7 @@ public sealed class BlobBackend(StorageClientFactory clients) : IStorageBackend
                 throw new StorageFailureException(StorageFailureKind.NotFound, StorageErrorMapper.NotFoundMessage);
 
             foreach (var (name, length) in sources)
-                await CopyThenDeleteAsync(container, name, StoragePaths.Rebase(name, from, to), ct).ConfigureAwait(false);
+                await CopyThenDeleteAsync(container, name, StoragePaths.Rebase(name, from, to), resumable: true, ct).ConfigureAwait(false);
         }, ct);
 
     private async Task<HttpAuthorization> BearerAsync(CancellationToken ct)
@@ -130,7 +131,7 @@ public sealed class BlobBackend(StorageClientFactory clients) : IStorageBackend
         return new HttpAuthorization("Bearer", token.Token);
     }
 
-    private async Task CopyThenDeleteAsync(BlobContainerClient container, string from, string to, CancellationToken ct)
+    private async Task CopyThenDeleteAsync(BlobContainerClient container, string from, string to, bool resumable, CancellationToken ct)
     {
         var source = container.GetBlobClient(from);
         var dest = container.GetBlockBlobClient(to);
@@ -138,10 +139,13 @@ public sealed class BlobBackend(StorageClientFactory clients) : IStorageBackend
         var sourceProps = await source.GetPropertiesAsync(cancellationToken: ct).ConfigureAwait(false);
         var size = sourceProps.Value.ContentLength;
 
-        var stamp = new Dictionary<string, string>(sourceProps.Value.Metadata)
-        {
-            [StoragePaths.MoveSourceKey] = StoragePaths.EncodeMoveSource(from),
-        };
+        var sourceETag = sourceProps.Value.ETag;
+        var tag = StoragePaths.MoveTag(from, sourceETag.ToString("H"));
+        var stamp = new Dictionary<string, string>(sourceProps.Value.Metadata);
+        var clean = new Dictionary<string, string>(stamp);
+        // Too-large tags just make this blob non-resumable; the move itself must not fail over it.
+        if (tag.Length <= StoragePaths.MaxMetadataTagBytes) stamp[StoragePaths.MoveSourceKey] = tag;
+        var sourceMatches = new BlobRequestConditions { IfMatch = sourceETag };
 
         BlobProperties? existing = null;
         try { existing = (await dest.GetPropertiesAsync(cancellationToken: ct).ConfigureAwait(false)).Value; }
@@ -149,13 +153,14 @@ public sealed class BlobBackend(StorageClientFactory clients) : IStorageBackend
 
         if (existing is not null)
         {
-            var ours = existing.ContentLength == size
-                && existing.Metadata.TryGetValue(StoragePaths.MoveSourceKey, out var tag)
-                && tag == StoragePaths.EncodeMoveSource(from);
+            var ours = resumable && existing.ContentLength == size
+                && existing.Metadata.TryGetValue(StoragePaths.MoveSourceKey, out var existingTag)
+                && existingTag == tag;
             if (!ours)
                 throw new StorageFailureException(StorageFailureKind.AlreadyExists, StorageErrorMapper.AlreadyExistsMessage);
-            try { await source.DeleteAsync(cancellationToken: ct).ConfigureAwait(false); }
+            try { await source.DeleteAsync(conditions: sourceMatches, cancellationToken: ct).ConfigureAwait(false); }
             catch (RequestFailedException ex) when (ex.Status == 404) { }
+            await ClearTagAsync(dest, clean, ct).ConfigureAwait(false);
             return;
         }
 
@@ -163,7 +168,7 @@ public sealed class BlobBackend(StorageClientFactory clients) : IStorageBackend
         if (size <= SyncCopyLimit)
         {
             await dest.SyncCopyFromUriAsync(source.Uri,
-                new BlobCopyFromUriOptions { Metadata = stamp, SourceAuthentication = await BearerAsync(ct).ConfigureAwait(false), DestinationConditions = noOverwrite },
+                new BlobCopyFromUriOptions { Metadata = stamp, SourceConditions = sourceMatches, SourceAuthentication = await BearerAsync(ct).ConfigureAwait(false), DestinationConditions = noOverwrite },
                 ct).ConfigureAwait(false);
         }
         else
@@ -176,13 +181,22 @@ public sealed class BlobBackend(StorageClientFactory clients) : IStorageBackend
                 await dest.StageBlockFromUriAsync(source.Uri, block.BlockId, new StageBlockFromUriOptions
                 {
                     SourceRange = new HttpRange(block.Offset, block.Length),
+                    SourceConditions = sourceMatches,
                     SourceAuthentication = await BearerAsync(ct).ConfigureAwait(false),
                 }, ct).ConfigureAwait(false);
             }
             await dest.CommitBlockListAsync(blocks.Select(b => b.BlockId),
                 new CommitBlockListOptions { Conditions = noOverwrite, Metadata = stamp }, ct).ConfigureAwait(false);
         }
-        await source.DeleteAsync(cancellationToken: ct).ConfigureAwait(false);
+        await source.DeleteAsync(conditions: sourceMatches, cancellationToken: ct).ConfigureAwait(false);
+        await ClearTagAsync(dest, clean, ct).ConfigureAwait(false);
+    }
+
+    // Best effort: the ETag binding is what makes a leftover tag harmless.
+    private static async Task ClearTagAsync(BlockBlobClient dest, Dictionary<string, string> metadataWithoutTag, CancellationToken ct)
+    {
+        try { await dest.SetMetadataAsync(metadataWithoutTag, cancellationToken: ct).ConfigureAwait(false); }
+        catch (RequestFailedException) { }
     }
 
     public Task DeleteAsync(StorageTarget t, string path, bool isFolder, CancellationToken ct) =>

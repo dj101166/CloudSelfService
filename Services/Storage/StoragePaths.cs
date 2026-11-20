@@ -39,6 +39,12 @@ public static class StoragePaths
     /// <summary>Metadata-safe (ASCII) form of a source path.</summary>
     public static string EncodeMoveSource(string sourcePath) => Uri.EscapeDataString(sourcePath);
 
+    /// <summary>Tag value binding a copy to one instance of its source: a recreated or modified source has a new ETag.</summary>
+    public static string MoveTag(string sourcePath, string sourceETag) =>
+        EncodeMoveSource(sourcePath) + "|" + Uri.EscapeDataString(sourceETag.Trim('"'));
+
+    public const int MaxMetadataTagBytes = 4096;
+
     public static bool IsMoveIntoItself(string from, string to) =>
         to == from || to.StartsWith(from + "/", StringComparison.Ordinal);
 

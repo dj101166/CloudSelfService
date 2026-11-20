@@ -339,6 +339,33 @@ public class FakeStorageBackendTests
     }
 
     [Fact]
+    public async Task MoveFile_SecondMoveOfRecreatedSameSizeSource_AlreadyExists_SourceKept()
+    {
+        await PutAsync("a.txt", "AAAA");
+        await _fake.CreateFolderAsync(T, "archive", _ct);
+        await _fake.MoveAsync(T, "a.txt", "archive/a.txt", false, _ct);
+
+        await PutAsync("a.txt", "NEW!");
+        var ex = await Assert.ThrowsAsync<StorageFailureException>(() => _fake.MoveAsync(T, "a.txt", "archive/a.txt", false, _ct));
+        Assert.Equal(StorageFailureKind.AlreadyExists, ex.Kind);
+        Assert.Equal("NEW!", await ReadAll(await _fake.OpenReadAsync(T, "a.txt", 0, null, _ct)));
+        Assert.Equal("AAAA", await ReadAll(await _fake.OpenReadAsync(T, "archive/a.txt", 0, null, _ct)));
+    }
+
+    [Fact]
+    public async Task MoveFolder_SecondMoveOfRecreatedSameSizeSource_AlreadyExists_SourceKept()
+    {
+        await PutAsync("a/x.txt", "AAAA");
+        await _fake.MoveAsync(T, "a", "b", true, _ct);
+
+        await PutAsync("a/x.txt", "NEW!");
+        var ex = await Assert.ThrowsAsync<StorageFailureException>(() => _fake.MoveAsync(T, "a", "b", true, _ct));
+        Assert.Equal(StorageFailureKind.AlreadyExists, ex.Kind);
+        Assert.Equal("NEW!", await ReadAll(await _fake.OpenReadAsync(T, "a/x.txt", 0, null, _ct)));
+        Assert.Equal("AAAA", await ReadAll(await _fake.OpenReadAsync(T, "b/x.txt", 0, null, _ct)));
+    }
+
+    [Fact]
     public async Task Seed_AddsSampleContent_Idempotently()
     {
         _fake.Seed(T.Id);
