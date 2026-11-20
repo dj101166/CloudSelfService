@@ -101,4 +101,31 @@ public class InMemoryStoresTests
         Assert.Equal(2, rows.Count);
         Assert.True(rows[0].At > rows[1].At);
     }
+
+    [Fact]
+    public async Task TargetStore_ChangeOwnerWithGrants_Throws()
+    {
+        var owner = Guid.NewGuid();
+        var targetId = Guid.NewGuid();
+        var targets = new InMemoryTargetStore();
+        var grants = new InMemoryGrantStore(targets);
+        await targets.UpsertAsync(Target(targetId, owner));
+        await grants.SetAsync(new Grant(owner, targetId, AccessLevel.Read, "a", DateTimeOffset.UtcNow));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => targets.UpsertAsync(Target(targetId, Guid.NewGuid())));
+    }
+
+    [Fact]
+    public async Task TargetStore_ChangeOwnerWithoutGrants_Succeeds()
+    {
+        var targetId = Guid.NewGuid();
+        var newOwner = Guid.NewGuid();
+        var targets = new InMemoryTargetStore();
+        _ = new InMemoryGrantStore(targets);
+        await targets.UpsertAsync(Target(targetId, Guid.NewGuid()));
+
+        await targets.UpsertAsync(Target(targetId, newOwner));
+
+        Assert.Equal(newOwner, (await targets.GetAsync(targetId))!.CustomerId);
+    }
 }

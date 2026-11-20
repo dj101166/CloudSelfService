@@ -24,7 +24,8 @@ else
 {
     builder.Services.AddSingleton<IUserStore, InMemoryUserStore>();
     builder.Services.AddSingleton<ICustomerStore, InMemoryCustomerStore>();
-    builder.Services.AddSingleton<ITargetStore, InMemoryTargetStore>();
+    builder.Services.AddSingleton<InMemoryTargetStore>();
+    builder.Services.AddSingleton<ITargetStore>(sp => sp.GetRequiredService<InMemoryTargetStore>());
     builder.Services.AddSingleton<IGrantStore, InMemoryGrantStore>();
     builder.Services.AddSingleton<IAuditStore, InMemoryAuditStore>();
 }
@@ -52,11 +53,10 @@ if (!app.Environment.IsDevelopment())
     app.UseHsts();
 }
 
-{
-    var pg = app.Services.GetRequiredService<PgsqlContext>();
-    if (pg.IsAvailable) await pg.EnsureSchemaAsync();
-    else app.Logger.LogWarning("ConnectionStrings:Default is not set; using in-memory stores. Data is not persisted.");
-}
+var pg = app.Services.GetRequiredService<PgsqlContext>();
+// An unreachable database fails the start on purpose.
+if (pg.IsAvailable) await pg.EnsureSchemaAsync();
+else app.Logger.LogWarning("ConnectionStrings:Default is not set; using in-memory stores. Data is not persisted.");
 
 app.UseHttpsRedirection();
 
