@@ -25,13 +25,19 @@ public static class StoragePaths
 
     public static bool IsMarker(string path) => Leaf(path) == FolderMarker;
 
-    private static readonly Regex StagingName = new(@"^\..+\.cssupload-[0-9a-f]{32}$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+    private static readonly Regex StagingName = new(@"^\..+\.cssupload-[0-9a-f]{32}\z", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>Caller-chosen upload staging names ("{folder}/.{name}.cssupload-{sessionId:N}") must never be listed.</summary>
     public static bool IsStagingName(string name) => StagingName.IsMatch(name);
 
     /// <summary>Entries users must never see: the folder marker and in-flight upload staging files.</summary>
     public static bool IsHiddenName(string name) => name == FolderMarker || IsStagingName(name);
+
+    /// <summary>Metadata key a mover stamps on every blob it writes, so a resumed move can tell its own copies from foreign files.</summary>
+    public const string MoveSourceKey = "cssp_move_src";
+
+    /// <summary>Metadata-safe (ASCII) form of a source path.</summary>
+    public static string EncodeMoveSource(string sourcePath) => Uri.EscapeDataString(sourcePath);
 
     public static bool IsMoveIntoItself(string from, string to) =>
         to == from || to.StartsWith(from + "/", StringComparison.Ordinal);

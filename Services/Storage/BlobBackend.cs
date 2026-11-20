@@ -18,13 +18,21 @@ public sealed class BlobBackend(StorageClientFactory clients) : IStorageBackend
         StorageErrorMapper.RunAsync(async () =>
         {
             var container = clients.Container(t);
+            var sawPage = false;
             await foreach (var page in container.GetBlobsByHierarchyAsync(BlobTraits.None, BlobStates.None, "/",
                                    StoragePaths.BlobPrefix(folder), ct).AsPages(continuation, pageSize).ConfigureAwait(false))
             {
                 // An empty first page means nothing at all sits under the prefix, not even a .folder marker
                 // (the marker is returned here before it is filtered), so the folder does not exist.
-                if (folder.Length > 0 && continuation is null && page.Values.Count == 0)
-                    throw new StorageFailureException(StorageFailureKind.NotFound, StorageErrorMapper.NotFoundMessage);
+                var firstPage = continuation is null && !sawPage;
+                sawPage = true;
+                if (folder.Length > 0 && firstPage && page.Values.Count == 0)
+                {
+                    // The service may return an empty page with a continuation token; only a final empty page is "missing".
+                    if (!string.IsNullOrEmpty(page.ContinuationToken)) { sawPage = false; continuation = page.ContinuationToken; }
+                    else throw new StorageFailureException(StorageFailureKind.NotFound, StorageErrorMapper.NotFoundMessage);
+                    continue;
+                }
 
                 var items = new List<StorageItem>();
                 foreach (var v in page.Values)
@@ -52,7 +60,7 @@ public sealed class BlobBackend(StorageClientFactory clients) : IStorageBackend
         StorageErrorMapper.RunAsync<StorageItem?>(async () =>
         {
             if (path.Length == 0) return new StorageItem("", "", true, null, null);
-            if (StoragePaths.IsStagingName(StoragePaths.Leaf(path))) return null;
+            if (StoragePaths.IsHiddenName(StoragePaths.Leaf(path))) return null;
             var container = clients.Container(t);
             try
             {
@@ -87,8 +95,9 @@ public sealed class BlobBackend(StorageClientFactory clients) : IStorageBackend
                 .UploadAsync(BinaryData.FromBytes(Array.Empty<byte>()), overwrite: false, ct).ConfigureAwait(false);
         }, ct);
 
-    // Folder moves are resumable: a blob whose destination already has the same length is treated as copied
-    // earlier and only its source is deleted. A destination with a different length is a real conflict.
+    // Folder moves are resumable: a destination blob counts as "already copied" only if this mover wrote it
+    // (metadata cssp_move_src equals the source path) and the length matches. Any other existing destination
+    // is AlreadyExists and the source is kept, so a move can never delete a user's file it did not copy.
     public Task MoveAsync(StorageTarget t, string from, string to, bool isFolder, CancellationToken ct) =>
         StorageErrorMapper.RunAsync(async () =>
         {
@@ -97,9 +106,12 @@ public sealed class BlobBackend(StorageClientFactory clients) : IStorageBackend
 
             if (!isFolder)
             {
-                await CopyThenDeleteAsync(container, from, to, null, ct).ConfigureAwait(false);
+                await CopyThenDeleteAsync(container, from, to, ct).ConfigureAwait(false);
                 return;
             }
+
+            if (await container.GetBlobClient(to).ExistsAsync(ct).ConfigureAwait(false))
+                throw new StorageFailureException(StorageFailureKind.AlreadyExists, StorageErrorMapper.AlreadyExistsMessage);
 
             var sources = new List<(string Name, long Length)>();
             await foreach (var b in container.GetBlobsAsync(BlobTraits.None, BlobStates.None, from + "/", ct).ConfigureAwait(false))
@@ -108,7 +120,7 @@ public sealed class BlobBackend(StorageClientFactory clients) : IStorageBackend
                 throw new StorageFailureException(StorageFailureKind.NotFound, StorageErrorMapper.NotFoundMessage);
 
             foreach (var (name, length) in sources)
-                await CopyThenDeleteAsync(container, name, StoragePaths.Rebase(name, from, to), length, ct).ConfigureAwait(false);
+                await CopyThenDeleteAsync(container, name, StoragePaths.Rebase(name, from, to), ct).ConfigureAwait(false);
         }, ct);
 
     private async Task<HttpAuthorization> BearerAsync(CancellationToken ct)
@@ -118,7 +130,7 @@ public sealed class BlobBackend(StorageClientFactory clients) : IStorageBackend
         return new HttpAuthorization("Bearer", token.Token);
     }
 
-    private async Task CopyThenDeleteAsync(BlobContainerClient container, string from, string to, long? resumeLength, CancellationToken ct)
+    private async Task CopyThenDeleteAsync(BlobContainerClient container, string from, string to, CancellationToken ct)
     {
         var source = container.GetBlobClient(from);
         var dest = container.GetBlockBlobClient(to);
@@ -126,24 +138,32 @@ public sealed class BlobBackend(StorageClientFactory clients) : IStorageBackend
         var sourceProps = await source.GetPropertiesAsync(cancellationToken: ct).ConfigureAwait(false);
         var size = sourceProps.Value.ContentLength;
 
-        if (resumeLength is not null)
+        var stamp = new Dictionary<string, string>(sourceProps.Value.Metadata)
         {
-            try
-            {
-                var existing = await dest.GetPropertiesAsync(cancellationToken: ct).ConfigureAwait(false);
-                if (existing.Value.ContentLength != size)
-                    throw new StorageFailureException(StorageFailureKind.AlreadyExists, StorageErrorMapper.AlreadyExistsMessage);
-                await source.DeleteAsync(cancellationToken: ct).ConfigureAwait(false);
-                return;
-            }
+            [StoragePaths.MoveSourceKey] = StoragePaths.EncodeMoveSource(from),
+        };
+
+        BlobProperties? existing = null;
+        try { existing = (await dest.GetPropertiesAsync(cancellationToken: ct).ConfigureAwait(false)).Value; }
+        catch (RequestFailedException ex) when (ex.Status == 404) { }
+
+        if (existing is not null)
+        {
+            var ours = existing.ContentLength == size
+                && existing.Metadata.TryGetValue(StoragePaths.MoveSourceKey, out var tag)
+                && tag == StoragePaths.EncodeMoveSource(from);
+            if (!ours)
+                throw new StorageFailureException(StorageFailureKind.AlreadyExists, StorageErrorMapper.AlreadyExistsMessage);
+            try { await source.DeleteAsync(cancellationToken: ct).ConfigureAwait(false); }
             catch (RequestFailedException ex) when (ex.Status == 404) { }
+            return;
         }
 
         var noOverwrite = new BlobRequestConditions { IfNoneMatch = ETag.All };
         if (size <= SyncCopyLimit)
         {
             await dest.SyncCopyFromUriAsync(source.Uri,
-                new BlobCopyFromUriOptions { SourceAuthentication = await BearerAsync(ct).ConfigureAwait(false), DestinationConditions = noOverwrite },
+                new BlobCopyFromUriOptions { Metadata = stamp, SourceAuthentication = await BearerAsync(ct).ConfigureAwait(false), DestinationConditions = noOverwrite },
                 ct).ConfigureAwait(false);
         }
         else
@@ -160,7 +180,7 @@ public sealed class BlobBackend(StorageClientFactory clients) : IStorageBackend
                 }, ct).ConfigureAwait(false);
             }
             await dest.CommitBlockListAsync(blocks.Select(b => b.BlockId),
-                new CommitBlockListOptions { Conditions = noOverwrite }, ct).ConfigureAwait(false);
+                new CommitBlockListOptions { Conditions = noOverwrite, Metadata = stamp }, ct).ConfigureAwait(false);
         }
         await source.DeleteAsync(cancellationToken: ct).ConfigureAwait(false);
     }

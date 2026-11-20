@@ -16,6 +16,7 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
         public readonly Dictionary<string, (byte[] Data, DateTimeOffset Modified)> Files = new(StringComparer.Ordinal);
         public readonly HashSet<string> Folders = new(StringComparer.Ordinal);
         public readonly Dictionary<string, Dictionary<string, (long Offset, byte[] Data)>> Staging = new(StringComparer.Ordinal);
+        public readonly Dictionary<string, string> MovedFrom = new(StringComparer.Ordinal);
         public bool Seeded;
     }
 
@@ -26,6 +27,9 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
 
     public bool ThrowUnreachable { get; set; }
     public bool ThrowNotAuthorised { get; set; }
+
+    /// <summary>Test hook: a folder move fails (Unreachable) after copying this many files, leaving a partial move.</summary>
+    public int? FailFolderMoveAfterFiles { get; set; }
 
     public long BytesWritten => Interlocked.Read(ref _bytesWritten);
 
@@ -162,7 +166,8 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
             var sourceExists = isFolder ? tree.Folders.Contains(from) : tree.Files.ContainsKey(from);
             if (isFolder && StoragePaths.IsMoveIntoItself(from, to)) throw StorageErrorMapper.MoveIntoItself();
             if (!sourceExists) throw Fail(StorageFailureKind.NotFound);
-            if (Exists(tree, to)) throw Fail(StorageFailureKind.AlreadyExists);
+            if (!isFolder && Exists(tree, to)) throw Fail(StorageFailureKind.AlreadyExists);
+            if (isFolder && tree.Files.ContainsKey(to)) throw Fail(StorageFailureKind.AlreadyExists);
 
             AddFolder(tree, StoragePaths.Parent(to));
             if (!isFolder)
@@ -172,16 +177,33 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
                 return Task.CompletedTask;
             }
 
+            // Mirrors the blob mover: a destination counts as already copied only if this mover wrote it.
             bool Under(string p) => p == from || p.StartsWith(from + "/", StringComparison.Ordinal);
+            var copied = 0;
+            foreach (var p in tree.Files.Keys.Where(Under).OrderBy(p => p, StringComparer.Ordinal).ToList())
+            {
+                var dest = StoragePaths.Rebase(p, from, to);
+                var src = tree.Files[p];
+                if (tree.Files.TryGetValue(dest, out var existing))
+                {
+                    var ours = tree.MovedFrom.TryGetValue(dest, out var tag) && tag == p && existing.Data.LongLength == src.Data.LongLength;
+                    if (!ours) throw Fail(StorageFailureKind.AlreadyExists);
+                }
+                else
+                {
+                    if (FailFolderMoveAfterFiles is { } limit && copied >= limit)
+                        throw new StorageFailureException(StorageFailureKind.Unreachable, StorageErrorMapper.UnreachableMessage);
+                    AddFolder(tree, StoragePaths.Parent(dest));
+                    tree.Files[dest] = src;
+                    tree.MovedFrom[dest] = p;
+                    copied++;
+                }
+                tree.Files.Remove(p);
+            }
             foreach (var p in tree.Folders.Where(Under).ToList())
             {
                 tree.Folders.Remove(p);
                 tree.Folders.Add(StoragePaths.Rebase(p, from, to));
-            }
-            foreach (var p in tree.Files.Keys.Where(Under).ToList())
-            {
-                tree.Files[StoragePaths.Rebase(p, from, to)] = tree.Files[p];
-                tree.Files.Remove(p);
             }
         }
         return Task.CompletedTask;

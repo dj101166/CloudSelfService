@@ -39,7 +39,7 @@ public sealed class FileShareBackend(StorageClientFactory clients) : IStorageBac
         {
             var share = clients.Share(t);
             if (path.Length == 0) return new StorageItem("", "", true, null, null);
-            if (StoragePaths.IsStagingName(StoragePaths.Leaf(path))) return null;
+            if (StoragePaths.IsHiddenName(StoragePaths.Leaf(path))) return null;
             try
             {
                 var props = await File(share, path).GetPropertiesAsync(cancellationToken: ct).ConfigureAwait(false);
@@ -81,6 +81,7 @@ public sealed class FileShareBackend(StorageClientFactory clients) : IStorageBac
             if (isFolder && StoragePaths.IsMoveIntoItself(from, to)) throw StorageErrorMapper.MoveIntoItself();
             var share = clients.Share(t);
             await EnsureFoldersAsync(share, StoragePaths.Parent(to), ct).ConfigureAwait(false);
+            // Renames are atomic per call, so Files moves need no resume marker.
             var options = new ShareFileRenameOptions { ReplaceIfExists = false };
             if (isFolder) await share.GetDirectoryClient(from).RenameAsync(to, options, ct).ConfigureAwait(false);
             else await File(share, from).RenameAsync(to, options, ct).ConfigureAwait(false);
