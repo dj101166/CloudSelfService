@@ -1,0 +1,21 @@
+@page "/Error"
+@attribute [ExcludeFromInteractiveRouting]
+@inject IWebHostEnvironment Env
+
+<PageTitle>Error — Advanced Cloud Self Service</PageTitle>
+
+<h1 class="page-title-main">Error</h1>
+<p>Something went wrong. Please try again, or contact Advanced support if it keeps happening.</p>
+
+@if (Env.IsDevelopment() && RequestId is not null)
+{
+    <p><small>Request ID: <code>@RequestId</code></small></p>
+}
+
+@code {
+    [CascadingParameter]
+    private HttpContext? HttpContext { get; set; }
+
+    private string? RequestId =>
+        System.Diagnostics.Activity.Current?.Id ?? HttpContext?.TraceIdentifier;
+}

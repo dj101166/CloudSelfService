@@ -10,10 +10,10 @@
     <link rel="stylesheet" href="@Assets["css/site.css"]" />
     <link rel="stylesheet" href="@Assets["CloudSelfService.styles.css"]" />
     <link rel="icon" type="image/png" href="@Assets["images/advanced-logo-a.png"]" />
-    <HeadOutlet @rendermode="InteractiveServer" />
+    <HeadOutlet @rendermode="RenderModeForPage" />
 </head>
 <body>
-    <Routes @rendermode="InteractiveServer" />
+    <Routes @rendermode="RenderModeForPage" />
 
     <div id="blazor-error-ui">
         @if (Env.IsDevelopment())
@@ -60,3 +60,13 @@
     </script>
 </body>
 </html>
+
+@code {
+    // Pages marked [ExcludeFromInteractiveRouting] (the error page) render statically so they
+    // still work when the circuit is broken.
+    [CascadingParameter]
+    private HttpContext HttpContext { get; set; } = default!;
+
+    private IComponentRenderMode? RenderModeForPage =>
+        HttpContext.AcceptsInteractiveRouting() ? InteractiveServer : null;
+}
