@@ -1,10 +1,32 @@
 <Router AppAssembly="@typeof(Routes).Assembly">
     <Found Context="routeData">
-        <RouteView RouteData="@routeData" DefaultLayout="@typeof(MainLayout)" />
+        <AuthorizeRouteView RouteData="@routeData" DefaultLayout="@typeof(MainLayout)">
+            @* Two different failures arrive here and they need different answers. A caller with
+               no identity is sent to sign in. A caller that HAS a session and merely failed a
+               policy is shown Access Denied in place: it is already signed in, so /login would
+               offer it the one door it has already used - and, decisively, rendering a
+               navigation into this fragment killed TCGenesisArchitect's host process. Policy
+               evaluation awaits AppRoleHandler, so this fragment renders on an async
+               completion, and a NavigationManager call there sent the static HTML renderer into
+               unbounded recursion ("Stack overflow.", 1,170 frames). *@
+            <NotAuthorized Context="authState">
+                @if (NotAuthorizedRouting.ShouldRedirectToLogin(authState.User))
+                {
+                    <RedirectToLogin />
+                }
+                else
+                {
+                    <AccessDeniedContent />
+                }
+            </NotAuthorized>
+            <Authorizing>
+                @* Brief flash while auth state loads - shows nothing *@
+            </Authorizing>
+        </AuthorizeRouteView>
         <FocusOnNavigate RouteData="@routeData" Selector="h1" />
     </Found>
     <NotFound>
-        <PageTitle>Not found</PageTitle>
+        <PageTitle>Not found — Advanced Cloud Self Service</PageTitle>
         <LayoutView Layout="@typeof(MainLayout)">
             <p role="alert">Sorry, there's nothing at this address.</p>
         </LayoutView>

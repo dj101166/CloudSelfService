@@ -1,0 +1,48 @@
+@page "/login"
+@attribute [AllowAnonymous]
+@layout LoginLayout
+@inject IConfiguration Config
+@inject IWebHostEnvironment Env
+
+<PageTitle>Sign In — Advanced Cloud Self Service</PageTitle>
+
+<div class="login" data-testid="login-card">
+    <div class="login__spine" aria-hidden="true"></div>
+
+    <div class="login__body">
+        <div class="login__mark">CSS</div>
+        <h1 class="login__name">Advanced Cloud Self Service</h1>
+        <p class="login__sub">Browse, upload and download the files Advanced hosts for you.</p>
+
+        @if (Error == "signin_failed")
+        {
+            <div class="alert alert--danger" role="alert">Sign-in failed. Please try again.</div>
+        }
+        else if (Error == "entra_not_configured")
+        {
+            <div class="alert alert--danger" role="alert">Microsoft sign-in is not configured in this environment.</div>
+        }
+
+        <a href="/login/entra" class="login__door" data-testid="signin-entra">Sign in with Microsoft</a>
+
+        <p class="login__note">
+            Customers: sign in with your own organisation's work account - the one Advanced invited.
+        </p>
+
+        @if (DevSignIn.IsEnabled(Env, Config))
+        {
+            <p class="login__note" data-testid="dev-personas">
+                Development sign-in:
+                @foreach (var (key, label) in DevSignIn.Personas)
+                {
+                    <br /><a href="/dev/signin?as=@key">@label</a>
+                }
+            </p>
+        }
+    </div>
+</div>
+
+@code {
+    [SupplyParameterFromQuery(Name = "error")]
+    private string? Error { get; set; }
+}

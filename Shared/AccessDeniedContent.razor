@@ -1,0 +1,21 @@
+@*
+    Shared by Pages/AccessDenied.razor and the router's NotAuthorized branch, which renders it in
+    place rather than navigating to /access-denied - a navigation from that fragment crashes the
+    host (see NotAuthorizedRouting).
+
+    The heading is an h1 because FocusOnNavigate selects one.
+*@
+
+<h1 class="page-title-main" data-testid="access-denied">Access Denied</h1>
+<p class="u-muted" data-testid="access-denied-message">@Message</p>
+
+@code {
+    [Parameter] public string? Reason { get; set; }
+
+    private string Message => Reason switch
+    {
+        "unknown" => "Your account isn't set up for Cloud Self Service yet. Contact Advanced support and give them the email address you signed in with.",
+        "deactivated" => "Your access has been turned off. Contact Advanced support.",
+        _ => "You do not have permission to view this page.",
+    };
+}

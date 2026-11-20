@@ -1,8 +1,9 @@
 @inject IJSRuntime JS
 
 @*
-    The header's menu: which theme you want, and the release notes. Sign-in is not wired yet,
-    so there is no identity block, avatar or sign-out here; a later task adds them.
+    The header's account menu: who you are, which theme you want, the release notes, and how to
+    stop being signed in. Initials only - no photo: guests have none in our tenant, and the
+    sign-in requests no Graph scope to fetch one.
 
     Escape closes and returns focus to the trigger; arrows move between items.
 *@
@@ -11,13 +12,20 @@
             id="@TriggerId"
             class="appmenu__avatar"
             data-testid="app-menu-trigger"
-            title="Menu"
-            aria-label="Menu"
+            title="@(string.IsNullOrEmpty(this._displayName) ? "Account" : this._displayName)"
+            aria-label="Account"
             aria-haspopup="true"
             aria-expanded="@(this._open ? "true" : "false")"
             @onclick="this.Toggle"
             @onclick:stopPropagation="true">
-        <span class="appmenu__initials" aria-hidden="true"><Icon Name="users" /></span>
+        @if (string.IsNullOrEmpty(this._userName))
+        {
+            <span class="appmenu__initials" aria-hidden="true"><Icon Name="users" /></span>
+        }
+        else
+        {
+            <span class="appmenu__initials" aria-hidden="true">@this._initials</span>
+        }
     </button>
 
     @if (this._open)
@@ -28,6 +36,15 @@
 
         <div class="appmenu" role="menu" tabindex="-1"
              @onclick:stopPropagation="true">
+
+            @if (!string.IsNullOrEmpty(this._userName))
+            {
+                <div class="appmenu__who" data-testid="app-menu-who">
+                    <span class="appmenu__who-name">@this._displayName</span>
+                    <span class="appmenu__who-upn">@this._userName</span>
+                </div>
+                <div class="appmenu__rule" role="separator"></div>
+            }
 
             @*
                 Three modes, not a toggle. "System" is the default and the one a binary
@@ -78,6 +95,19 @@
                 <span class="appmenu__icon"><Icon Name="document" /></span>
                 <span class="appmenu__name">Release notes</span>
             </button>
+
+            @if (!string.IsNullOrEmpty(this._userName))
+            {
+                <div class="appmenu__rule" role="separator"></div>
+
+                @* A real navigation, not a circuit handler: dropping the cookie is an HTTP
+                   concern and the response is a redirect the browser must follow. *@
+                <a role="menuitem" class="appmenu__item appmenu__item--signout" href="/logout"
+                   data-testid="app-menu-signout">
+                    <span class="appmenu__icon"><Icon Name="signout" /></span>
+                    <span class="appmenu__name">Sign out</span>
+                </a>
+            }
         </div>
     }
 </div>
@@ -92,8 +122,14 @@
     /// <summary>Raised when "Release notes" is chosen; the layout owns the dialog.</summary>
     [Parameter] public EventCallback OnShowChangelog { get; set; }
 
+    [CascadingParameter]
+    private Task<AuthenticationState>? AuthState { get; set; }
+
     private bool   _open;
     private string _mode        = "system";
+    private string _userName    = "";
+    private string _displayName = "";
+    private string _initials    = "?";
 
     /// <inheritdoc />
     /// <remarks>
@@ -114,7 +150,32 @@
         // already applied it before Blazor connected, and it is the authority.
         this._mode = await this.JS.InvokeAsync<string>("cssp.getMode");
 
+        if (this.AuthState is not null)
+        {
+            var user = (await this.AuthState).User;
+            if (user.Identity?.IsAuthenticated == true)
+            {
+                this._userName    = user.FindFirst(System.Security.Claims.ClaimTypes.Name)?.Value ?? "";
+                this._displayName = user.FindFirst(CloudSelfService.Services.Identity.AppClaims.DisplayName)?.Value
+                                    ?? this._userName;
+                this._initials    = GetInitials(this._displayName);
+            }
+        }
+
         this.StateHasChanged();
+    }
+
+    private static string GetInitials(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return "?";
+        }
+
+        var parts = name.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        return parts.Length >= 2
+            ? $"{parts[0][0]}{parts[^1][0]}".ToUpperInvariant()
+            : name.Trim()[..Math.Min(2, name.Trim().Length)].ToUpperInvariant();
     }
 
     private void Toggle() => this._open = !this._open;

@@ -1,0 +1,24 @@
+@page "/signed-out"
+@attribute [AllowAnonymous]
+@layout LoginLayout
+
+<PageTitle>Signed Out — Advanced Cloud Self Service</PageTitle>
+
+<div class="login" data-testid="login-card">
+    <div class="login__spine" aria-hidden="true"></div>
+
+    <div class="login__body">
+        <div class="login__mark">CSS</div>
+        <h1 class="login__name">Signed Out</h1>
+        <p class="login__sub">
+            @(Reason == "inactivity" ? "You've been signed out due to inactivity." : "You've been signed out.")
+        </p>
+
+        <a href="/login" class="login__door">Return to sign in</a>
+    </div>
+</div>
+
+@code {
+    [SupplyParameterFromQuery(Name = "reason")]
+    private string? Reason { get; set; }
+}

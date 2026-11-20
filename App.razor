@@ -1,3 +1,4 @@
+@inject IConfiguration Config
 @inject IWebHostEnvironment Env
 
 <!DOCTYPE html>
@@ -74,6 +75,14 @@
             window.SessionGuard.initReconnectRecovery();
         });
     </script>
+    @if (HttpContext?.User?.Identity?.IsAuthenticated == true)
+    {
+        var idleMin = Config.GetValue<int?>("Auth:IdleTimeoutMinutes") ?? 60;
+        var warnSec = Config.GetValue<int?>("Auth:IdleWarningSeconds") ?? 120;
+        <script>
+            window.SessionGuard.initIdleTimeout({ idleMinutes: @idleMin, warningSeconds: @warnSec });
+        </script>
+    }
 </body>
 </html>
 
@@ -81,8 +90,8 @@
     // Pages marked [ExcludeFromInteractiveRouting] (the error page) render statically so they
     // still work when the circuit is broken.
     [CascadingParameter]
-    private HttpContext HttpContext { get; set; } = default!;
+    private HttpContext? HttpContext { get; set; }
 
     private IComponentRenderMode? RenderModeForPage =>
-        HttpContext.AcceptsInteractiveRouting() ? InteractiveServer : null;
+        HttpContext?.AcceptsInteractiveRouting() == true ? InteractiveServer : null;
 }

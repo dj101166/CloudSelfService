@@ -1,0 +1,248 @@
+using CloudSelfService.Models;
+using CloudSelfService.Services;
+using CloudSelfService.Services.Data;
+using CloudSelfService.Services.Identity;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging.Abstractions;
+using Xunit;
+
+namespace CloudSelfService.Tests;
+
+public class IdentityResolverTests
+{
+    private readonly InMemoryUserStore _users = new();
+    private readonly InMemoryCustomerStore _customers = new();
+    private readonly InMemoryAuditStore _audit = new();
+
+    private IdentityResolver Resolver(string owners = "") =>
+        new(_users, _customers, new AuditService(_audit, NullLogger<AuditService>.Instance),
+            new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Entra:StaffEmailDomain"] = "advancedutility.com",
+                ["Authorization:Owners"] = owners,
+            }).Build());
+
+    private static EntraIdentity Staff(string upn = "sam@advancedutility.com", string oid = "oid-sam") =>
+        new(oid, "our-tenant", upn, "Sam", IsGuest: false);
+
+    private static EntraIdentity Guest(string upn = "pat@customer.example", string oid = "oid-pat") =>
+        new(oid, "our-tenant", upn, "Pat", IsGuest: true);
+
+    private async Task<Customer> AddCustomer(bool active = true)
+    {
+        var c = new Customer(Guid.NewGuid(), "Contoso", active, "", null, CustomerCloud.Commercial, CrossTenantStatus.NotRequired);
+        await _customers.UpsertAsync(c);
+        return c;
+    }
+
+    private async Task<AppUser> AddCustomerUser(Guid customerId, string upn = "pat@customer.example", string? oid = null, bool active = true)
+    {
+        var u = new AppUser(Guid.NewGuid(), UserKind.Customer, customerId, upn, "Pat", oid, StaffRole.None, active,
+            DateTimeOffset.UtcNow, null);
+        await _users.UpsertAsync(u);
+        return u;
+    }
+
+    [Fact]
+    public async Task Admit_NewStaff_CreatedWithRoleNone_PendingRole()
+    {
+        var result = await Resolver().AdmitAsync(Staff());
+
+        Assert.Equal(AdmissionOutcome.AdmittedPendingRole, result.Outcome);
+        var stored = await _users.FindByObjectIdAsync("oid-sam");
+        Assert.NotNull(stored);
+        Assert.Equal(UserKind.Staff, stored!.Kind);
+        Assert.Equal(StaffRole.None, stored.StaffRole);
+        Assert.True(stored.Active);
+        Assert.Null(stored.CustomerId);
+        Assert.NotNull(stored.LastSignInAt);
+        Assert.Equal(stored.Id, result.User!.Id);
+    }
+
+    [Fact]
+    public async Task Admit_OwnerFromConfig_PromotedToOwner()
+    {
+        await _users.UpsertAsync(new AppUser(Guid.NewGuid(), UserKind.Staff, null, "boss@advancedutility.com", "Boss",
+            "oid-boss", StaffRole.Staff, true, DateTimeOffset.UtcNow, null));
+
+        var result = await Resolver(owners: "someone@advancedutility.com, BOSS@advancedutility.com")
+            .AdmitAsync(Staff("boss@advancedutility.com", "oid-boss"));
+
+        Assert.Equal(AdmissionOutcome.Admitted, result.Outcome);
+        Assert.Equal(StaffRole.Owner, (await _users.FindByObjectIdAsync("oid-boss"))!.StaffRole);
+    }
+
+    [Fact]
+    public async Task Admit_NewStaffListedAsOwner_CreatedAsOwner()
+    {
+        var result = await Resolver(owners: "sam@advancedutility.com").AdmitAsync(Staff());
+
+        Assert.Equal(AdmissionOutcome.Admitted, result.Outcome);
+        Assert.Equal(StaffRole.Owner, result.User!.StaffRole);
+    }
+
+    [Fact]
+    public async Task Admit_ExistingStaffByUpn_BindsOidAndAdmitted()
+    {
+        await _users.UpsertAsync(new AppUser(Guid.NewGuid(), UserKind.Staff, null, "sam@advancedutility.com", "Sam",
+            null, StaffRole.StaffAdmin, true, DateTimeOffset.UtcNow, null));
+
+        var result = await Resolver().AdmitAsync(Staff());
+
+        Assert.Equal(AdmissionOutcome.Admitted, result.Outcome);
+        Assert.Equal("oid-sam", (await _users.FindByUpnAsync("sam@advancedutility.com"))!.EntraObjectId);
+    }
+
+    [Fact]
+    public async Task Admit_InactiveStaff_Deactivated()
+    {
+        await _users.UpsertAsync(new AppUser(Guid.NewGuid(), UserKind.Staff, null, "sam@advancedutility.com", "Sam",
+            "oid-sam", StaffRole.StaffAdmin, false, DateTimeOffset.UtcNow, null));
+
+        var result = await Resolver().AdmitAsync(Staff());
+
+        Assert.Equal(AdmissionOutcome.Deactivated, result.Outcome);
+    }
+
+    [Fact]
+    public async Task Admit_UnknownGuest_UnknownCustomer_NoRecordCreated()
+    {
+        var result = await Resolver().AdmitAsync(Guest());
+
+        Assert.Equal(AdmissionOutcome.UnknownCustomer, result.Outcome);
+        Assert.Null(result.User);
+        Assert.Empty(await _users.ListAsync());
+    }
+
+    [Fact]
+    public async Task Admit_GuestWithStaffDomainEmail_NotTreatedAsStaff()
+    {
+        var result = await Resolver().AdmitAsync(Guest("sam@advancedutility.com", "oid-x"));
+
+        Assert.Equal(AdmissionOutcome.UnknownCustomer, result.Outcome);
+        Assert.Empty(await _users.ListAsync());
+    }
+
+    [Fact]
+    public async Task Admit_GuestMatchingStaffRecordByUpn_UnknownCustomer()
+    {
+        await _users.UpsertAsync(new AppUser(Guid.NewGuid(), UserKind.Staff, null, "sam@advancedutility.com", "Sam",
+            null, StaffRole.Owner, true, DateTimeOffset.UtcNow, null));
+
+        var result = await Resolver().AdmitAsync(Guest("sam@advancedutility.com", "oid-x"));
+
+        Assert.Equal(AdmissionOutcome.UnknownCustomer, result.Outcome);
+        Assert.Null((await _users.FindByUpnAsync("sam@advancedutility.com"))!.EntraObjectId);
+    }
+
+    [Fact]
+    public async Task Admit_MemberMatchingCustomerRecordByOid_NotAdmittedAsStaff()
+    {
+        var customer = await AddCustomer();
+        await AddCustomerUser(customer.Id, upn: "pat@customer.example", oid: "oid-sam");
+
+        var result = await Resolver().AdmitAsync(Staff());
+
+        Assert.Equal(AdmissionOutcome.UnknownCustomer, result.Outcome);
+    }
+
+    [Fact]
+    public async Task Admit_PreRegisteredGuestFirstSignIn_BindsOid()
+    {
+        var customer = await AddCustomer();
+        var user = await AddCustomerUser(customer.Id, upn: "Pat@Customer.example");
+
+        var result = await Resolver().AdmitAsync(Guest("pat@customer.example", "oid-pat"));
+
+        Assert.Equal(AdmissionOutcome.Admitted, result.Outcome);
+        var stored = await _users.GetAsync(user.Id);
+        Assert.Equal("oid-pat", stored!.EntraObjectId);
+        Assert.NotNull(stored.LastSignInAt);
+        Assert.Equal(UserKind.Customer, stored.Kind);
+        Assert.Equal(StaffRole.None, stored.StaffRole);
+    }
+
+    [Fact]
+    public async Task Admit_BoundGuestReturnsWithChangedEmail_AdmittedByOid()
+    {
+        var customer = await AddCustomer();
+        var user = await AddCustomerUser(customer.Id, oid: "oid-pat");
+
+        var result = await Resolver().AdmitAsync(Guest("pat.new@customer.example", "oid-pat"));
+
+        Assert.Equal(AdmissionOutcome.Admitted, result.Outcome);
+        Assert.Equal(user.Id, result.User!.Id);
+    }
+
+    [Fact]
+    public async Task Admit_UpnMatchButDifferentBoundOid_UnknownCustomer()
+    {
+        var customer = await AddCustomer();
+        var user = await AddCustomerUser(customer.Id, oid: "oid-original");
+
+        var result = await Resolver().AdmitAsync(Guest("pat@customer.example", "oid-impostor"));
+
+        Assert.Equal(AdmissionOutcome.UnknownCustomer, result.Outcome);
+        Assert.Equal("oid-original", (await _users.GetAsync(user.Id))!.EntraObjectId);
+    }
+
+    [Fact]
+    public async Task Admit_InactiveCustomer_Deactivated()
+    {
+        var customer = await AddCustomer(active: false);
+        await AddCustomerUser(customer.Id, oid: "oid-pat");
+
+        var result = await Resolver().AdmitAsync(Guest());
+
+        Assert.Equal(AdmissionOutcome.Deactivated, result.Outcome);
+    }
+
+    [Fact]
+    public async Task Admit_InactiveCustomerUser_Deactivated()
+    {
+        var customer = await AddCustomer();
+        await AddCustomerUser(customer.Id, oid: "oid-pat", active: false);
+
+        var result = await Resolver().AdmitAsync(Guest());
+
+        Assert.Equal(AdmissionOutcome.Deactivated, result.Outcome);
+    }
+
+    [Fact]
+    public async Task Admit_Denied_WritesDeniedAuditRow()
+    {
+        await Resolver().AdmitAsync(Guest(), new AuditContext("203.0.113.9", "corr-1"));
+
+        var row = Assert.Single(await _audit.QueryAsync(new AuditQuery()));
+        Assert.Equal("SignIn", row.Operation);
+        Assert.Equal(AuditResult.Denied, row.Result);
+        Assert.Equal("pat@customer.example", row.UserDisplay);
+        Assert.Equal("203.0.113.9", row.SourceIp);
+        Assert.Equal("corr-1", row.CorrelationId);
+    }
+
+    [Fact]
+    public async Task Admit_Deactivated_WritesDeniedAuditRow()
+    {
+        var customer = await AddCustomer(active: false);
+        var user = await AddCustomerUser(customer.Id, oid: "oid-pat");
+
+        await Resolver().AdmitAsync(Guest());
+
+        var row = Assert.Single(await _audit.QueryAsync(new AuditQuery()));
+        Assert.Equal(AuditResult.Denied, row.Result);
+        Assert.Equal(user.Id, row.UserId);
+        Assert.Equal(customer.Id, row.CustomerId);
+    }
+
+    [Fact]
+    public async Task Admit_Admitted_WritesSuccessAuditRow()
+    {
+        var result = await Resolver().AdmitAsync(Staff());
+
+        var row = Assert.Single(await _audit.QueryAsync(new AuditQuery()));
+        Assert.Equal("SignIn", row.Operation);
+        Assert.Equal(AuditResult.Success, row.Result);
+        Assert.Equal(result.User!.Id, row.UserId);
+    }
+}

@@ -1,0 +1,18 @@
+@inject NavigationManager NavigationManager
+
+@code {
+    // The latch is hygiene, NOT the crash fix - the recursion built a fresh component at every
+    // level, so a per-instance flag could never have stopped it. The fix is the branch in the
+    // router's NotAuthorized fragment, which never renders this component for a signed-in
+    // principal.
+    private bool _navigated;
+
+    protected override void OnInitialized()
+    {
+        if (_navigated) return;
+        _navigated = true;
+
+        // A bare "/login": nothing reads a returnUrl, and honouring one later would need validation.
+        NavigationManager.NavigateTo("/login");
+    }
+}

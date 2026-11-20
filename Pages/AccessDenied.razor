@@ -1,0 +1,21 @@
+@page "/access-denied"
+@attribute [AllowAnonymous]
+@layout LoginLayout
+
+<PageTitle>Access Denied — Advanced Cloud Self Service</PageTitle>
+
+<div class="login" data-testid="login-card">
+    <div class="login__spine" aria-hidden="true"></div>
+
+    <div class="login__body">
+        <div class="login__mark">CSS</div>
+        <AccessDeniedContent Reason="@Reason" />
+
+        <a href="/logout" class="login__door">Sign in with a different account</a>
+    </div>
+</div>
+
+@code {
+    [SupplyParameterFromQuery(Name = "reason")]
+    private string? Reason { get; set; }
+}

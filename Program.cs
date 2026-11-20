@@ -1,6 +1,15 @@
 using CloudSelfService;
+using CloudSelfService.Authorization;
+using CloudSelfService.Endpoints;
+using CloudSelfService.Models;
 using CloudSelfService.Services;
 using CloudSelfService.Services.Data;
+using CloudSelfService.Services.Identity;
+using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.Authentication.OpenIdConnect;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.IdentityModel.Protocols.OpenIdConnect;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -32,31 +41,108 @@ else
 builder.Services.AddSingleton<AuditService>();
 builder.Services.AddHsts(options => { options.MaxAge = TimeSpan.FromDays(365); });
 
-// ── Auth placeholder ─────────────────────────────────────────────────────────
-// Auth is intentionally disabled during initial development (Auth:Provider = None).
-//
-// To enable Microsoft Entra OIDC, add to appsettings.json:
-//   "Auth":  { "Provider": "Entra" },
-//   "Entra": { "TenantId": "", "ClientId": "", "ClientSecret": "", "AllowedEmailDomain": "" }
-// and reference EscapedDefects/Program.cs for the full OIDC + Graph wiring.
-//
-// Required packages (currently absent — add to .csproj when enabling):
-//   Microsoft.AspNetCore.Authentication.OpenIdConnect
-//   Azure.Identity
-// ─────────────────────────────────────────────────────────────────────────────
+builder.Services.AddScoped<CurrentUser>();
+builder.Services.AddSingleton<IdentityResolver>();
+builder.Services.AddSingleton<IAuthorizationHandler, AppRoleHandler>();
+builder.Services.AddCascadingAuthenticationState();
+
+DevSignIn.AssertSafe(builder.Environment, builder.Configuration);
+var entraEnabled = AuthEndpoints.IsEntraProvider(builder.Configuration);
+if (!entraEnabled && !DevSignIn.IsDevProvider(builder.Configuration))
+    throw new InvalidOperationException(
+        $"Auth:Provider must be '{AuthEndpoints.EntraProviderName}' or '{DevSignIn.ProviderName}' " +
+        $"(found '{builder.Configuration["Auth:Provider"]}').");
+if (entraEnabled)
+{
+    foreach (var key in new[] { "Entra:TenantId", "Entra:ClientId", "Entra:ClientSecret" })
+    {
+        if (string.IsNullOrWhiteSpace(builder.Configuration[key]))
+            throw new InvalidOperationException(
+                $"{key} is required when Auth:Provider is Entra. Set it in appsettings.Development.json (dev) " +
+                "or the App Service configuration (prod), or use Auth:Provider = Dev for local development.");
+    }
+}
+
+var authBuilder = builder.Services
+    .AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
+    .AddCookie(options =>
+    {
+        options.LoginPath = "/login";
+        options.AccessDeniedPath = "/access-denied";
+        options.Cookie.SameSite = SameSiteMode.Lax;
+        // SameAsRequest so plain-http dev works; production is Secure via X-Forwarded-Proto.
+        options.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
+        options.ExpireTimeSpan = TimeSpan.FromMinutes(
+            builder.Configuration.GetValue<int?>("Auth:IdleTimeoutMinutes") ?? 60);
+        options.SlidingExpiration = true;
+    });
+
+if (entraEnabled)
+{
+    var instance = builder.Configuration["Entra:Instance"] ?? "https://login.microsoftonline.com";
+    authBuilder.AddOpenIdConnect(OpenIdConnectDefaults.AuthenticationScheme, options =>
+    {
+        // Tenant-specific authority: B2B guests from other tenants (and other clouds) sign in
+        // through OUR tenant, which is what makes their oid stable and ours to bind.
+        options.Authority = $"{instance.TrimEnd('/')}/{builder.Configuration["Entra:TenantId"]}/v2.0";
+        options.ClientId = builder.Configuration["Entra:ClientId"];
+        options.ClientSecret = builder.Configuration["Entra:ClientSecret"];
+        options.ResponseType = OpenIdConnectResponseType.Code;
+        options.CallbackPath = builder.Configuration["Entra:CallbackPath"] ?? "/signin-oidc";
+        options.SignInScheme = CookieAuthenticationDefaults.AuthenticationScheme;
+        options.SaveTokens = false;
+        options.GetClaimsFromUserInfoEndpoint = false;
+        options.MapInboundClaims = false;
+        options.Scope.Clear();
+        options.Scope.Add("openid");
+        options.Scope.Add("profile");
+        options.Scope.Add("email");
+        options.Events = new OpenIdConnectEvents
+        {
+            OnTokenValidated = AuthEndpoints.OnTokenValidatedAsync,
+            OnRemoteFailure = ctx =>
+            {
+                ctx.Response.Redirect("/login?error=signin_failed");
+                ctx.HandleResponse();
+                return Task.CompletedTask;
+            },
+        };
+    });
+}
+
+// No FallbackPolicy: pages carry [Authorize] themselves, and a fallback that requires auth
+// makes the cookie handler redirect /login to itself.
+builder.Services.AddAuthorization(options =>
+{
+    options.AddPolicy(Policies.Staff, p => p.Requirements.Add(new AppRoleRequirement(StaffRole.Staff)));
+    options.AddPolicy(Policies.StaffAdmin, p => p.Requirements.Add(new AppRoleRequirement(StaffRole.StaffAdmin)));
+    options.AddPolicy(Policies.Owner, p => p.Requirements.Add(new AppRoleRequirement(StaffRole.Owner)));
+});
 
 var app = builder.Build();
+
+var pg = app.Services.GetRequiredService<PgsqlContext>();
+// An unreachable database fails the start on purpose.
+if (pg.IsAvailable) await pg.EnsureSchemaAsync();
+else app.Logger.LogWarning("ConnectionStrings:Default is not set; using in-memory stores. Data is not persisted.");
+
+// TLS terminates at the App Gateway, the only ingress. Known networks are cleared so the gateway's
+// X-Forwarded-Proto is honoured (otherwise the OIDC redirect URI is built as http://). The same
+// trust applies to X-Forwarded-For, so the audit SourceIp is only as good as that single-ingress
+// guarantee.
+var forwarded = new ForwardedHeadersOptions
+{
+    ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto,
+};
+forwarded.KnownIPNetworks.Clear();
+forwarded.KnownProxies.Clear();
+app.UseForwardedHeaders(forwarded);
 
 if (!app.Environment.IsDevelopment())
 {
     app.UseExceptionHandler("/Error", createScopeForErrors: true);
     app.UseHsts();
 }
-
-var pg = app.Services.GetRequiredService<PgsqlContext>();
-// An unreachable database fails the start on purpose.
-if (pg.IsAvailable) await pg.EnsureSchemaAsync();
-else app.Logger.LogWarning("ConnectionStrings:Default is not set; using in-memory stores. Data is not persisted.");
 
 app.UseHttpsRedirection();
 
@@ -80,9 +166,13 @@ app.Use(async (ctx, next) =>
     await next();
 });
 
+app.MapStaticAssets();
+
+app.UseAuthentication();
+app.UseAuthorization();
 app.UseAntiforgery();
 
-app.MapStaticAssets();
+AuthEndpoints.Map(app);
 app.MapRazorComponents<App>().AddInteractiveServerRenderMode();
 
 app.Run();
