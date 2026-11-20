@@ -22,7 +22,8 @@ public static class UploadStatus
 /// ExistedAtBegin records that Begin found a file to replace, so Complete audits Overwrite rather than Upload.
 /// StagingRemoved is true once nothing of this session is left in storage; until then the row is kept so cleanup
 /// can retry. Blob sessions start true because uncommitted blocks need no cleanup.
-/// StagingSize is the logical size the Files staging file has been grown to (it starts empty, see R32).
+/// StagingSize is the logical size the Files staging file has been grown to: 0 until the first piece arrives, then the
+/// session's full size (R32, R34).
 /// CleanupRefused is set when cleanup refused to touch storage for this session (target gone or changed kind, or a
 /// staging path that isn't the session's own); the refusal is logged once and the sweep stops retrying it.
 /// </summary>

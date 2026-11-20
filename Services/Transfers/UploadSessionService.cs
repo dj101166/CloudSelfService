@@ -41,6 +41,7 @@ public sealed class UploadSessionService
     public const string UploadLostMessage = "This upload's data is no longer in storage. Please start it again.";
     public const string TooManyUploadsMessage = "You have too many uploads in progress. Finish or cancel one, then try again.";
     public const string StorageSlowMessage = "Storage was slow to respond; the piece will be retried.";
+    public const string InterruptedMessage = "Upload was interrupted; please start again.";
     private const string StagingSuffix = ".cssupload-";
     private const int MaxSegmentLength = 255;
 
@@ -292,15 +293,18 @@ public sealed class UploadSessionService
 
             var backend = _backends.For(target);
             var offset = (long)index * ChunkMath.ChunkSize;
-            // Files quota is charged on logical size, so the staging file grows only as far as pieces actually land.
-            if (target.Kind == StorageKind.FileShare)
+            // Files quota is charged on logical size, so the full size is reserved only when the first piece arrives
+            // (bounded by the per-user byte cap). It is always grown to exactly session.Size, never offset + length: a
+            // timed-out grow that Azure applies late then sets the same size again instead of truncating pieces another
+            // chunk has written since (R34).
+            if (target.Kind == StorageKind.FileShare && session.StagingSize < session.Size)
             {
                 using var growTimeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 growTimeout.CancelAfter(GrowTimeout);
                 try
                 {
-                    await _sessions.EnsureStagingSizeAsync(session.Id, offset + expected,
-                        token => backend.GrowStagingAsync(target, session.StagingPath, offset + expected, token), growTimeout.Token);
+                    await _sessions.EnsureStagingSizeAsync(session.Id, session.Size,
+                        token => backend.GrowStagingAsync(target, session.StagingPath, session.Size, token), growTimeout.Token);
                 }
                 catch (Exception ex) when (growTimeout.IsCancellationRequested && !ct.IsCancellationRequested
                                            && ex is OperationCanceledException or StorageFailureException)
@@ -318,11 +322,15 @@ public sealed class UploadSessionService
         catch (StorageFailureException failure)
         {
             LogStorageFailure(failure, "chunk", target.Id, session.FinalPath, ctx);
-            // The staging file (or the session's blocks) is gone or truncated; no retry of this piece can succeed.
-            if (failure.Kind == StorageFailureKind.NotFound)
-                return new(AccessOutcome.Conflict, UploadLostMessage, UploadErrorCodes.Restart);
-            if (failure.Kind == StorageFailureKind.Conflict && failure.Message == StorageErrorMapper.StagingIncompleteMessage)
-                return new(AccessOutcome.Conflict, failure.Message, UploadErrorCodes.Restart);
+            // The staging file (or the session's blocks) is gone or truncated; no retry of this piece can succeed. The
+            // session is ended so the client's next Begin starts afresh instead of resuming into the same failure.
+            if (failure.Kind == StorageFailureKind.NotFound
+                || (failure.Kind == StorageFailureKind.Conflict && failure.Message == StorageErrorMapper.StagingIncompleteMessage))
+            {
+                await EndInterruptedAsync(userId, auth.UserUpn, target, session, ctx);
+                return new(AccessOutcome.Conflict, failure.Kind == StorageFailureKind.NotFound ? UploadLostMessage : failure.Message,
+                    UploadErrorCodes.Restart);
+            }
             return new(OutcomeOf(failure), failure.Message);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -512,6 +520,16 @@ public sealed class UploadSessionService
         await RecordAsync(userId, auth.UserUpn, target, Operation(session), session.FinalPath, 0, AuditResult.Failed,
             CancelledByUserMessage, ctx);
         return new(AccessOutcome.Ok);
+    }
+
+    /// <summary>Aborts a session whose staged data can no longer be completed; a session another call already ended is left alone.</summary>
+    private async Task EndInterruptedAsync(Guid userId, string? upn, StorageTarget target, UploadSession session, AuditContext ctx)
+    {
+        if (!await _sessions.TrySetStatusAsync(session.Id, UploadStatus.Open, UploadStatus.Aborted, ct: CancellationToken.None))
+            return;
+        if (await RemoveStagingAsync(target, session))
+            await _sessions.SetStagingRemovedAsync(session.Id, CancellationToken.None);
+        await RecordAsync(userId, upn, target, Operation(session), session.FinalPath, 0, AuditResult.Failed, InterruptedMessage, ctx);
     }
 
     /// <summary>

@@ -317,6 +317,10 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
             var tree = TreeFor(t.Id);
             if (!tree.StagingSizes.ContainsKey(stagingPath)) throw Fail(StorageFailureKind.NotFound);
             tree.StagingSizes[stagingPath] = size;
+            // Like Set File Properties with a smaller x-ms-content-length: bytes past the new end are discarded.
+            if (tree.Staging.TryGetValue(stagingPath, out var blocks))
+                foreach (var id in blocks.Where(b => b.Value.Offset + b.Value.Data.LongLength > size).Select(b => b.Key).ToList())
+                    blocks.Remove(id);
         }
     }
 

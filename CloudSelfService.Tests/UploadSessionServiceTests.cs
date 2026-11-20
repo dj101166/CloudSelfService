@@ -1222,25 +1222,75 @@ public class UploadSessionServiceTests
         Assert.Equal(0, _fake.TotalStagingBytes);
     }
 
-    [Fact]
-    public async Task PutChunk_FileShare_GrowsStagingOnlyToHighestWrittenEnd()
+    // R34: one grow per session, to the full size, whichever piece arrives first. Order 1,2,0 is what tells this apart
+    // from the old end-of-piece growth (which would stop at 8 MiB on piece 1); 2,0,1 alone would not.
+    [Theory]
+    [InlineData(new[] { 2, 0, 1 })]
+    [InlineData(new[] { 1, 2, 0 })]
+    public async Task PutChunk_FirstChunkGrowsStagingToFullSize_OnceOnly(int[] order)
     {
         var svc = Service();
         var file = Bytes(9 * Mi + 1);
         var begin = await BeginOk(svc, _contrib, _share, "", "a.bin", file.Length);
         var staging = (await _sessions.GetAsync(begin.SessionId))!.StagingPath;
 
-        await Put(svc, _contrib.Id, begin.SessionId, file, 1);
-        Assert.Equal(8L * Mi, _fake.StagingLength(_share.Id, staging));
-        await Put(svc, _contrib.Id, begin.SessionId, file, 0);
-        Assert.Equal(8L * Mi, _fake.StagingLength(_share.Id, staging));
-        Assert.Equal(1, _fake.Calls.Count(c => c.StartsWith("GrowStaging")));
-        await Put(svc, _contrib.Id, begin.SessionId, file, 2);
+        await Put(svc, _contrib.Id, begin.SessionId, file, order[0]);
         Assert.Equal(file.Length, _fake.StagingLength(_share.Id, staging));
-        Assert.Equal(file.Length, (await _sessions.GetAsync(begin.SessionId))!.StagingSize);
+        foreach (var i in order.Skip(1))
+            await Put(svc, _contrib.Id, begin.SessionId, file, i);
 
+        var grows = _fake.Calls.Where(c => c.StartsWith("GrowStaging")).ToList();
+        Assert.Equal(new[] { $"GrowStaging:{staging}:{file.Length}" }, grows);
+        Assert.Equal(file.Length, (await _sessions.GetAsync(begin.SessionId))!.StagingSize);
         Assert.Equal(AccessOutcome.Ok, (await svc.CompleteAsync(_contrib.Id, begin.SessionId, Ctx)).Outcome);
         Assert.Equal(file, await ReadFile(_share, "a.bin"));
+    }
+
+    // R34: a timed-out grow that storage applies late is the same full-size grow, so written pieces survive.
+    [Fact]
+    public async Task PutChunk_LateDuplicateGrowToSameSize_KeepsWrittenBytes()
+    {
+        var svc = Service();
+        var file = Bytes(9 * Mi + 1);
+        var begin = await BeginOk(svc, _contrib, _share, "", "a.bin", file.Length);
+        foreach (var i in new[] { 1, 2, 0 })
+            await Put(svc, _contrib.Id, begin.SessionId, file, i);
+        var staging = (await _sessions.GetAsync(begin.SessionId))!.StagingPath;
+
+        await _fake.GrowStagingAsync(_share, staging, file.Length, default);
+
+        Assert.Equal(AccessOutcome.Ok, (await svc.CompleteAsync(_contrib.Id, begin.SessionId, Ctx)).Outcome);
+        Assert.Equal(SHA256.HashData(file), SHA256.HashData(await ReadFile(_share, "a.bin")));
+    }
+
+    // The fake models Azure's truncation, so this pins why the grow target must never be smaller than the session.
+    [Fact]
+    public async Task Fake_ShrinkingStaging_DiscardsPiecesPastTheEnd()
+    {
+        var svc = Service();
+        var file = Bytes(9 * Mi);
+        var begin = await BeginOk(svc, _contrib, _share, "", "a.bin", file.Length);
+        await Put(svc, _contrib.Id, begin.SessionId, file, 0);
+        await Put(svc, _contrib.Id, begin.SessionId, file, 2);
+        var staging = (await _sessions.GetAsync(begin.SessionId))!.StagingPath;
+
+        await _fake.GrowStagingAsync(_share, staging, 8L * Mi, default);
+        await _fake.GrowStagingAsync(_share, staging, file.Length, default);
+        await Put(svc, _contrib.Id, begin.SessionId, file, 1);
+
+        // Piece 2's block was discarded by the shrink, so the commit can't assemble the file and nothing is published.
+        Assert.NotEqual(AccessOutcome.Ok, (await svc.CompleteAsync(_contrib.Id, begin.SessionId, Ctx)).Outcome);
+        Assert.Null(await _fake.GetItemAsync(_share, "a.bin", default));
+    }
+
+    [Fact]
+    public async Task PutChunk_ZeroByteUpload_NeverGrows()
+    {
+        var svc = Service();
+        var begin = await BeginOk(svc, _contrib, _share, "", "empty.txt", 0);
+
+        Assert.Equal(AccessOutcome.Ok, (await svc.CompleteAsync(_contrib.Id, begin.SessionId, Ctx)).Outcome);
+        Assert.DoesNotContain(_fake.Calls, c => c.StartsWith("GrowStaging"));
     }
 
     [Fact]
@@ -1593,6 +1643,10 @@ public class UploadSessionServiceTests
 
         Assert.Equal(AccessOutcome.Conflict, result.Outcome);
         Assert.Equal(UploadErrorCodes.Restart, result.Code);
+        AssertInterrupted(await _sessions.GetAsync(begin.SessionId));
+        var again = await BeginOk(svc, _contrib, _share, "", "a.bin", data.Length);
+        Assert.NotEqual(begin.SessionId, again.SessionId);
+        Assert.Empty(again.Received);
     }
 
     // ---- Round 3: M2 format checks before the database ----
@@ -1694,13 +1748,27 @@ public class UploadSessionServiceTests
         var file = Bytes(9 * Mi);
         var begin = await BeginOk(svc, _contrib, _share, "", "a.bin", file.Length);
         await Put(svc, _contrib.Id, begin.SessionId, file, 1);
-        // Shrunk outside the portal; the recorded size still says 8 MiB, so the next piece isn't grown first.
+        // Shrunk outside the portal; the recorded size still says full, so the next piece isn't grown first.
         await _fake.GrowStagingAsync(_share, (await _sessions.GetAsync(begin.SessionId))!.StagingPath, 0, default);
 
         var result = await Put(svc, _contrib.Id, begin.SessionId, file, 0);
 
         Assert.Equal(AccessOutcome.Conflict, result.Outcome);
         Assert.Equal(UploadErrorCodes.Restart, result.Code);
+        AssertInterrupted(await _sessions.GetAsync(begin.SessionId));
+
+        // The next Begin for the same file starts afresh rather than resuming into the same failure.
+        var again = await BeginOk(svc, _contrib, _share, "", "a.bin", file.Length);
+        Assert.NotEqual(begin.SessionId, again.SessionId);
+        Assert.Empty(again.Received);
+    }
+
+    private void AssertInterrupted(UploadSession? session)
+    {
+        Assert.Equal(UploadStatus.Aborted, session!.Status);
+        Assert.True(session.StagingRemoved);
+        var row = Assert.Single(UploadAudits().GetAwaiter().GetResult(), r => r.Error == UploadSessionService.InterruptedMessage);
+        Assert.Equal(AuditResult.Failed, row.Result);
     }
 
     [Fact]

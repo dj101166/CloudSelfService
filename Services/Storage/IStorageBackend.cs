@@ -14,12 +14,16 @@ public interface IStorageBackend
     Task DeleteAsync(StorageTarget t, string path, bool isFolder, CancellationToken ct);
     /// <summary>
     /// Prepares an upload. Files creates an EMPTY staging file stamped with <paramref name="uploadSessionId"/>: Azure
-    /// Files charges quota on logical size, so the file is grown piece by piece (<see cref="GrowStagingAsync"/>) rather
-    /// than allocated at the declared <paramref name="size"/>. Blob does nothing (uncommitted blocks are invisible).
+    /// Files charges quota on logical size, so the declared <paramref name="size"/> is reserved only when the first piece
+    /// arrives (one <see cref="GrowStagingAsync"/> to the full size), never by a Begin alone; the per-user byte cap bounds
+    /// what that can reserve. Blob does nothing (uncommitted blocks are invisible).
     /// </summary>
     Task BeginUploadAsync(StorageTarget t, string stagingPath, long size, CancellationToken ct, Guid? uploadSessionId = null);
 
-    /// <summary>Sets the Files staging file's logical size to exactly <paramref name="size"/> (callers only ever grow it). Blob: no-op.</summary>
+    /// <summary>
+    /// Sets the Files staging file's logical size to exactly <paramref name="size"/>. Called once per session, with the
+    /// session's full size, so a late-applied retry of it can never truncate pieces already written. Blob: no-op.
+    /// </summary>
     Task GrowStagingAsync(StorageTarget t, string stagingPath, long size, CancellationToken ct);
     Task WriteChunkAsync(StorageTarget t, string stagingPath, string finalPath, string blockId, long offset, Stream data, long length, byte[] md5, CancellationToken ct);
     /// <summary>
