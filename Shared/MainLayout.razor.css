@@ -1,333 +1,209 @@
-.page {
-    position: relative;
-    display: flex;
-    flex-direction: column;
-}
+/*
+ * The application shell: header, collapsible sidebar, main column.
+ *
+ * Every colour reads a token from theme.css — there are no hex values below, by design.
+ *
+ * ⚠ What is NOT here is the point of the file. The pre-sumi shell painted a navy topbar
+ * (#06224a) and then dressed everything on it in white: rgba(255,255,255,.7) on the version
+ * chip, #fff on its hover, #fff initials on the avatar, rgba(255,255,255,.75) on the profile
+ * caret. Every one of those was correct ONLY because of the navy, and removing the navy — which
+ * this file does — turns each into white on a light chrome tint at roughly 1.1:1. Nothing in a
+ * computed style says so; it has to be read as a contrast ratio. The replacements below are
+ * token pairs that hold in both themes rather than colours that happen to work on one ground.
+ */
 
-main {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-}
+/*
+ * ⚠ Nothing here declares a custom property, deliberately. The shell's layout tokens
+ * (--header-height, --sidebar-width, --sidebar-rail) are in app.css's "Layout tokens" block,
+ * because Blazor rewrites a SELECTOR in a scoped stylesheet by appending the scope attribute:
+ * `:root { }` here would become `:root[b-xxxxx]` and match nothing at all, and every var()
+ * reading those names would silently resolve to the empty string.
+ */
 
-.sidebar {
-    background: var(--sidebar-bg);
-}
+.app { display: flex; flex-direction: column; height: 100dvh; }
 
-.top-row {
-    background-color: #06224a;
-    border-bottom: 1px solid #1a4b82;
-    justify-content: space-between;
-    height: 3.5rem;
+.app__header {
     display: flex;
     align-items: center;
+    gap: 14px;
+    padding: 0 16px;
+    height: var(--header-height);
+    flex: none;
+    background: var(--surface-chrome);
+    border-bottom: 1px solid var(--border);
+    z-index: 30;
 }
 
-.topbar-brand-wrap {
+.app__brand {
     display: inline-flex;
     align-items: center;
-}
-
-/* ── Version button ──────────────────────────────────────────────────────── */
-
-.btn-version {
-    font-size: 0.72rem;
-    font-weight: 600;
-    color: rgba(255, 255, 255, 0.7);
-    background: none;
-    border: 1px solid rgba(255, 255, 255, 0.3);
-    border-radius: 10px;
-    padding: 1px 8px;
+    gap: 10px;
+    font-family: var(--font-brand);
+    font-weight: var(--weight-bold);
+    font-size: 14px;
+    letter-spacing: -0.01em;
+    color: var(--text-primary);
     white-space: nowrap;
-    cursor: pointer;
-    transition: color 0.15s, border-color 0.15s, background 0.15s;
-    line-height: 1.6;
-}
 
-.btn-version:hover {
-    color: #fff;
-    border-color: rgba(255, 255, 255, 0.65);
-    background: rgba(255, 255, 255, 0.1);
-}
-
-/* ── Changelog panel ─────────────────────────────────────────────────────── */
-
-.changelog-backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: 9998;
-}
-
-.changelog-panel {
-    position: fixed;
-    top: 4.25rem;
-    left: 50%;
-    transform: translateX(-50%);
-    width: 580px;
-    max-width: calc(100vw - 20px);
-    max-height: calc(100vh - 5rem);
-    background: var(--surface-1);
-    border: 1px solid var(--border-color);
-    border-radius: 10px;
-    box-shadow: 0 8px 40px rgba(0, 0, 0, 0.28);
-    z-index: 9999;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-    color: var(--text-color);
-}
-
-.changelog-panel-topbar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 0.45rem 0.9rem;
-    border-bottom: 1px solid var(--border-color);
-    flex-shrink: 0;
-    background: var(--surface-1);
-}
-
-.changelog-panel-appname {
-    font-size: 0.78rem;
-    color: var(--text-color);
-    opacity: 0.7;
-    font-weight: 400;
-}
-
-.changelog-close-btn {
-    background: none;
-    border: none;
-    color: var(--text-color);
-    opacity: 0.55;
-    font-size: 1rem;
-    line-height: 1;
-    cursor: pointer;
-    padding: 2px 6px;
-    border-radius: 4px;
-    transition: color 0.13s, background 0.13s, opacity 0.13s;
-}
-
-.changelog-close-btn:hover {
-    opacity: 1;
-    background: var(--surface-2);
-}
-
-.changelog-panel-body {
-    flex: 1;
-    overflow-y: auto;
-    background: var(--surface-1);
-}
-
-.changelog-main-title {
-    font-size: 1.5rem;
-    font-weight: 700;
-    color: var(--text-color);
-    margin: 0;
-    padding: 0.9rem 1.1rem 0.6rem;
-}
-
-.changelog-divider {
-    border: none;
-    border-top: 1px solid var(--border-color);
-    margin: 0;
-}
-
-.changelog-version-section {
-    border-bottom: 1px solid var(--border-color);
-}
-
-.changelog-version-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    width: 100%;
-    padding: 0.75rem 1.1rem;
-    background: none;
-    border: none;
-    cursor: pointer;
-    text-align: left;
-    gap: 0.5rem;
-    transition: background 0.13s;
-    color: var(--text-color);
-}
-
-.changelog-version-header:hover {
-    background: var(--surface-2);
-}
-
-.changelog-version-label {
-    display: block;
-    font-size: 0.95rem;
-    font-weight: 700;
-    color: var(--text-color);
-    line-height: 1.3;
-}
-
-.changelog-version-date {
-    display: block;
-    font-size: 0.78rem;
-    font-weight: 600;
-    color: var(--text-color);
-    opacity: 0.65;
-    margin-top: 2px;
-}
-
-.changelog-chevron {
-    font-size: 0.6rem;
-    color: var(--text-color);
-    opacity: 0.55;
-    flex-shrink: 0;
-}
-
-.changelog-version-body {
-    padding: 0 1.1rem 0.9rem 1.1rem;
-    background: var(--surface-1);
-}
-
-.changelog-list {
-    margin: 0;
-    padding-left: 1.2rem;
-    list-style: disc;
-    user-select: none;
-}
-
-.changelog-list > li {
-    font-size: 0.83rem;
-    color: var(--text-color);
-    line-height: 1.55;
-    margin-bottom: 0.3rem;
-    font-weight: 600;
-}
-
-.changelog-sublist {
-    margin: 0.25rem 0 0;
-    padding-left: 1.1rem;
-    list-style: circle;
-    user-select: none;
-}
-
-.changelog-sublist > li {
-    font-size: 0.78rem;
-    color: var(--text-color);
-    opacity: 0.8;
-    line-height: 1.5;
-    margin-bottom: 0.15rem;
-    font-weight: 400;
-}
-
-.topbar-brand-logo {
-    width: 210px;
-    max-width: 100%;
-    height: auto;
-    display: block;
-}
-
-.topbar-actions {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.85rem;
-}
-
-/* ── Topbar action buttons ───────────────────────────────────────────────── */
-
-.btn-topbar-action {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.4rem;
-    padding: 0.4rem 0.75rem;
-    background: rgba(255, 255, 255, 0.08);
-    border: 1px solid rgba(255, 255, 255, 0.18);
-    border-radius: 6px;
-    color: #d8eeff;
-    font-size: 0.85rem;
-    font-weight: 500;
-    cursor: pointer;
+    /* At rest as well as on hover. app.css styles bare `a` without clearing the decoration,
+       so a hover-only rule leaves the wordmark underlined until the pointer is on it. Caught
+       on RegressionResults by MEASURING the computed style, after reading the markup did not. */
     text-decoration: none;
-    transition: background 0.15s, color 0.15s, border-color 0.15s;
 }
 
-.btn-topbar-action:hover {
-    background: rgba(255, 255, 255, 0.18);
-    border-color: rgba(255, 255, 255, 0.32);
-    color: #ffffff;
+.app__brand:hover { text-decoration: none; color: var(--text-primary); }
+
+.app__logo { width: 22px; height: 22px; }
+
+/*
+ * The version chip. It opens the release notes, so it is a button and not a label — and it is
+ * sized to read as metadata beside the wordmark rather than as an action competing with it.
+ *
+ * This replaces .btn-version, whose :hover set `color: #fff` for the navy topbar. On the chrome
+ * tint that was 1.14:1 in light; the accent pairing below is 5.21:1.
+ */
+.app__version {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: var(--weight-strong);
+    color: var(--text-secondary);
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-pill);
+    padding: 1px 8px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
 }
 
-.btn-topbar-action:active {
-    background: rgba(255, 255, 255, 0.24);
+.app__version:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: var(--accent-soft);
 }
 
-.top-row .btn-outline-secondary {
-    color: #d8eeff;
-    border-color: #2f6fa8;
+.app__version:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); }
+
+.app__rail-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: var(--control-height-sm);
+    height: var(--control-height-sm);
+    flex: none;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: color 0.15s ease, background 0.15s ease;
 }
 
-.top-row .btn-outline-secondary:hover {
-    color: #031a43;
-    background-color: #2fc0e6;
-    border-color: #2fc0e6;
+.app__rail-toggle:hover { color: var(--text-primary); background: var(--surface-hover); }
+.app__rail-toggle:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); }
+
+/* Pushes the avatar menu to the right edge. */
+.app__header-spacer { flex: 1; }
+
+.app__body { display: flex; flex: 1; min-height: 0; }
+
+.app__sidebar {
+    width: var(--sidebar-width);
+    flex: none;
+    background: var(--surface-chrome);
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 10px 8px;
+    transition: width 0.15s ease;
 }
 
-    .top-row ::deep a, .top-row .btn-link {
-        color: #b9defa;
-        white-space: nowrap;
-        margin-left: 1.5rem;
-    }
+/*
+ * Collapsed is a rail, not a hidden sidebar: the icons stay, the labels go. Keyed off an
+ * attribute on <html> rather than a class on the element, because App.razor's pre-paint script
+ * sets it before Blazor exists and cannot reach into a component.
+ *
+ * ::deep is required on everything inside the sidebar: NavMenu renders the nav, so the links
+ * and group labels carry NavMenu's scope id, not this file's.
+ */
+html[data-sidebar="collapsed"] .app__sidebar { width: var(--sidebar-rail); }
 
-    .top-row a:first-child {
-        overflow: hidden;
-        text-overflow: ellipsis;
-    }
+html[data-sidebar="collapsed"] .app__sidebar ::deep .app__nav-link__label,
+html[data-sidebar="collapsed"] .app__sidebar ::deep .app__nav-group { display: none; }
 
-@media (max-width: 640.98px) {
-    .top-row:not(.auth) {
-        display: none;
-    }
-
-    .top-row.auth {
-        justify-content: space-between;
-    }
-
-    .top-row a, .top-row .btn-link {
-        margin-left: 0;
-    }
+html[data-sidebar="collapsed"] .app__sidebar ::deep .app__nav-link {
+    justify-content: center;
+    padding-left: 0;
+    padding-right: 0;
 }
 
-@media (min-width: 641px) {
-    .page {
-        flex-direction: row;
+/* Only ever visible below the compact breakpoint; inert above it. */
+.app__scrim { display: none; }
+
+.app__main { flex: 1; min-width: 0; overflow-y: auto; padding: 18px 20px; }
+
+.app__main-inner { max-width: 1600px; margin: 0 auto; }
+
+/* ---------- Compact screens ---------- */
+
+/*
+ * One breakpoint, at the width where the sidebar stops earning its column. Below it the sidebar
+ * becomes a drawer over the content rather than a column beside it, and the rail toggle opens
+ * it. Layout only: nothing changes what it does, and no colour moves.
+ *
+ * Note what is NOT here, and was in the stylesheet this replaces: no `.top-row { display: none }`
+ * hiding the header (and with it sign-out and the theme control) below 641px, and no
+ * unconditional `overflow: hidden` on a container whose scroller is gated above the breakpoint.
+ * Both are the defects recorded in reference_responsive_layout_template_defects.md, and both are
+ * fixed here by construction rather than patched.
+ *
+ * The breakpoint must stay in step with cloudselfservice.js's isCompact() — the two together are what make one
+ * button mean "collapse the rail" on a wide screen and "open the drawer" on a narrow one.
+ */
+@media (max-width: 860px) {
+    .app__sidebar {
+        position: fixed;
+        top: var(--header-height);
+        bottom: 0;
+        left: 0;
+        z-index: 25;
+        width: var(--sidebar-width);
+        transform: translateX(-100%);
+        transition: transform 0.15s ease;
+        box-shadow: var(--shadow-soft);
     }
 
-    .sidebar {
-        width: 250px;
-        height: 100vh;
-        position: sticky;
-        top: 0;
+    /* Below the breakpoint the persisted collapse state is ignored: the drawer starts closed on
+       every load regardless of what a wide screen last chose. */
+    html[data-sidebar="expanded"] .app__sidebar,
+    html[data-sidebar="collapsed"] .app__sidebar { transform: translateX(-100%); }
+
+    .app__sidebar.is-open,
+    html[data-sidebar="expanded"] .app__sidebar.is-open,
+    html[data-sidebar="collapsed"] .app__sidebar.is-open {
+        transform: translateX(0);
+        width: var(--sidebar-width);
     }
 
-    .page {
-        height: 100vh;
+    /* An open drawer always shows labels, whatever the rail state says. */
+    html[data-sidebar="collapsed"] .app__sidebar.is-open ::deep .app__nav-link__label,
+    html[data-sidebar="collapsed"] .app__sidebar.is-open ::deep .app__nav-group { display: block; }
+
+    html[data-sidebar="collapsed"] .app__sidebar.is-open ::deep .app__nav-link {
+        justify-content: flex-start;
+        padding-left: 10px;
+        padding-right: 10px;
     }
 
-    .top-row {
-        position: sticky;
-        top: 0;
-        z-index: 1;
+    .app__scrim {
+        display: block;
+        position: fixed;
+        inset: var(--header-height) 0 0 0;
+        background: var(--surface-scrim);
+        z-index: 24;
     }
 
-    .top-row, article {
-        padding-left: 2rem !important;
-        padding-right: 1.5rem !important;
-    }
+    .app__main { padding: 14px 16px; }
 
-    main {
-        overflow: hidden;
-    }
-
-    article {
-        flex: 1;
-        min-height: 0;
-        overflow-y: auto;
-        padding-top: 0.7rem;
-        padding-bottom: 0.7rem;
-    }
+    .app__brand__text { display: none; }
 }

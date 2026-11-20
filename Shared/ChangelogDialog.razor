@@ -1,0 +1,94 @@
+@using CloudSelfService.Services
+
+@*
+    The release notes, opened from the version chip in the header. A centred dialog, like
+    Nexus's own release notes and like every other overlay the sumi skin will ship — NOT a
+    slide-over and not the fixed panel pinned under the topbar that this app used before.
+
+    This component renders; it does not parse. ChangelogDocument reads CHANGELOG.md out of the
+    assembly and turns it into entries, and each entry's body arrives here as HTML that Markdig
+    already produced from the markdown — which is why a new "### 🛡️ Security" heading needs no
+    change here or in ChangelogDocument.
+
+    CHANGELOG.md is now the ONLY place a release is recorded. The hand-maintained `_changelog`
+    list that MainLayout.razor carried is gone, and with it the standing obligation to write
+    every entry twice and keep the two copies in step.
+*@
+@if (this.IsOpen && ChangelogDocument.Entries.Count > 0)
+{
+    <div class="modal__scrim" @onclick="this.OnClose">
+        <div class="modal changelog"
+             role="dialog"
+             aria-modal="true"
+             aria-label="Release notes"
+             data-testid="changelog-dialog"
+             @onclick:stopPropagation="true">
+
+            <div class="changelog__top">
+                <h2 class="modal__title">Release notes</h2>
+                <button type="button" class="btn btn--icon btn--sm" @onclick="this.OnClose"
+                        aria-label="Close release notes">
+                    <Icon Name="close" />
+                </button>
+            </div>
+
+            <div class="changelog__body">
+                @foreach (ChangelogEntry entry in ChangelogDocument.Entries)
+                {
+                    bool isOpen = this._expandedVersions.Contains(entry.Version);
+
+                    <section class="changelog__entry">
+                        <button type="button"
+                                class="changelog__header"
+                                aria-expanded="@isOpen"
+                                @onclick="@(() => this.ToggleVersion(entry.Version))">
+                            <span class="changelog__version">v@(entry.Version)</span>
+                            @if (entry.Date is not null)
+                            {
+                                <span class="changelog__date">Release date: @entry.Date</span>
+                            }
+                            <span class="changelog__chevron" aria-hidden="true">
+                                <Icon Name="@(isOpen ? "chevron-up" : "chevron-down")" />
+                            </span>
+                        </button>
+
+                        @if (isOpen)
+                        {
+                            <div class="changelog__content">@((MarkupString)entry.HtmlBody)</div>
+                        }
+                    </section>
+                }
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    /// <summary>Whether the dialog is showing. The layout owns the state; this owns the content.</summary>
+    [Parameter] public bool IsOpen { get; set; }
+
+    /// <summary>Raised by the close button and by a click on the scrim.</summary>
+    [Parameter] public EventCallback OnClose { get; set; }
+
+    private readonly HashSet<string> _expandedVersions = new(StringComparer.Ordinal);
+
+    /// <inheritdoc />
+    protected override void OnParametersSet()
+    {
+        // The newest entry is open when the dialog first appears — a reader opening release
+        // notes wants the release, not a list of collapsed headers. Seeded once rather than on
+        // every render, so a section the reader deliberately collapsed does not reopen.
+        if (this.IsOpen && this._expandedVersions.Count == 0 && ChangelogDocument.Entries.Count > 0)
+        {
+            this._expandedVersions.Add(ChangelogDocument.Entries[0].Version);
+        }
+    }
+
+    private void ToggleVersion(string version)
+    {
+        if (!this._expandedVersions.Remove(version))
+        {
+            this._expandedVersions.Add(version);
+        }
+    }
+}

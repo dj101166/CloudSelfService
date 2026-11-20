@@ -1,0 +1,116 @@
+/*
+ * The header's account menu. Every colour reads a token from theme.css.
+ *
+ * ⚠ The avatar fallback deliberately does NOT carry over the pre-sumi treatment of white
+ * initials on an --accent-primary disc. That pairing was correct only because it sat in a navy
+ * topbar; this header is a light chrome tint, and the removal of the navy is exactly what
+ * orphans a hard-coded white. The initials take --text-secondary on --surface-inset instead,
+ * which is a real token pair in both themes rather than a colour that happens to work on one
+ * ground.
+ */
+
+.appmenu-wrap { position: relative; display: inline-flex; }
+
+.appmenu__avatar {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border-radius: var(--radius-pill);
+    border: 1px solid var(--border);
+    background: var(--surface-inset);
+    color: var(--text-secondary);
+    cursor: pointer;
+    overflow: hidden;
+    transition: border-color 0.15s ease;
+}
+
+.appmenu__avatar:hover { border-color: var(--accent); }
+.appmenu__avatar:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); }
+
+.appmenu__initials {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: var(--weight-bold);
+    letter-spacing: 0.02em;
+}
+
+.appmenu__photo { width: 100%; height: 100%; object-fit: cover; }
+
+.appmenu__backdrop { position: fixed; inset: 0; z-index: 40; }
+
+.appmenu {
+    position: absolute;
+    top: calc(100% + 8px);
+    right: 0;
+    z-index: 41;
+    min-width: 240px;
+    padding: 6px;
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-overlay);
+}
+
+.appmenu__who { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; }
+
+.appmenu__who-name {
+    font-size: 13px;
+    font-weight: var(--weight-strong);
+    color: var(--text-primary);
+}
+
+.appmenu__who-upn {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--text-tertiary);
+    word-break: break-all;
+}
+
+.appmenu__rule { height: 1px; background: var(--border-subtle); margin: 4px 0; }
+
+.appmenu__section-label {
+    font-size: 10.5px;
+    font-weight: var(--weight-strong);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-tertiary);
+    padding: 6px 10px 3px;
+}
+
+.appmenu__item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 7px 10px;
+    background: transparent;
+    border: none;
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-family: var(--font-sans);
+    font-size: 13px;
+    text-align: left;
+    text-decoration: none;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+
+.appmenu__item:hover { background: var(--surface-hover); text-decoration: none; }
+.appmenu__item:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); }
+
+.appmenu__icon { display: inline-flex; color: var(--text-secondary); }
+.appmenu__item:hover .appmenu__icon { color: var(--accent); }
+
+.appmenu__name { flex: 1; }
+
+/* The selected theme mode. A dot rather than a tick because the three items are a radio
+   group: aria-checked is what a screen reader reads, and this is its visual pair, not the
+   only carrier of the state. */
+.appmenu__check { color: var(--accent); font-size: 16px; line-height: 1; }
+
+.appmenu__item--signout { color: var(--text-primary); }
+.appmenu__item--signout:hover { background: var(--danger-soft); color: var(--danger); }
+.appmenu__item--signout:hover .appmenu__icon { color: var(--danger); }

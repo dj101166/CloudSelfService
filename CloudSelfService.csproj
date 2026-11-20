@@ -12,6 +12,14 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="Markdig" Version="1.3.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="CHANGELOG.md" LogicalName="CloudSelfService.Docs.CHANGELOG.md" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Compile Remove="CloudSelfService.Tests\**" />
     <Content Remove="CloudSelfService.Tests\**" />
     <EmbeddedResource Remove="CloudSelfService.Tests\**" />

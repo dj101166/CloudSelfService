@@ -1,0 +1,124 @@
+/*
+ * Release-notes dialog.
+ *
+ * The shell reuses .modal__scrim and .modal from app.css (a centred dialog, like Nexus's own
+ * release notes) — this file only widens it and styles what is specific to release notes.
+ *
+ * The rendered-markdown rules use ::deep because that HTML comes from Markdig at runtime rather
+ * than from this component's markup, so Blazor's scoped-CSS attribute is never stamped onto it.
+ */
+
+/* .modal caps at 460px, which suits a confirmation but not a release note. The `.modal__scrim >`
+   ancestor is what out-ranks that cap: this file is linked after app.css, but a bare
+   `.changelog` here is (0,1,0) — the same as app.css's `.modal` — and the scope attribute
+   Blazor appends lands on BOTH, so the tie would be decided by which property each declares
+   rather than reliably in this file's favour. */
+.modal__scrim > .changelog {
+    max-width: 680px;
+    display: flex;
+    flex-direction: column;
+    max-height: min(78vh, 720px);
+}
+
+.changelog__top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.changelog__body {
+    overflow-y: auto;
+    padding-right: 4px;
+}
+
+.changelog__entry + .changelog__entry {
+    border-top: 1px solid var(--border-subtle);
+}
+
+.changelog__header {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    width: 100%;
+    padding: 10px 2px;
+    background: none;
+    border: 0;
+    cursor: pointer;
+    text-align: left;
+    font: inherit;
+    color: var(--text-primary);
+}
+
+.changelog__header:hover {
+    color: var(--accent);
+}
+
+.changelog__header:focus-visible {
+    outline: 2px solid var(--accent-ring);
+    outline-offset: 2px;
+    border-radius: var(--radius-sm);
+}
+
+.changelog__version {
+    font-family: var(--font-display);
+    font-weight: var(--weight-bold);
+    font-size: 14px;
+}
+
+.changelog__date {
+    color: var(--text-tertiary);
+    font-size: 12.5px;
+}
+
+.changelog__chevron {
+    margin-left: auto;
+    display: inline-flex;
+    color: var(--text-tertiary);
+}
+
+.changelog__content {
+    padding: 0 2px 14px;
+    color: var(--text-secondary);
+    font-size: 13.5px;
+    line-height: 1.6;
+}
+
+/* ---------- Markdig output ---------- */
+
+.changelog__content ::deep h3 {
+    font-family: var(--font-display);
+    font-size: 12.5px;
+    font-weight: var(--weight-bold);
+    color: var(--text-primary);
+    margin: 16px 0 6px;
+}
+
+.changelog__content ::deep h3:first-child {
+    margin-top: 4px;
+}
+
+.changelog__content ::deep ul,
+.changelog__content ::deep ol {
+    margin: 0;
+    padding-left: 18px;
+}
+
+.changelog__content ::deep li + li {
+    margin-top: 8px;
+}
+
+.changelog__content ::deep strong {
+    color: var(--text-primary);
+    font-weight: var(--weight-strong);
+}
+
+.changelog__content ::deep code {
+    background: var(--code-inline-bg);
+    color: var(--code-inline-text);
+    border-radius: var(--radius-sm);
+    padding: 1px 4px;
+    font-family: var(--font-mono);
+    font-size: 0.92em;
+}

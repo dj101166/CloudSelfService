@@ -1,0 +1,312 @@
+/*
+ * Design tokens — the "sumi" skin.
+ *
+ * Ink and seal. The ground is sumi, the blue-black of a stick of ink ground on a stone; type is
+ * kinari, the colour of unbleached cloth. One muted indigo carries everything the interface
+ * points at, and one vermilion — the colour of a seal — is spent on the single committing action.
+ *
+ * Nothing in the palette can glow. Every hue is desaturated and earthbound, which is what keeps a
+ * screen you look at for an hour from being tiring, and what keeps the vermilion loud when it does
+ * appear.
+ *
+ * Do not edit values here to change how one thing looks. Components read these tokens and never
+ * hardcode a colour; if a component needs a colour that is not here, the token is what is missing,
+ * not the hex value. Every token is defined for both themes.
+ */
+
+/* ---------- Interface: Zen Kaku Gothic New ---------- */
+
+@font-face {
+  font-family: "Zen Kaku Gothic New";
+  src: url("../fonts/zenkaku-400.woff2") format("woff2");
+  font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Zen Kaku Gothic New";
+  src: url("../fonts/zenkaku-500.woff2") format("woff2");
+  font-weight: 500;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Zen Kaku Gothic New";
+  src: url("../fonts/zenkaku-700.woff2") format("woff2");
+  font-weight: 700;
+  font-display: swap;
+}
+
+/* ---------- Titles and wordmark: JetBrains Mono ---------- */
+
+/*
+ * One weight, because everything set in this face is bold: the wordmark, page titles, and dialog
+ * titles. The wordmark reads `--font-brand` rather than `--font-display` even though both resolve
+ * here today — it is identity rather than skin, and a later skin changing its title face has no
+ * business renaming the product.
+ */
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("../fonts/jbmono-700.woff2") format("woff2");
+  font-weight: 700;
+  font-display: swap;
+}
+
+/* ---------- Data: M PLUS 1 Code ---------- */
+
+/* One variable file covers the whole weight range, which is why there is a single declaration
+   here where the other two families need one per weight. */
+@font-face {
+  font-family: "M PLUS 1 Code";
+  src: url("../fonts/mplus1code.woff2") format("woff2");
+  font-weight: 100 700;
+  font-display: swap;
+}
+
+:root {
+    color-scheme: light;
+
+    /* Fonts */
+    --font-sans:    "Zen Kaku Gothic New", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --font-mono:    "M PLUS 1 Code", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --font-display: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --font-brand:   "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+    /*
+     * Weights, as tokens, because a skin is free to pick a family that does not have the weight
+     * the component wants. Zen Kaku Gothic New ships 400 / 500 / 700 and no 600, and a component
+     * asking for 600 would silently be given 700 — every label and button in the app a step
+     * heavier than intended. `--weight-strong` is the skin saying which weight means "strong".
+     */
+    --weight-strong: 500;
+    --weight-bold:   700;
+
+    /* Radii */
+    --radius-sm:   3px;
+    --radius-md:   4px;
+    --radius-lg:   6px;
+    --radius-pill: 999px;
+
+    /* Surfaces */
+    --surface-page:    #EFEAE0;                      /* washi */
+    --surface-raised:  #F7F3EA;                      /* cards, dialogs, sidebars */
+    --surface-inset:   #E8E2D6;                      /* inputs, code blocks */
+    --surface-hover:   rgba(27, 27, 34, 0.05);
+    --surface-scrim:   rgba(27, 27, 34, 0.42);       /* modal backdrop */
+    --surface-chrome:  #EAE5D9;                      /* sidebar / app chrome tint */
+    --surface-panel:   #EDE8DD;                      /* soft filled tiles */
+
+    /* Text */
+    --text-primary:    #1B1B22;
+    --text-secondary:  #56544C;
+    --text-tertiary:   #6E6B62;
+    --text-on-accent:  #F7F3EA;
+    --text-on-primary: #F7F3EA;
+
+    /* Borders */
+    --border:          rgba(27, 27, 34, 0.16);
+    --border-strong:   rgba(27, 27, 34, 0.49);
+    --border-subtle:   rgba(27, 27, 34, 0.08);
+
+    /* Accent — ai-iro, the indigo everything the interface points at is set in */
+    --accent:          #3F5F87;
+    --accent-hover:    #2E4A6D;
+    --accent-soft:     rgba(63, 95, 135, 0.10);
+    --accent-ring:     rgba(63, 95, 135, 0.28);
+
+    /* Primary action — shu-iro, the seal vermilion, spent once per screen */
+    --primary:         #A82C30;
+    --primary-hover:   #8C2226;
+    --primary-soft:    rgba(168, 44, 48, 0.10);
+    --primary-ring:    rgba(168, 44, 48, 0.30);
+
+    /*
+     * The sign-in door, and only that. The skin spends its one saturated colour on vermilion, which
+     * is the wrong signal for the single welcoming action a visitor meets before they are admitted —
+     * a red bar reads as a warning. Blue is what every sibling application uses for the same button,
+     * so the pairing is added here rather than named in a component: spec §9.5 makes a missing colour
+     * a missing token.
+     */
+    --door:            #1D4ED8;
+    --door-hover:      #1E40AF;
+    --door-text:       #FFFFFF;
+    --door-ring:       rgba(29, 78, 216, 0.34);
+
+    /* Status */
+    --success:         #4C6330;
+    --success-soft:    rgba(76, 99, 48, 0.11);
+    --warning:         #8A5A12;
+    --warning-soft:    rgba(138, 90, 18, 0.12);
+    --danger:          #A82C30;
+    --danger-soft:     rgba(168, 44, 48, 0.09);
+    --danger-ring:     rgba(168, 44, 48, 0.30);
+    /* Info — fuji, wisteria. Its own hue because the highlighter gives each entity type one of
+       six colour slots, and accent and info are two of them; the same value twice would make two
+       adjacent entity types look like one. */
+    --info:            #5B4A7D;
+    --info-soft:       rgba(91, 74, 125, 0.10);
+    --info-ring:       rgba(91, 74, 125, 0.30);
+
+    /* Code */
+    --code-inline-bg:  rgba(27, 27, 34, 0.07);
+    --code-inline-text:#1B1B22;
+    --code-block-bg:   #E8E2D6;
+    --code-block-text: #1B1B22;
+    --code-block-border:rgba(27, 27, 34, 0.12);
+
+    /* ── Chart tokens ───────────────────────────────────────────────────────────
+       Aliases rather than new values: a chart is the one surface that cannot read
+       CSS for itself, so it needs tokens by name — but inventing hues for it would
+       put more colours into a skin that deliberately spends one accent and one
+       primary.
+
+       Every value is var() of a token this file already redefines for dark, so the
+       block is declared once in :root and needs no dark-mode counterpart. A chart
+       that keeps one palette across a theme change means one of the source tokens
+       is not redefined for dark, and that is the bug.
+
+       The name is `--chart-grid`, NOT Nexus's `--chart-grid-line`, per the owner's
+       ruling of 2026-10-07, so the suite shares one chart vocabulary. TCGenesis's
+       thirteenth token `--chart-tooltip-surface` is deliberately absent: this app
+       styles its ApexCharts tooltip with dark-mode rules rather than by token, so
+       adding it would ship an unreferenced token.
+
+       The names here are the contract: the browser resolves an undefined custom
+       property to the empty string rather than throwing, so a token removed or
+       renamed here paints an invisible series and nothing reports it.
+       ────────────────────────────────────────────────────────────────────────── */
+
+    /* The plot's own background. See-through, so the panel the chart sits in shows through and the
+       skin stays in charge of the surface rather than the charting library, which would otherwise
+       paint a shade close enough to the panel's to read as a box inside a box. */
+    --chart-surface:  transparent;
+
+    /* Four series colours, aliases rather than new values. --success, --warning and --danger are
+       not named here: they carry meaning the outcome tokens need on the same screen, and a series
+       wearing the "something went wrong" colour is a worse error than a dull palette.
+
+       Two of these four resolve to a colour an outcome token also takes: --chart-series-4 aliases
+       --primary, which is --danger behind --chart-outcome-error; --chart-series-3 aliases --info,
+       which --chart-outcome-truncated also takes. The order is what the small-series case is
+       bought with — the two clashing aliases sit last, so a chart drawing two or three series
+       collides with nothing. Inventing a fourth hue is what is refused, not the collision. */
+    --chart-series-1: var(--accent);
+    --chart-series-2: var(--door);
+    --chart-series-3: var(--info);
+    --chart-series-4: var(--primary);
+
+    /* The residual. "Other" is a fold of everything past the palette rather than a category, so it
+       is deliberately quieter than any series and never takes a series colour. It aliases a
+       six-digit hex token on purpose: chart config code appends a two-digit opacity suffix to this
+       value and to every series colour, which only means anything over #RRGGBB. */
+    --chart-other:    var(--text-tertiary);
+
+    /* Chrome rather than data, so neither carries the opacity suffix above and neither needs to be
+       hex — --border is an rgba(), which is exactly why these are passed straight through. */
+    --chart-grid:     var(--border);
+    --chart-label:    var(--text-secondary);
+
+    /* Four fixed outcome categories. This set never folds and needs no residual. */
+    --chart-outcome-ok:        var(--success);
+    --chart-outcome-refused:   var(--warning);
+    --chart-outcome-error:     var(--danger);
+    --chart-outcome-truncated: var(--info);
+
+    /* Scrollbars */
+    --scrollbar-thumb:       #BDB6A6;
+    --scrollbar-thumb-hover: #A29A88;
+    --scrollbar-track:       #E8E2D6;
+
+    /*
+     * Page texture. The previous skin printed a dot grid across every page; ink on paper has no
+     * grid, and the panels carry the structure on their own. Left as a token rather than deleted
+     * so texture stays a decision this file makes.
+     */
+    --page-texture:      none;
+    --page-texture-size: auto;
+
+    /* Shadows — paper lifted off paper, not a card floating in space */
+    --shadow-card:     0 1px 2px rgba(60, 50, 35, 0.07);
+    --shadow-soft:     0 4px 16px rgba(60, 50, 35, 0.10);
+    --shadow-overlay:  0 18px 44px rgba(60, 50, 35, 0.22);
+}
+
+[data-bs-theme="dark"] {
+    color-scheme: dark;
+
+    /* Surfaces */
+    --surface-page:    #14151C;
+    --surface-raised:  #1C1E27;
+    --surface-inset:   #181A22;
+    --surface-hover:   rgba(220, 215, 202, 0.05);
+    --surface-scrim:   rgba(10, 10, 14, 0.72);
+    --surface-chrome:  #171922;
+    --surface-panel:   #20222C;
+
+    /* Text */
+    --text-primary:    #DCD7CA;
+    --text-secondary:  #A19D8E;
+    --text-tertiary:   #8B8B98;
+    --text-on-accent:  #14151C;
+    --text-on-primary: #F7F3EA;
+
+    /* Borders */
+    --border:          rgba(220, 215, 202, 0.12);
+    --border-strong:   rgba(220, 215, 202, 0.41);
+    --border-subtle:   rgba(220, 215, 202, 0.06);
+
+    /* Accent — the same indigo, lifted off the ink ground */
+    --accent:          #8CA9CC;
+    --accent-hover:    #A6BEDA;
+    --accent-soft:     rgba(140, 169, 204, 0.13);
+    --accent-ring:     rgba(140, 169, 204, 0.32);
+
+    /*
+     * Vermilion stays as it is. It is a filled surface carrying light text, never text itself, so
+     * it does not need lifting the way the status colours below do — and lifting it would make the
+     * seal pink.
+     */
+    --primary:         #C34043;
+    --primary-hover:   #D4565A;
+    --primary-soft:    rgba(195, 64, 67, 0.16);
+    --primary-ring:    rgba(195, 64, 67, 0.36);
+
+    /* The door, lightened for dark as the rest of this block is. See the light definition. */
+    --door:            #3B82F6;
+    --door-hover:      #60A5FA;
+    --door-text:       #FFFFFF;
+    --door-ring:       rgba(59, 130, 246, 0.40);
+
+    /* Status — lifted for legibility as text on the ink ground */
+    --success:         #9BB47B;
+    --success-soft:    rgba(155, 180, 123, 0.13);
+    --warning:         #DCA561;
+    --warning-soft:    rgba(220, 165, 97, 0.13);
+    --danger:          #E5787A;
+    --danger-soft:     rgba(229, 120, 122, 0.14);
+    --danger-ring:     rgba(229, 120, 122, 0.34);
+    --info:            #A896C8;
+    --info-soft:       rgba(168, 150, 200, 0.13);
+    --info-ring:       rgba(168, 150, 200, 0.34);
+
+    /* Code */
+    --code-inline-bg:  rgba(220, 215, 202, 0.12);
+    --code-inline-text:#DCD7CA;
+    --code-block-bg:   #101119;
+    --code-block-text: #D6D1C4;
+    --code-block-border:rgba(220, 215, 202, 0.10);
+
+    /* Scrollbars */
+    --scrollbar-thumb:       rgba(220, 215, 202, 0.18);
+    --scrollbar-thumb-hover: rgba(220, 215, 202, 0.32);
+    --scrollbar-track:       var(--surface-page);
+
+    /* Texture */
+    --page-texture:      none;
+    --page-texture-size: auto;
+
+    /* Shadows — heavier to read against the ink page */
+    --shadow-card:     0 1px 2px rgba(0, 0, 0, 0.35);
+    --shadow-soft:     0 6px 22px rgba(0, 0, 0, 0.45);
+    --shadow-overlay:  0 22px 52px rgba(0, 0, 0, 0.62);
+}

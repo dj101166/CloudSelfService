@@ -1,0 +1,160 @@
+@inject IJSRuntime JS
+
+@*
+    The header's menu: which theme you want, and the release notes. Sign-in is not wired yet,
+    so there is no identity block, avatar or sign-out here; a later task adds them.
+
+    Escape closes and returns focus to the trigger; arrows move between items.
+*@
+<div class="appmenu-wrap" @onkeydown="this.OnKeyDownAsync">
+    <button type="button"
+            id="@TriggerId"
+            class="appmenu__avatar"
+            data-testid="app-menu-trigger"
+            title="Menu"
+            aria-label="Menu"
+            aria-haspopup="true"
+            aria-expanded="@(this._open ? "true" : "false")"
+            @onclick="this.Toggle"
+            @onclick:stopPropagation="true">
+        <span class="appmenu__initials" aria-hidden="true"><Icon Name="users" /></span>
+    </button>
+
+    @if (this._open)
+    {
+        @* A full-screen transparent layer rather than a document listener: nothing to
+           detach, and nothing left behind if the circuit drops while it is open. *@
+        <div class="appmenu__backdrop" @onclick="this.CloseAsync"></div>
+
+        <div class="appmenu" role="menu" tabindex="-1"
+             @onclick:stopPropagation="true">
+
+            @*
+                Three modes, not a toggle. "System" is the default and the one a binary
+                switch cannot express — a user who wants this app to follow their OS has no
+                way to say so with two states, and silently loses it the first time they
+                touch the control. The pre-sumi menu was exactly that binary switch.
+            *@
+            <div class="appmenu__section-label">Theme</div>
+
+            <button type="button" role="menuitemradio" class="appmenu__item"
+                    aria-checked="@(this._mode == "light" ? "true" : "false")"
+                    @onclick='() => this.SetModeAsync("light")'>
+                <span class="appmenu__icon"><Icon Name="sun" /></span>
+                <span class="appmenu__name">Light</span>
+                @if (this._mode == "light")
+                {
+                    <span class="appmenu__check" aria-hidden="true">&#x2022;</span>
+                }
+            </button>
+
+            <button type="button" role="menuitemradio" class="appmenu__item"
+                    aria-checked="@(this._mode == "dark" ? "true" : "false")"
+                    @onclick='() => this.SetModeAsync("dark")'>
+                <span class="appmenu__icon"><Icon Name="moon" /></span>
+                <span class="appmenu__name">Dark</span>
+                @if (this._mode == "dark")
+                {
+                    <span class="appmenu__check" aria-hidden="true">&#x2022;</span>
+                }
+            </button>
+
+            <button type="button" role="menuitemradio" class="appmenu__item"
+                    aria-checked="@(this._mode == "system" ? "true" : "false")"
+                    @onclick='() => this.SetModeAsync("system")'>
+                <span class="appmenu__icon"><Icon Name="monitor" /></span>
+                <span class="appmenu__name">System</span>
+                @if (this._mode == "system")
+                {
+                    <span class="appmenu__check" aria-hidden="true">&#x2022;</span>
+                }
+            </button>
+
+            <div class="appmenu__rule" role="separator"></div>
+
+            <button type="button" role="menuitem" class="appmenu__item"
+                    data-testid="app-menu-release-notes"
+                    @onclick="this.ShowChangelogAsync">
+                <span class="appmenu__icon"><Icon Name="document" /></span>
+                <span class="appmenu__name">Release notes</span>
+            </button>
+        </div>
+    }
+</div>
+
+@code {
+    /// <summary>
+    /// A fixed id rather than a generated one. The layout renders exactly one of these, and
+    /// focus has to return to it by id after the menu closes.
+    /// </summary>
+    private const string TriggerId = "app-menu-trigger";
+
+    /// <summary>Raised when "Release notes" is chosen; the layout owns the dialog.</summary>
+    [Parameter] public EventCallback OnShowChangelog { get; set; }
+
+    private bool   _open;
+    private string _mode        = "system";
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// All async work runs here rather than in OnInitializedAsync. Prerendering is on, so
+    /// OnInitializedAsync runs twice and the second pass would flicker the checked mode in; this
+    /// method is not called during prerender at all, which gives exactly one transition from
+    /// the initial state to the loaded one. StateHasChanged is explicit because it is not
+    /// called for us when this method returns.
+    /// </remarks>
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender)
+        {
+            return;
+        }
+
+        // Read the mode from storage rather than from C#: the inline script in App.razor
+        // already applied it before Blazor connected, and it is the authority.
+        this._mode = await this.JS.InvokeAsync<string>("cssp.getMode");
+
+        this.StateHasChanged();
+    }
+
+    private void Toggle() => this._open = !this._open;
+
+    private async Task CloseAsync()
+    {
+        this._open = false;
+
+        // Focus returns to the trigger rather than to the top of the document.
+        await this.JS.InvokeVoidAsync("cssp.focusElement", TriggerId);
+    }
+
+    private async Task ShowChangelogAsync()
+    {
+        this._open = false;
+        await this.OnShowChangelog.InvokeAsync();
+    }
+
+    private async Task SetModeAsync(string mode)
+    {
+        this._mode = mode;
+        await this.JS.InvokeVoidAsync("cssp.setTheme", mode);
+        await this.CloseAsync();
+    }
+
+    private async Task OnKeyDownAsync(KeyboardEventArgs e)
+    {
+        switch (e.Key)
+        {
+            case "Escape":
+                await this.CloseAsync();
+                break;
+
+            case "ArrowDown":
+                await this.JS.InvokeVoidAsync("cssp.moveMenuFocus", 1);
+                break;
+
+            case "ArrowUp":
+                await this.JS.InvokeVoidAsync("cssp.moveMenuFocus", -1);
+                break;
+        }
+    }
+}

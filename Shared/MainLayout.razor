@@ -1,174 +1,88 @@
 @inherits LayoutComponentBase
-@implements IDisposable
 @inject IJSRuntime JSRuntime
-@inject NavigationManager Navigation
 @inject CloudSelfService.Services.AppVersionService VersionService
-@inject ILogger<MainLayout> Logger
 
 <PageTitle>Advanced Cloud Self Service</PageTitle>
 
+<div class="app">
+    <header class="app__header">
+        <button class="app__rail-toggle" @onclick="this.ToggleSidebarAsync"
+                title="Toggle navigation" aria-label="Toggle navigation">
+            <Icon Name="menu" />
+        </button>
 
-<div class="page">
-    <div class="sidebar">
-        <NavMenu />
+        @* The logo is decorative and carries an empty alt deliberately: the wordmark beside it
+           is the accessible name, and a screen reader announcing "Advanced logo CLOUD SELF
+           SERVICE" would say the brand twice. *@
+        <a class="app__brand" href="">
+            <img class="app__logo" src="images/advanced-logo-a.png" alt="" />
+            <span class="app__brand__text">CLOUD SELF SERVICE</span>
+        </a>
+
+        <button class="app__version" data-testid="app-version"
+                @onclick="this.ToggleChangelog" title="View release notes">
+            @* Parenthesised deliberately: Razor reads a bare `v@x` as an email address and
+               emits it as literal text, so the chip would read "v@VersionService" forever. *@
+            v@(this.VersionService.Version)
+        </button>
+
+        <div class="app__header-spacer"></div>
+
+        <AppMenu OnShowChangelog="this.OpenChangelog" />
+    </header>
+
+    <div class="app__body">
+        <aside class="app__sidebar @(this._drawerOpen ? "is-open" : "")">
+            <NavMenu />
+        </aside>
+
+        @if (this._drawerOpen)
+        {
+            <div class="app__scrim" @onclick="this.CloseDrawer"></div>
+        }
+
+        <main class="app__main">
+            <div class="app__main-inner">
+                @this.Body
+            </div>
+        </main>
     </div>
-
-    <main>
-        <div class="top-row px-4">
-            <div class="topbar-brand-wrap" style="display:flex; align-items:center; gap:8px;">
-                <img src="images/advanced-logo-full.png" alt="Advanced" class="topbar-brand-logo" />
-                <button class="btn-version" @onclick="ToggleChangelog" title="View release notes">v@(VersionService.Version)</button>
-            </div>
-            <div class="topbar-actions">
-                <button class="btn-topbar-action" @onclick="ToggleThemeAsync" title="Toggle light/dark mode">
-                    <span>@(_isDarkMode ? "☀️" : "🌙")</span>
-                    <span>@(_isDarkMode ? "Light" : "Dark")</span>
-                </button>
-
-                @* Auth placeholder — profile menu renders here once auth is enabled.
-                   See CLAUDE.md for wiring instructions. Replace this comment with
-                   the <div class="profile-menu-container"> block from EscapedDefects
-                   Shared/MainLayout.razor once Microsoft Entra OIDC is configured. *@
-            </div>
-        </div>
-
-        <article class="content px-4">
-            @Body
-        </article>
-    </main>
 </div>
 
-@if (_changelogOpen)
-{
-    <div class="changelog-backdrop" @onclick="CloseChangelog"></div>
-    <div class="changelog-panel">
-        <div class="changelog-panel-topbar">
-            <span class="changelog-panel-appname">Cloud Self Service</span>
-            <button class="changelog-close-btn" @onclick="CloseChangelog" aria-label="Close">&#x2715;</button>
-        </div>
-        <div class="changelog-panel-body">
-            <h2 class="changelog-main-title">Release Notes</h2>
-            <hr class="changelog-divider" />
-            @foreach (var entry in _changelog)
-            {
-                var ver = entry.Version;
-                var isOpen = _expandedVersions.Contains(ver);
-                <div class="changelog-version-section @(isOpen ? "is-open" : "")">
-                    <button class="changelog-version-header" @onclick="@(() => ToggleVersion(ver))">
-                        <div>
-                            <span class="changelog-version-label">@ver</span>
-                            @if (entry.Date is not null)
-                            {
-                                <span class="changelog-version-date">Release date: @entry.Date</span>
-                            }
-                        </div>
-                        <span class="changelog-chevron">@(isOpen ? "▲" : "▼")</span>
-                    </button>
-                    @if (isOpen)
-                    {
-                        <div class="changelog-version-body">
-                            <ul class="changelog-list">
-                                @foreach (var item in entry.Items)
-                                {
-                                    <li>
-                                        @item.Text
-                                        @if (item.SubItems is { Count: > 0 })
-                                        {
-                                            <ul class="changelog-sublist">
-                                                @foreach (var sub in item.SubItems)
-                                                {
-                                                    <li>@sub</li>
-                                                }
-                                            </ul>
-                                        }
-                                    </li>
-                                }
-                            </ul>
-                        </div>
-                    }
-                </div>
-            }
-        </div>
-    </div>
-}
+<ChangelogDialog IsOpen="this._changelogOpen" OnClose="this.CloseChangelog" />
 
 @code {
-    private bool _initialized;
-    private bool _isDarkMode;
     private bool _changelogOpen;
-    private readonly HashSet<string> _expandedVersions = new();
 
-    private record ChangelogItem(string Text, List<string>? SubItems = null);
-    private record ChangelogEntry(string Version, string? Date, List<ChangelogItem> Items);
+    /// <summary>
+    /// Only meaningful below the 860px breakpoint, where the sidebar is a drawer. Above it the
+    /// sidebar is always in the flow and this class changes nothing.
+    /// </summary>
+    private bool _drawerOpen;
 
-    private static readonly List<ChangelogEntry> _changelog = new()
+    private async Task ToggleSidebarAsync()
     {
-        new("v1.0.0", "TBD", new()
+        // Two behaviours behind one button, because they are the same intent at two widths: on a
+        // wide screen it collapses the column to a rail (and persists that), on a narrow one it
+        // opens the drawer (and does not). The branch is what keeps them exclusive — without it,
+        // opening and closing the drawer on a phone would silently flip the persisted rail state
+        // a wide screen reads later.
+        if (await this.JSRuntime.InvokeAsync<bool>("cssp.isCompact"))
         {
-            new("✨ Added", new()
-            {
-                "Initial scaffold: Blazor Server (.NET 10) skeleton matching the suite brand palette (cyan #019EC0 accent, navy-to-teal sidebar, full dark-mode support).",
-                "Topbar with full Advanced logo, version chip that opens this release-notes panel, and a Light/Dark toggle.",
-                "Sidebar navigation: Dashboard (/), Service Health (/service-health), App Services (/app-services).",
-                "Auth intentionally NOT yet wired — scaffolded with Microsoft Entra OIDC placeholder comments for future addition (Auth:Provider = None; GitHub OAuth is not used — it was retired suite-wide).",
-                "A dropped Blazor server connection auto-recovers (auto-reload) instead of showing the \"disconnected from server\" dialog, and the reconnect dialog self-heals after a container stop/start rather than staying stuck until the tab is closed.",
-            }),
-            new("🛡️ Security", new()
-            {
-                "Hardened HTTP security headers: added Permissions-Policy and CSP form-action 'self'; HSTS max-age set to 1 year.",
-            }),
-        }),
-    };
-
-    protected override void OnInitialized()
-    {
-        Navigation.LocationChanged += OnLocationChanged;
-    }
-
-    private void OnLocationChanged(object? sender, Microsoft.AspNetCore.Components.Routing.LocationChangedEventArgs e)
-    {
-        InvokeAsync(StateHasChanged);
-    }
-
-    public void Dispose()
-    {
-        Navigation.LocationChanged -= OnLocationChanged;
-    }
-
-    protected override async Task OnAfterRenderAsync(bool firstRender)
-    {
-        if (!firstRender || _initialized) return;
-        _initialized = true;
-
-        try
-        {
-            _isDarkMode = await JSRuntime.InvokeAsync<bool>("themeManager.initializeTheme");
+            this._drawerOpen = !this._drawerOpen;
         }
-        catch (Exception ex)
+        else
         {
-            Logger.LogWarning(ex, "Theme manager JS call failed — using default theme");
+            var collapsed = await this.JSRuntime.InvokeAsync<bool>("cssp.getSidebarCollapsed");
+            await this.JSRuntime.InvokeVoidAsync("cssp.setSidebarCollapsed", !collapsed);
         }
-
-        StateHasChanged();
     }
 
-    private async Task ToggleThemeAsync()
-    {
-        _isDarkMode = await JSRuntime.InvokeAsync<bool>("themeManager.toggleTheme");
-    }
+    private void CloseDrawer() => this._drawerOpen = false;
 
-    private void ToggleChangelog()
-    {
-        _changelogOpen = !_changelogOpen;
-        if (_changelogOpen && _expandedVersions.Count == 0 && _changelog.Count > 0)
-            _expandedVersions.Add(_changelog[0].Version);
-    }
+    private void ToggleChangelog() => this._changelogOpen = !this._changelogOpen;
 
-    private void CloseChangelog() => _changelogOpen = false;
+    private void OpenChangelog() => this._changelogOpen = true;
 
-    private void ToggleVersion(string version)
-    {
-        if (!_expandedVersions.Remove(version))
-            _expandedVersions.Add(version);
-    }
+    private void CloseChangelog() => this._changelogOpen = false;
 }

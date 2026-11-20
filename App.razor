@@ -6,10 +6,35 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <base href="/" />
-    <link rel="stylesheet" href="@Assets["css/bootstrap/bootstrap.min.css"]" />
-    <link rel="stylesheet" href="@Assets["css/site.css"]" />
+    @* Three stylesheets, in dependency order: theme.css is the token block, app.css the
+       component layer that reads it, then the scoped bundle. Nothing in the application links
+       a fourth. *@
+    <link rel="stylesheet" href="@Assets["css/theme.css"]" />
+    <link rel="stylesheet" href="@Assets["css/app.css"]" />
     <link rel="stylesheet" href="@Assets["CloudSelfService.styles.css"]" />
     <link rel="icon" type="image/png" href="@Assets["images/advanced-logo-a.png"]" />
+
+    @* Applied before first paint so a dark-mode user never sees a light flash, and so the
+       sidebar does not visibly collapse after the circuit connects. Duplicated from
+       cloudselfservice.js on purpose - <head> runs long before that file loads. *@
+    <script>
+        (function () {
+            var theme = 'light';
+            try {
+                var mode = localStorage.getItem('cloudSelfServiceTheme') || 'system';
+                theme = mode === 'system'
+                    ? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+                    : (mode === 'dark' ? 'dark' : 'light');
+            } catch (e) { /* private mode: fall through to the default above */ }
+            document.documentElement.setAttribute('data-bs-theme', theme);
+
+            var collapsed = '0';
+            try { collapsed = localStorage.getItem('cloudSelfServiceSidebarCollapsed') || '0'; }
+            catch (e) { /* private mode */ }
+            document.documentElement.setAttribute('data-sidebar',
+                collapsed === '1' ? 'collapsed' : 'expanded');
+        })();
+    </script>
     <HeadOutlet @rendermode="RenderModeForPage" />
 </head>
 <body>
@@ -28,18 +53,9 @@
         <a class="dismiss">🗙</a>
     </div>
 
-    @* Custom Blazor SignalR reconnect overlay — see wwwroot/css/site.css for state-class styling. *@
-    <div id="components-reconnect-modal" class="reconnect-modal">
-        <div class="reconnect-modal-card">
-            <div class="reconnect-modal-spinner" aria-hidden="true"></div>
-            <p class="reconnect-modal-text reconnect-modal-text--show">Rejoining the server&hellip;</p>
-            <p class="reconnect-modal-text reconnect-modal-text--failed">Reconnection failed. Try <a href="" class="reconnect-modal-link">reloading</a> the page.</p>
-            <p class="reconnect-modal-text reconnect-modal-text--rejected">Could not reconnect to the server. <a href="" class="reconnect-modal-link">Reload</a> the page to restore functionality.</p>
-            <p class="reconnect-modal-text reconnect-modal-text--reloading">Restoring your session&hellip;</p>
-        </div>
-    </div>
+    <ReconnectModal />
 
-    <script src="@Assets["js/theme-manager.js"]"></script>
+    <script src="@Assets["js/cloudselfservice.js"]"></script>
     <script src="@Assets["js/session-guard.js"]"></script>
     <script src="@Assets["_framework/blazor.web.js"]" autostart="false"></script>
     <script>

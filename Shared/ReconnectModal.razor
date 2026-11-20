@@ -1,0 +1,49 @@
+@*
+    Blazor's reconnect overlay, ported from Nexus's Components/Layout/ReconnectModal.razor.
+
+    A <dialog> with SIX states, not the three-state <div> this app carried before: first
+    attempt, retrying with a countdown, failed (with a Retry button), paused by the server,
+    resume failed (with a Resume button), and rejected (which reloads). Blazor drives all six
+    by swapping a class on this element; the ids and class names below are the framework's and
+    must not be renamed.
+
+    The seventh line is this suite's addition rather than Nexus's framework inheritance:
+    session-guard.js adds .session-guard-reloading just before it reloads the page, which hides
+    the "retry or reload yourself" copy and reveals "Restoring your session". The distinction
+    matters to the reader — "failed, retry yourself" and "failed, recovering for you" call for
+    different reactions, and the second is what actually happens after a redeploy.
+*@
+<script type="module" src="@Assets["Shared/ReconnectModal.razor.js"]"></script>
+
+<dialog id="components-reconnect-modal" data-nosnippet>
+    <div class="components-reconnect-container">
+        <div class="components-rejoining-animation" aria-hidden="true">
+            <div></div>
+            <div></div>
+        </div>
+        <p class="components-reconnect-first-attempt-visible">
+            Rejoining the server...
+        </p>
+        <p class="components-reconnect-repeated-attempt-visible">
+            Rejoin failed... trying again in <span id="components-seconds-to-next-attempt"></span> seconds.
+        </p>
+        <p class="components-reconnect-failed-visible">
+            Failed to rejoin.<br />Please retry or reload the page.
+        </p>
+        <p class="reconnect__reloading">
+            Restoring your session&hellip;
+        </p>
+        <button id="components-reconnect-button" class="components-reconnect-failed-visible">
+            Retry
+        </button>
+        <p class="components-pause-visible">
+            The session has been paused by the server.
+        </p>
+        <p class="components-resume-failed-visible">
+            Failed to resume the session.<br />Please retry or reload the page.
+        </p>
+        <button id="components-resume-button" class="components-pause-visible components-resume-failed-visible">
+            Resume
+        </button>
+    </div>
+</dialog>

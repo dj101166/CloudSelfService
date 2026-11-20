@@ -1,0 +1,1355 @@
+/*
+ * The sumi component layer.
+ *
+ * Every colour, font, radius and shadow reads a token from theme.css — there are no hex
+ * values below, by design, and `grep -nE '#[0-9a-fA-F]{3,8}' wwwroot/css/app.css` returning
+ * anything is a bug. Component measurements come from the developer standards' measurement
+ * table; radii and weights resolve through the sumi tokens, so --radius-sm is 3px here and
+ * weight 600 does not exist.
+ *
+ * This file is linked BEFORE the scoped-CSS bundle, so a .razor.css rule beats it on both
+ * specificity and document order. That is the intended direction: a page's own file is where
+ * that page's geometry belongs, and this file is what it builds on.
+ *
+ * ── What the selectors used to look like, and why they no longer do ──────────────────────
+ *
+ * Through the migration bootstrap.min.css and site.css were linked ahead of this file, and
+ * Bootstrap defines .btn, .card, .table, .modal, .alert and .badge of its own. A BARE rule here
+ * for any of those names would have reached every page not yet converted — so the interactive
+ * families were written DOUBLED, with the bare half deliberately absent:
+ * `.btn[class*="btn--"]`, `.badge[class*="badge--"]`, `.alert[class*="alert--"]` and
+ * `.modal__scrim > .modal`. Bootstrap's `.modal { display: none }` was the sharpest edge: a
+ * bare `.modal` of ours was (0,1,0) — identical — and would have rendered a converted dialog
+ * invisibly while clamping every unconverted overlay into a 460px opaque card.
+ *
+ * Bootstrap is deleted, and every one of those has been collapsed back to its single form,
+ * which is what the sibling apps ship. The doubling is RECORDED rather than erased because the
+ * reverse edit — reintroducing any Bootstrap-named stylesheet ahead of this file — brings the
+ * whole problem back, and a reader who never knew it existed would not see why.
+ *
+ * ⚠ `.modal__scrim > .changelog` in Shared/ChangelogDialog.razor.css still carries the
+ * ancestor, and that is NOT a leftover of the doubling: a scoped rule needs it to out-rank this
+ * file's own `.modal` max-width, which is a real fight between two of our own rules.
+ */
+
+/* ---------- Layout tokens ---------- */
+
+/*
+ * Measurements rather than colours. They live here rather than in theme.css because that file
+ * is the skin's token block, copied verbatim from Nexus, and is not ours to edit.
+ *
+ * Moved here from site.css, where the shell task staged them. The move is safe in this
+ * direction and only in this direction: app.css is linked after site.css, so a relocated rule
+ * gains document order rather than losing it. The reverse — pulling a rule out of an in-body
+ * <style> block, which renders after every <link> in <head> — is the move that silently loses.
+ *
+ * ⚠ They cannot live in a scoped .razor.css. Blazor rewrites a SELECTOR there by appending the
+ * scope attribute, so `:root { }` becomes `:root[b-xxxxx]` and matches nothing at all; the
+ * custom property is then silently never defined and every var() reading it resolves to the
+ * empty string rather than throwing.
+ *
+ * One control height for buttons, inputs and selects. The skin specifies each control's
+ * padding independently, which lands them within a few pixels of each other — close enough to
+ * look like a mistake when they sit side by side. Pinning the height makes a button next to a
+ * select line up exactly.
+ */
+:root {
+    --control-height:    36px;
+    --control-height-sm: 30px;
+    --header-height:     56px;
+    --sidebar-width:     220px;
+    --sidebar-rail:      56px;
+}
+
+/* ---------- Base ---------- */
+
+*,
+*::before,
+*::after { box-sizing: border-box; }
+
+/*
+ * `overflow: hidden` on the document is the shell's, and it moved here with site.css's
+ * deletion: MainLayout's `.app` is `100dvh` and `.app__main` is the only scroller, so without
+ * it the page itself gains a second scrollbar wherever a child overflows by a pixel. The
+ * margin reset is Bootstrap's, which is gone — `body` otherwise carries the UA's 8px and the
+ * fixed shell sits inset from the viewport on every edge.
+ *
+ * The compact-screen drawer is `position: fixed`, so it is not clipped by this.
+ */
+html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; }
+
+body {
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--text-primary);
+    background-color: var(--surface-page);
+    background-image: var(--page-texture);
+    background-size: var(--page-texture-size);
+    -webkit-font-smoothing: antialiased;
+}
+
+::selection { background: var(--accent-ring); color: var(--text-primary); }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: var(--scrollbar-track); }
+::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: var(--radius-pill); }
+::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-thumb-hover); }
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { color: var(--accent-hover); text-decoration: underline; }
+
+code, pre, .u-mono { font-family: var(--font-mono); }
+
+code {
+    background: var(--code-inline-bg);
+    color: var(--code-inline-text);
+    padding: 1px 5px;
+    border-radius: var(--radius-sm);
+    font-size: 0.92em;
+}
+
+.icon { flex: none; display: block; }
+
+/*
+ * FocusOnNavigate moves focus to the page's h1 after every navigation, so a screen-reader user
+ * lands on the heading rather than at the top of the chrome. The browser then draws a focus
+ * ring around the title on an ordinary refresh, which looks like a selected text box.
+ * :focus-visible is exactly the distinction needed: suppressed for programmatic focus, kept
+ * for a keyboard user who tabbed there deliberately.
+ */
+h1[tabindex="-1"]:focus { outline: none; }
+
+/* ---------- Page heads ---------- */
+
+/*
+ * `.page-title-main` is the pre-migration name and every page now carries `.page-title`
+ * instead — with ONE exception that is deliberate. Shared/AccessDeniedContent.razor keeps it
+ * because it is the orchestrator Playwright suite's default wait selector
+ * (`.claude/webapp-tests/conftest.py`), and an app outside this migration has tests depending
+ * on it. It is listed here rather than left undefined so that heading renders as a page title
+ * like every other, instead of at the browser's 2em default.
+ */
+.page-title,
+.page-title-main {
+    font-family: var(--font-display);
+    font-size: 19px;
+    font-weight: var(--weight-bold);
+    letter-spacing: -0.01em;
+    color: var(--text-primary);
+    margin: 0 0 4px;
+}
+
+.page-subtitle { color: var(--text-secondary); font-size: 13px; margin: 0 0 16px; }
+
+.page-subtitle__label { color: var(--text-tertiary); }
+
+.page-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-bottom: 16px;
+}
+
+.page-head__actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+.page-head__filters { display: flex; align-items: stretch; gap: 12px; flex-wrap: wrap; }
+
+/* ---------- Buttons ---------- */
+
+/*
+ * Bare, as of the Bootstrap deletion. This was `.btn[class*="btn--"]` for the whole migration
+ * so it could not reach Bootstrap's own `.btn-primary` / `.btn-link` markup on the unconverted
+ * pages; there are none left, and nothing else in the application defines `.btn`.
+ */
+.btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    height: var(--control-height);
+    padding: 0 14px;
+    font-family: var(--font-sans);
+    font-size: 13.5px;
+    font-weight: var(--weight-strong);
+    line-height: 1;
+    white-space: nowrap;
+    border-radius: var(--radius-sm);
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--text-primary);
+    cursor: pointer;
+    transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+/* An anchor styled as a button needs the global underline-on-hover suppressed as well. */
+a.btn:hover { text-decoration: none; }
+
+.btn:active:not(:disabled) { transform: translateY(1px); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.btn--sm { height: var(--control-height-sm); padding: 0 11px; font-size: 12.5px; }
+
+.btn--primary { background: var(--primary); color: var(--text-on-primary); }
+.btn--primary:hover:not(:disabled) { background: var(--primary-hover); color: var(--text-on-primary); }
+.btn--primary:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--primary-ring); }
+
+.btn--secondary {
+    background: transparent;
+    border-color: var(--border-strong);
+    color: var(--text-secondary);
+}
+
+.btn--secondary:hover:not(:disabled) {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: var(--accent-soft);
+}
+
+.btn--secondary:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); }
+
+.btn--danger { background: transparent; border-color: var(--danger); color: var(--danger); }
+.btn--danger:hover:not(:disabled) { background: var(--danger-soft); color: var(--danger); }
+.btn--danger:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--danger-ring); }
+
+.btn--link { background: transparent; color: var(--accent); padding: 0 6px; }
+.btn--link:hover:not(:disabled) { text-decoration: underline; color: var(--accent-hover); }
+.btn--link:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); }
+
+.btn--icon {
+    padding: 0;
+    width: var(--control-height);
+    height: var(--control-height);
+    flex: none;
+    background: transparent;
+    border-color: var(--border);
+    color: var(--text-secondary);
+}
+
+.btn--icon.btn--sm { width: var(--control-height-sm); height: var(--control-height-sm); }
+
+.btn--icon:hover:not(:disabled) {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: var(--accent-soft);
+}
+
+.btn--icon:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); }
+
+/* ---------- Chips ---------- */
+
+/* A filter chip: one of a set, at most one active. Same height as a small button so a chip row
+   and a button row sitting one above the other line up. */
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.chip {
+    /* Centring is declared here rather than inherited from a library's `button` reset.
+       MEASURED on RegressionResults: MudBlazor ships a bare
+       `button { display: inline-flex; align-items: center; justify-content: center }`,
+       which was silently supplying it there. Stripping that file dropped .chip to
+       `display: block`, uncentred, with no build error, no test failure and no console
+       message. This app has no MudBlazor, so the rule was supplying nothing at all here. */
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: var(--control-height-sm);
+    padding: 0 11px;
+    font-family: var(--font-sans);
+    font-size: 12.5px;
+    font-weight: var(--weight-strong);
+    line-height: 1;
+    white-space: nowrap;
+    background: var(--surface-inset);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-pill);
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.chip:hover:not(:disabled) { color: var(--text-primary); border-color: var(--border-strong); }
+.chip:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); }
+.chip:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.chip--active {
+    background: var(--accent-soft);
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+/* ---------- Segmented control ---------- */
+
+/* Two or three mutually exclusive values that are a single setting — Sprint/Release, not a set
+   of filters. One bordered group rather than separate chips, because the border is what says
+   "these are one control". */
+.segment {
+    display: inline-flex;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+    background: var(--surface-inset);
+}
+
+.segment__btn {
+    /* Centring declared explicitly, for the same measured reason as `.chip` above. */
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: var(--control-height-sm);
+    padding: 0 14px;
+    font-family: var(--font-sans);
+    font-size: 12.5px;
+    font-weight: var(--weight-strong);
+    line-height: 1;
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: color 0.15s ease, background 0.15s ease;
+}
+
+.segment__btn + .segment__btn { border-left: 1px solid var(--border); }
+.segment__btn:hover { color: var(--text-primary); background: var(--surface-hover); }
+.segment__btn:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--accent-ring); }
+
+.segment__btn--active { background: var(--accent); color: var(--text-on-accent); }
+.segment__btn--active:hover { background: var(--accent-hover); color: var(--text-on-accent); }
+
+/* ---------- Cards ---------- */
+
+/*
+ * `.card` was already bare through the migration — one of the two deliberate exceptions to the
+ * doubling, along with `.table`. The name is the suite's: AzureCostAnalysis, API Volume and
+ * Escaped Defects all ship `.card` reading `--surface-raised` / `--border`.
+ *
+ * Worth keeping for whoever reads an old screenshot: while Bootstrap was still linked, this
+ * rule's `padding` and `box-shadow` leaked ONTO its `.card` markup on every page not yet
+ * converted, most of which nested a `.card-body` that already had padding of its own. So a
+ * screenshot taken mid-migration is not a valid baseline for one taken now, and a difference
+ * between them is not necessarily a regression.
+ */
+.card {
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-card);
+    padding: 16px;
+}
+
+.card__head { margin-bottom: 14px; }
+
+.card__title {
+    font-size: 12px;
+    font-weight: var(--weight-strong);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+    margin: 0 0 12px;
+}
+
+.card__head .card__title { margin-bottom: 3px; }
+
+.card__desc {
+    font-size: 12.5px;
+    line-height: 1.45;
+    color: var(--text-secondary);
+    margin: 0;
+    max-width: 68ch;
+}
+
+.card__body { }
+
+.card__foot {
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border-subtle);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 14px;
+}
+
+/* ---------- Stat tiles ---------- */
+
+.stat-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 12px;
+    margin-bottom: 16px;
+}
+
+.stat {
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-card);
+    padding: 14px 16px;
+}
+
+.stat__label {
+    font-size: 11.5px;
+    font-weight: var(--weight-strong);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-tertiary);
+    margin-bottom: 6px;
+}
+
+/* Tabular figures, so a column of counts aligns digit for digit and a value changing does not
+   shift the ones beside it. */
+.stat__value {
+    font-family: var(--font-mono);
+    font-size: 22px;
+    font-weight: var(--weight-bold);
+    font-variant-numeric: tabular-nums;
+    color: var(--text-primary);
+    line-height: 1.15;
+}
+
+.stat__sub { font-size: 11.5px; color: var(--text-secondary); margin-top: 4px; }
+
+/* ---------- Tables ---------- */
+
+/*
+ * `.table` is the other bare name — same reasoning as Cards above, same name across the suite.
+ *
+ * With Bootstrap gone, `.table td` below finally governs cell padding: Bootstrap's
+ * `.table > :not(caption) > * > *` was (0,1,3) and out-ranked it whatever the link order, so
+ * every table in the app has been wearing Bootstrap's padding until now.
+ */
+.table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+}
+
+.table th {
+    text-align: left;
+    font-size: 11.5px;
+    font-weight: var(--weight-strong);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-tertiary);
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+}
+
+/*
+ * `color` is explicit here rather than inherited, and this is the trap the pilot hit: a
+ * `.table` rule that styles only `<th>` leaves dark-mode `<td>` text unreadable, invisible
+ * until the first page that renders a table. Bootstrap's own `.table` sets a static,
+ * non-token `color` that reaches every cell, and site.css adds
+ * `html[data-bs-theme='dark'] .table > :not(caption) > * > * { color: … !important }` on top.
+ * `.table td` must not depend on what either of those does or does not set, so this stays even
+ * after both are gone.
+ */
+.table td {
+    padding: 9px 10px;
+    border-bottom: 1px solid var(--border-subtle);
+    vertical-align: middle;
+    color: var(--text-primary);
+}
+
+/* A plain class is less specific than class+element, so without this a muted cell inside a
+   .table would be flattened back to full-strength text by the rule above. */
+.table td.u-muted { color: var(--text-secondary); }
+
+.table tbody tr:hover { background: var(--surface-hover); }
+
+.table--dense th { padding: 6px 8px; }
+.table--dense td { padding: 5px 8px; }
+
+.table__num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); }
+
+/* `.table th` already sets text-align: left and out-ranks a bare `.table__num` on a <th>. */
+.table th.table__num { text-align: right; }
+
+/*
+ * Doubled onto `td` for the same reason `.u-muted` above is, and measured the same way: a bare
+ * `.table__empty` is (0,1,0) and `.table td` is (0,1,1), so inside a `.table` the empty state
+ * took the FULL-strength foreground and `.table--dense`'s 5px padding instead of its own
+ * tertiary colour and 28px. Measured at 15.46:1 on washi where tertiary gives 5.5 — it did not
+ * look broken, it looked like an ordinary row, which is precisely what an empty state must not
+ * do. The bare selector is kept for an empty state used outside a table.
+ */
+.table__empty { color: var(--text-tertiary); text-align: center; padding: 28px 10px; }
+.table td.table__empty,
+.table--dense td.table__empty { color: var(--text-tertiary); padding: 28px 10px; }
+
+/* A summary row. Weight and a top rule carry it, not a background tint: a tinted row in a
+   hoverable table reads as selected. */
+.table__row--total td {
+    font-weight: var(--weight-bold);
+    border-top: 1px solid var(--border-strong);
+}
+
+.table__row--muted { opacity: 0.6; }
+.table__row--link { cursor: pointer; }
+.table__row--link:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--accent-ring); }
+.table__row--selected { background: var(--accent-soft); }
+
+.table__sort { cursor: pointer; user-select: none; }
+.table__sort:hover { background: var(--surface-hover); }
+
+.table__sort-arrow {
+    font-size: 9px;
+    color: var(--accent);
+    margin-left: 3px;
+}
+
+.table__sort-btn { all: unset; display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
+.table__sort-btn:focus-visible { box-shadow: 0 0 0 3px var(--accent-ring); border-radius: var(--radius-sm); }
+.table__num .table__sort-btn { flex-direction: row-reverse; }
+
+.table-wrap { overflow-x: auto; }
+
+/* ---------- Forms ---------- */
+
+.field { display: flex; flex-direction: column; gap: 6px; }
+
+/* Top-aligned on purpose: with align-items:center a field carrying helper text is taller than
+   its neighbour, and centring pushes the two inputs to different heights even though their
+   labels are identical. */
+.field-row { display: flex; align-items: flex-start; gap: 14px; flex-wrap: wrap; }
+
+.field-row > .field { flex: 1; min-width: 200px; }
+
+.label {
+    font-size: 12px;
+    font-weight: var(--weight-strong);
+    color: var(--text-secondary);
+    letter-spacing: 0.02em;
+}
+
+/*
+ * `.input` / `.select` / `.textarea` are this migration's own names and never collided with
+ * anything Bootstrap shipped — its names were `.form-control` and `.form-select` — so these
+ * were never doubled in the first place.
+ */
+.input,
+.select,
+.textarea {
+    width: 100%;
+    background: var(--surface-inset);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 0 12px;
+    font-size: 13.5px;
+    font-family: var(--font-sans);
+    color: var(--text-primary);
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+/* Fixed height rather than vertical padding, so an input, a select and a button in the same
+   row are the same height by construction instead of by coincidence. */
+.input,
+.select { height: var(--control-height); }
+
+.input--sm,
+.select--sm { height: var(--control-height-sm); font-size: 12.5px; }
+
+.textarea {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    line-height: 1.6;
+    padding: 9px 12px;
+    resize: vertical;
+    min-height: 120px;
+}
+
+.input:focus,
+.select:focus,
+.textarea:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-ring);
+}
+
+.input::placeholder,
+.textarea::placeholder { color: var(--text-tertiary); }
+
+/* Pairs a red message with a red border, so the offending field is findable in a long form
+   without reading every message. */
+.input--invalid,
+.input--invalid:focus { border-color: var(--danger); }
+.input--invalid:focus { box-shadow: 0 0 0 3px var(--danger-ring); }
+
+.checkbox { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
+
+.switch { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-secondary); cursor: pointer; }
+
+/* Helper text under an input, explaining the field rather than repeating its label. */
+.hint { font-size: 11.5px; line-height: 1.4; color: var(--text-tertiary); }
+
+.field-error { color: var(--danger); font-size: 12px; }
+
+/* ---------- Badges ---------- */
+
+/*
+ * Doubled, bare half absent. Bootstrap's `.badge` sets its own padding, radius, weight and —
+ * decisively — a flat white foreground on a transparent background, which on the washi ground
+ * is unreadable. The ten badge sites on unconverted pages keep Bootstrap's treatment until their
+ * page task converts them.
+ *
+ * The modifier set is the suite's, mapped BY MEANING rather than by a bespoke family per app:
+ * a role badge and an audit badge both resolve to one of these six. Tasks 12 and 15 map this
+ * app's `role-badge-*` and `audit-badge--*` families onto them.
+ */
+.badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    border-radius: var(--radius-pill);
+    font-size: 11px;
+    font-weight: var(--weight-strong);
+    letter-spacing: 0.02em;
+    font-family: var(--font-mono);
+    white-space: nowrap;
+    border: 1px solid transparent;
+}
+
+.badge--accent  { background: var(--accent-soft);  color: var(--accent); }
+.badge--info    { background: var(--info-soft);    color: var(--info); }
+.badge--success { background: var(--success-soft); color: var(--success); }
+.badge--warning { background: var(--warning-soft); color: var(--warning); }
+.badge--danger  { background: var(--danger-soft);  color: var(--danger); }
+.badge--muted   { background: var(--surface-panel); color: var(--text-secondary); border-color: var(--border); }
+
+/* A badge that is also a filter control — the sprint board's status pills. */
+.badge--button { cursor: pointer; }
+.badge--button:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); }
+
+/* A colour swatch beside a series name. Takes its colour inline from the series token, which
+   is the one place an inline style is correct: the value is data. */
+.dot {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+    flex: none;
+}
+
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; color: var(--text-secondary); }
+.legend__item { display: inline-flex; align-items: center; gap: 6px; }
+.legend__swatch { width: 10px; height: 10px; border-radius: 2px; flex: none; }
+
+/* ---------- Alerts ---------- */
+
+/*
+ * Doubled, bare half absent. Bootstrap's `.alert` carries its own padding, radius and border,
+ * and the nine `alert alert-success` / `alert-warning` sites on unconverted pages must keep
+ * it until their page task converts them.
+ */
+.alert {
+    padding: 10px 14px;
+    border-radius: var(--radius-md);
+    font-size: 13px;
+    margin-bottom: 16px;
+    border: 1px solid transparent;
+}
+
+.alert--danger  { background: var(--danger-soft);  border-color: var(--danger);  color: var(--danger); }
+.alert--success { background: var(--success-soft); border-color: var(--success); color: var(--success); }
+.alert--info    { background: var(--info-soft);    border-color: var(--info);    color: var(--info); }
+.alert--warning { background: var(--warning-soft); border-color: var(--warning); color: var(--warning); }
+
+/* ---------- Dialogs ---------- */
+
+.modal__scrim {
+    position: fixed;
+    inset: 0;
+    background: var(--surface-scrim);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+    padding: 20px;
+}
+
+/*
+ * The sharpest Bootstrap edge in the file. Bootstrap's `.modal` is a FIXED, full-viewport,
+ * `display: none` scroll container at (0,1,0) — identical specificity to a bare `.modal` of
+ * ours. `.modal` is (0,2,0): it wins, and it reaches only markup this
+ * migration converted.
+ *
+ * `position` / `width` / `height` / `overflow` here are not styling choices, they are UNDOING
+ * that container. Dropping any of the four leaves the dialog stretched across the whole screen
+ * behind the scrim.
+ */
+.modal {
+    position: static;
+    width: 100%;
+    height: auto;
+    max-width: 460px;
+    max-height: calc(100vh - 40px);
+    overflow: visible;
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-overlay);
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+}
+
+.modal.modal--wide { max-width: min(900px, 94vw); }
+
+.modal__head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.modal__title {
+    font-family: var(--font-display);
+    font-size: 15px;
+    font-weight: var(--weight-bold);
+    margin: 0;
+}
+
+.modal__body { color: var(--text-secondary); font-size: 13.5px; margin-bottom: 20px; overflow-y: auto; }
+
+.modal__actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* ---------- Spinner and loading ---------- */
+
+.spinner {
+    display: inline-block;
+    width: 16px;
+    height: 16px;
+    border: 2px solid var(--border-strong);
+    border-top-color: var(--accent);
+    border-radius: var(--radius-pill);
+    animation: spin 0.7s linear infinite;
+}
+
+.spinner--sm { width: 12px; height: 12px; border-width: 1.5px; }
+.spinner--lg { width: 28px; height: 28px; border-width: 3px; }
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.loading {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    padding: 64px 20px;
+    color: var(--text-secondary);
+    font-size: 13px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .spinner { animation: none; }
+}
+
+/* ---------- Utilities ---------- */
+
+.u-row { display: flex; align-items: center; gap: 10px; }
+.u-row--wrap { flex-wrap: wrap; }
+.u-spread { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.u-stack { display: flex; flex-direction: column; gap: 14px; }
+.u-grow { flex: 1; }
+.u-muted { color: var(--text-secondary); }
+.u-subtle { color: var(--text-tertiary); }
+.u-danger { color: var(--danger); }
+.u-small { font-size: 12px; }
+.u-nowrap { white-space: nowrap; }
+.u-scroll { overflow-x: auto; }
+
+/* Read by a screen reader, never seen. Pairs with a mark that carries the meaning visually. */
+.u-sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+}
+
+/* ---------- The sign-in pages ---------- */
+
+/*
+ * Nexus's treatment, taken rather than paraphrased: an OPEN COLUMN with a hairline spine down
+ * its left edge that runs accent for its first stretch and then fades to the ordinary border,
+ * with a mono mark at the top of it. It is NOT a bordered, shadowed card — the card this page
+ * used to be is the thing being removed, and "tidying" it back is undoing a decision the
+ * project owner asked for by name.
+ *
+ * These rules are GLOBAL rather than scoped for a reason that outlives tidiness: /login and
+ * /signed-out are two separate components that must render identically, and a scoped
+ * .razor.css reaches exactly one of them. The suite has already shipped the bug this avoids —
+ * a /signed-out whose .login-card rule was unreachable, recorded in memory
+ * reference_deploy_css_cache.md.
+ *
+ * Every colour reads a token. The four Microsoft brand hexes the old button drew are GONE, not
+ * retokenised: the door below is monochrome text on --door, which is theme.css's own pairing
+ * for exactly this one welcoming action.
+ */
+
+/* LoginLayout's wrapper — was `.login-page` in Shared/LoginLayout.razor.css (a centred flex
+   box); renamed and moved here as a fixed, scrollable grid so the open column can be vertically
+   centred at any viewport height without ever clipping on a short one. */
+.login-shell {
+    position: fixed;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    padding: 24px 24px 40px;
+    background: var(--surface-page);
+    overflow-y: auto;
+}
+
+.login {
+    position: relative;
+    width: min(420px, 100%);
+}
+
+/* The hairline spine. A sibling element rather than a `::before` on a card, because this page
+   has no card — see the note above. */
+.login__spine {
+    position: absolute;
+    left: 0;
+    top: 6px;
+    bottom: 26px;
+    width: 1px;
+    background: linear-gradient(
+        to bottom,
+        var(--accent) 0%,
+        var(--accent) 64px,
+        var(--border) 64px,
+        var(--border) 100%
+    );
+}
+
+.login__body { padding-left: 30px; }
+
+.login__mark {
+    display: inline-block;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    font-weight: var(--weight-bold);
+    letter-spacing: 0.22em;
+    color: var(--accent);
+    margin: 0 0 10px;
+}
+
+.login__name {
+    font-family: var(--font-display);
+    font-size: 18px;
+    font-weight: var(--weight-bold);
+    letter-spacing: -0.01em;
+    color: var(--text-primary);
+    margin: 0 0 4px;
+}
+
+.login__sub {
+    font-family: var(--font-sans);
+    font-size: 12.5px;
+    color: var(--text-secondary);
+    line-height: 1.45;
+    margin: 0 0 22px;
+    max-width: 320px;
+}
+
+/*
+ * Solid, in the door's own colour rather than the accent. This is the only action on the page
+ * and the only reason the visitor is here, so it is the one element allowed to carry weight —
+ * a muted button among nothing else reads as disabled.
+ *
+ * `text-decoration: none` on both states is load-bearing, not decoration: the door is an
+ * anchor (this app challenges Entra through its own /login/entra route, not through a posted
+ * form), so without it the global `a:hover { text-decoration: underline }` at the top of this
+ * file draws a real underline across the label.
+ *
+ * ⚠ `.login .login__door` is DOUBLED, and the extra class is the only thing holding the
+ * foreground up in dark mode. site.css carries
+ * `html[data-bs-theme='dark'] a { color: var(--accent-link) }` at (0,1,2), which out-ranks a
+ * bare `.login__door` at (0,1,0) — so the door's label rendered in the ACCENT on the blue
+ * door: 1.52:1, unreadable. It measured 6.70:1 in light at the same moment, because site.css's
+ * light counterpart is a bare `a` at (0,0,1) and loses. One theme, checked alone, finds
+ * nothing.
+ *
+ * The rule this replaced escaped it by being SCOPED: `.btn-ms-signin[b-hash]` is (0,2,0), which
+ * beats (0,1,2). Moving it into app.css lost that attribute, and with it the fight. This is the
+ * relocation trap exactly — a moved rule can need SPECIFICITY, not just a new home — and it is
+ * why the pairing is restated here rather than assumed to survive the move.
+ */
+.login .login__door {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    width: 100%;
+    padding: 14px 16px;
+    background: var(--door);
+    border: 1px solid var(--door);
+    border-radius: var(--radius-sm);
+    color: var(--door-text);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    font-weight: var(--weight-strong);
+    cursor: pointer;
+    text-decoration: none;
+    transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.login .login__door:hover {
+    background: var(--door-hover);
+    border-color: var(--door-hover);
+    color: var(--door-text);
+    text-decoration: none;
+}
+
+.login .login__door:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 3px var(--door-ring);
+}
+
+/* Only rendered when LoginCopy has something true to say — see that class's remarks. */
+.login__note {
+    margin: 20px 0 0;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.06em;
+    line-height: 1.65;
+    color: var(--text-tertiary);
+}
+
+/* ---------- Blazor framework elements ---------- */
+
+/*
+ * The framework's own error strip and error boundary, and Blazor's form-validation classes.
+ * All four arrived here from site.css when that file was deleted; they are global because the
+ * framework writes the markup, so no component owns a scope for them.
+ *
+ * The two error surfaces are retokenised rather than ported: site.css drew `lightyellow` and
+ * `#b32121` on a white strip, which read as a foreign element in dark mode because neither
+ * colour moved with the theme.
+ */
+#blazor-error-ui {
+    background: var(--warning-soft);
+    border-top: 1px solid var(--warning);
+    color: var(--text-primary);
+    bottom: 0;
+    display: none;
+    left: 0;
+    padding: 10px 16px;
+    position: fixed;
+    width: 100%;
+    z-index: 1000;
+    font-size: 13px;
+}
+
+#blazor-error-ui .dismiss { cursor: pointer; position: absolute; right: 16px; top: 10px; }
+
+.blazor-error-boundary {
+    background: var(--danger-soft);
+    border: 1px solid var(--danger);
+    color: var(--danger);
+    padding: 12px 16px;
+    border-radius: var(--radius-md);
+    margin: 16px 0;
+}
+
+.blazor-error-boundary::after { content: "An error has occurred."; }
+
+/* No EditForm in the application today, but these are the framework's names and it is the
+   framework that applies them — a form added later gets the treatment without being told. */
+.valid.modified:not([type=checkbox]) { outline: 1px solid var(--success); }
+.invalid { outline: 1px solid var(--danger); }
+.validation-message { color: var(--danger); }
+
+/* ---------- Session guard ---------- */
+
+/* ── Blazor reconnect overlay ───────────────────────────────────────────
+   The overlay markup and its six Blazor states (components-reconnect-show /
+   -retrying / -failed / -paused / -resume-failed / -rejected) live in
+   Shared/ReconnectModal.razor and Shared/ReconnectModal.razor.css. Only the
+   session-guard tie-in stays global, matching Nexus's own app.css.
+
+   session-guard.js adds .session-guard-reloading just before it reloads the page. Until then
+   this line does not exist as far as the reader is concerned; Blazor's own "retry or reload"
+   copy is correct up to that moment and wrong after it. */
+.reconnect__reloading {
+    display: none;
+    color: var(--text-secondary);
+}
+
+#components-reconnect-modal.session-guard-reloading .components-reconnect-failed-visible {
+    display: none !important;
+}
+
+#components-reconnect-modal.session-guard-reloading .reconnect__reloading {
+    display: block;
+}
+
+/* ── Idle-timeout warning modal (session-guard.js) ─────────────────────── */
+
+/* session-guard.js builds this markup from a JavaScript string, so the elements carry NO scope
+   attribute and a .razor.css rule for them would be rewritten to `.idle-warning-card[b-xxxxx]`
+   and match nothing, silently. These stay global for that reason, not for tidiness. */
+.idle-warning-modal {
+    position: fixed;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    background: var(--surface-scrim);
+    z-index: 3000;
+}
+.idle-warning-modal.idle-warning-show { display: flex; }
+.idle-warning-card {
+    background: var(--surface-raised);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 1.5rem 2rem;
+    max-width: 380px;
+    text-align: center;
+    box-shadow: var(--shadow-overlay);
+}
+.idle-warning-title { margin: 0 0 .5rem; font-size: 1.25rem; }
+.idle-warning-text { margin: 0 0 1.25rem; }
+.idle-warning-count { font-weight: var(--weight-bold); color: var(--accent); }
+.idle-warning-actions { display: flex; gap: .75rem; justify-content: center; }
+.idle-warning-actions button {
+    padding: .5rem 1rem;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border);
+    cursor: pointer;
+    font: inherit;
+}
+.idle-warning-stay { background: var(--accent); color: var(--text-on-accent); border-color: var(--accent); }
+.idle-warning-out { background: var(--surface-panel); color: var(--text-primary); }
+
+/* ---------- ApexCharts ---------- */
+
+/*
+ * Selector names are ApexCharts', not ours. Do not rename them.
+ *
+ * These were a `html[data-bs-theme='dark']`-only block in site.css: light mode relied on
+ * ApexCharts' own defaults, which are a dark grey on a white ground and therefore only ever
+ * correct by accident. Written once here against the tokens, both themes follow for free.
+ *
+ * ⚠ The `:not(.apexcharts-*-annotation-label)` exclusions are load-bearing. Those labels are
+ * coloured per-instance through a resolved value baked into the SVG `fill` ATTRIBUTE, and an
+ * SVG presentation attribute carries zero CSS specificity — so a plain `.apexcharts-text`
+ * rule, which the axis and legend chrome genuinely needs, would otherwise beat every one of
+ * them and flatten the lot to one colour.
+ */
+.apexcharts-canvas { background: var(--chart-surface); }
+
+.apexcharts-title-text,
+.apexcharts-text:not(.apexcharts-point-annotation-label):not(.apexcharts-xaxis-annotation-label):not(.apexcharts-yaxis-annotation-label),
+.apexcharts-text:not(.apexcharts-point-annotation-label):not(.apexcharts-xaxis-annotation-label):not(.apexcharts-yaxis-annotation-label) tspan,
+.apexcharts-xaxis-label tspan,
+.apexcharts-yaxis-label tspan,
+.apexcharts-yaxis-title text { fill: var(--chart-label); }
+
+/*
+ * ⚠ The legend is the ONE text surface here that is not SVG. ApexCharts renders it as an HTML
+ * `<span>` and writes `color` into its INLINE style attribute, so `fill:` above cannot reach it
+ * and a plain `color:` here loses to the inline declaration. `!important` is the only thing that
+ * beats an inline style, and that is why this rule is split out of the block above rather than
+ * folded into it.
+ *
+ * MEASURED, and this is how it was caught: with the legend merely added to the `fill:` list, the
+ * label kept ApexCharts' own `rgb(55,61,63)` in BOTH themes — 11.6:1 on washi, where it looks
+ * entirely correct, and 1.3:1 on ink, where it is almost invisible. The file this replaced beat
+ * the inline style with its own `color: … !important`, in a dark-only block; light only ever
+ * looked right by accident.
+ */
+.apexcharts-legend-text { color: var(--chart-label) !important; }
+
+.apexcharts-gridline,
+.apexcharts-gridlines-horizontal line,
+.apexcharts-gridlines-vertical line { stroke: var(--border-subtle); }
+
+.apexcharts-xaxis line,
+.apexcharts-yaxis line,
+.apexcharts-axis-texts-g line { stroke: var(--chart-grid); }
+
+.apexcharts-tooltip {
+    background: var(--surface-raised) !important;
+    border: 1px solid var(--border) !important;
+    box-shadow: var(--shadow-soft) !important;
+    color: var(--text-primary) !important;
+}
+
+.apexcharts-tooltip-title {
+    background: var(--surface-inset) !important;
+    border-bottom: 1px solid var(--border) !important;
+    color: var(--text-primary) !important;
+    font-family: var(--font-sans) !important;
+}
+
+.apexcharts-tooltip-text,
+.apexcharts-tooltip-text-y-value,
+.apexcharts-tooltip-text-y-label { color: var(--text-primary) !important; }
+
+.apexcharts-xaxistooltip,
+.apexcharts-yaxistooltip {
+    background: var(--surface-raised) !important;
+    border: 1px solid var(--border) !important;
+    color: var(--text-primary) !important;
+}
+
+.apexcharts-legend-series .apexcharts-legend-marker { border-color: transparent !important; }
+
+/* Hide legend items with empty text — the trend-line series are added with Name="" so they
+   draw a line without claiming a legend row. */
+.apexcharts-legend-series:has(.apexcharts-legend-text:empty) { display: none !important; }
+
+/*
+ * The 5.2.X chart's custom tooltip. ApexCharts injects this markup into its own container from
+ * a JavaScript string built in the page's @code block, so the elements carry NO scope
+ * attribute — MEASURED: the rendered `.rm-tooltip-row` has an empty b-* attribute list where
+ * every element the page writes carries one. A rule for it in Pages/ReleaseMetrics5x.razor.css
+ * would be rewritten to `.rm-tooltip-row[b-xxxxx]` and match nothing, silently. Two pages
+ * build the same string (5.2.X Historical and Generate Report), which is the second reason it
+ * is global.
+ */
+.rm-tooltip {
+    padding: 8px 12px;
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    font-size: 12px;
+    min-width: 180px;
+    box-shadow: var(--shadow-soft);
+}
+
+.rm-tooltip-title {
+    font-weight: var(--weight-bold);
+    color: var(--text-primary);
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 4px;
+    margin-bottom: 6px;
+}
+
+.rm-tooltip-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 3px 0;
+    color: var(--text-primary);
+}
+
+.rm-tooltip-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: var(--radius-pill);
+    flex-shrink: 0;
+    display: inline-block;
+}
+
+/* ---------- Disabled-button tooltip ---------- */
+
+/* The hover explanation on the disabled Remove Latest Publish button. Legacy Historical and
+   5.2.X Historical both render that control, so these stay global: scoping them would reach
+   one page and leave the other unstyled. */
+.pub-tooltip-wrap {
+    position: relative;
+    display: inline-block;
+}
+
+.pub-tooltip-text {
+    visibility: hidden;
+    opacity: 0;
+    transition: opacity 0.15s;
+    position: absolute;
+    right: 0;
+    top: calc(100% + 6px);
+    z-index: 2000;
+    background: var(--surface-raised);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 8px 12px;
+    min-width: 280px;
+    max-width: 340px;
+    font-size: 0.78rem;
+    line-height: 1.5;
+    box-shadow: var(--shadow-soft);
+    white-space: normal;
+}
+
+.pub-tooltip-wrap:hover .pub-tooltip-text {
+    visibility: visible;
+    opacity: 1;
+}
+
+/* ---------- Jira filter chart card ---------- */
+
+/*
+ * Shared/JiraFilterChart.razor's own vocabulary, kept under its `jfc-` names rather than
+ * converted: the component is rendered 10 times by Legacy Current and 8 by 5.2.X Current, and
+ * neither page was in this migration's page-conversion scope. Retokenised here — the colours
+ * were already `var(--surface-1)`-style aliases, which the shim defined and this file now
+ * carries directly. Converting the names is the chart pass's to do, with the component in
+ * front of it.
+ */
+.jfc-card {
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    border-top: 3px solid var(--accent);
+    border-radius: var(--radius-md);
+    display: flex;
+    flex-direction: column;
+    height: 100%;     /* fill the CSS grid cell */
+    min-height: 0;    /* allow shrinking below content size */
+    overflow: hidden;
+}
+
+.jfc-title {
+    font-size: 0.8rem;
+    font-weight: var(--weight-strong);
+    color: var(--text-primary);
+    padding: 8px 12px 6px;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.jfc-body {
+    display: flex;
+    flex-direction: row;
+    align-items: flex-start;
+    gap: 0;
+    flex: 1;
+    padding: 8px 4px 0;
+    min-height: 0;
+    overflow: hidden;  /* prevent body from expanding card beyond grid row height */
+}
+
+.jfc-body--loading,
+.jfc-body--error {
+    justify-content: center;
+    align-items: center;
+    padding: 24px;
+}
+
+.jfc-chart-wrap {
+    flex-shrink: 0;
+    width: 52%;
+}
+
+.jfc-legend {
+    flex: 1;
+    min-width: 0;
+    padding: 4px 8px 4px 0;
+    overflow-y: auto;
+}
+
+.jfc-legend-header {
+    display: flex;
+    flex-direction: column;
+    margin-bottom: 6px;
+}
+
+.jfc-legend-type {
+    font-size: 0.78rem;
+    font-weight: var(--weight-bold);
+    color: var(--text-primary);
+}
+
+/* The two secondary readings were `--text-color` at `opacity: .6` / `.5`, which is a
+   foreground dimmed rather than a foreground chosen — on the dark ground that lands near
+   3:1. The tokens are the vocabulary's own answer for the same intent. */
+.jfc-legend-total {
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+}
+
+.jfc-legend-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 0;
+    font-size: 0.76rem;
+    color: var(--text-primary);
+}
+
+.jfc-legend-swatch {
+    width: 12px;
+    height: 12px;
+    border-radius: var(--radius-sm);
+    flex-shrink: 0;
+    display: inline-block;
+}
+
+.jfc-legend-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.jfc-legend-count {
+    font-weight: var(--weight-strong);
+    flex-shrink: 0;
+}
+
+.jfc-footer {
+    font-size: 0.7rem;
+    color: var(--text-tertiary);
+    padding: 4px 12px 6px;
+    border-top: 1px solid var(--border);
+    margin-top: auto;
+}
+
+.jfc-refresh-icon {
+    margin-right: 3px;
+}
+
+.jfc-spinner {
+    width: 24px;
+    height: 24px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: var(--radius-pill);
+    animation: jfc-spin 0.8s linear infinite;
+    margin-right: 8px;
+}
+
+.jfc-loading-text {
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+}
+
+.jfc-error-text {
+    font-size: 0.82rem;
+    color: var(--danger);
+}
+
+@keyframes jfc-spin { to { transform: rotate(360deg); } }
+
+@media (prefers-reduced-motion: reduce) {
+    .jfc-spinner { animation: none; }
+}
+
+/* ---------- Small screens ---------- */
+
+/* Last in the cascade on purpose: these override base rules declared earlier in this same file,
+   so they must be declared after everything they touch or an equal-specificity base rule
+   declared later would win the tie regardless of viewport width. */
+@media (max-width: 640px) {
+    .login-shell { padding: 16px 16px 32px; }
+    .login__spine { bottom: 20px; }
+    .login__body { padding-left: 22px; }
+}

@@ -1,38 +1,12 @@
-<div class="top-row ps-3 navbar navbar-dark">
-    <div class="container-fluid">
-        <a class="navbar-brand brand-with-logo" href="">
-            <img src="images/advanced-logo-a.png" class="brand-logo" alt="Advanced A logo" />
-            <span>Cloud Self Service</span>
-        </a>
-        <button title="Navigation menu" class="navbar-toggler" @onclick="ToggleNavMenu">
-            <span class="navbar-toggler-icon"></span>
-        </button>
-    </div>
-</div>
+@*
+    The sidebar navigation. One link per area; later tasks add their own.
 
-<div class="@NavMenuCssClass nav-scrollable" @onclick="ToggleNavMenu">
-    <nav class="flex-column">
-        <div class="nav-section-label">Operations</div>
-        <div class="nav-item px-3">
-            <NavLink class="nav-link" href="" Match="NavLinkMatch.All">
-                <span class="oi oi-dashboard" aria-hidden="true"></span> Dashboard
-            </NavLink>
-        </div>
-        <div class="nav-item px-3">
-            <NavLink class="nav-link" href="service-health">
-                <span class="oi oi-pulse" aria-hidden="true"></span> Service Health
-            </NavLink>
-        </div>
-        <div class="nav-item px-3">
-            <NavLink class="nav-link" href="app-services">
-                <span class="oi oi-cog" aria-hidden="true"></span> App Services
-            </NavLink>
-        </div>
-    </nav>
-</div>
-
-@code {
-    private bool collapseNavMenu = true;
-    private string? NavMenuCssClass => collapseNavMenu ? "collapse" : null;
-    private void ToggleNavMenu() => collapseNavMenu = !collapseNavMenu;
-}
+    The label is a separate span so the collapsed rail can hide it without hiding the icon; CSS
+    does that, keyed off an attribute on <html> that survives a reload.
+*@
+<nav class="app__nav" data-testid="app-nav">
+    <NavLink class="app__nav-link" ActiveClass="app__nav-link--active" href="" Match="NavLinkMatch.All">
+        <Icon Name="folder" />
+        <span class="app__nav-link__label">Files</span>
+    </NavLink>
+</nav>

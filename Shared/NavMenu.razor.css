@@ -1,87 +1,59 @@
-.navbar-toggler {
-    background-color: rgba(255, 255, 255, 0.1);
-}
+/*
+ * The sidebar's links. The sidebar's own surface and the collapsed-rail rules live in
+ * MainLayout.razor.css, which owns the <aside>; this file owns what is inside it.
+ *
+ * Every colour reads a token. The pre-sumi version of this file had to re-colour six foregrounds
+ * that Bootstrap's .navbar-dark had painted white for the navy gradient; the markup no longer
+ * carries .navbar-dark at all, so there is nothing to override here.
+ *
+ * ⚠ ::deep is REQUIRED on every link rule, and its absence is invisible.
+ * Blazor's scoped CSS stamps the scope attribute onto this component's own markup, and a
+ * <NavLink> is a CHILD COMPONENT, not markup — its rendered <a> carries NavLink's identity, not
+ * this file's. So a bare `.app__nav-link { }` here compiles to `.app__nav-link[b-xxxxx]` and
+ * matches NOTHING: no build error, no console message, and a sidebar of underlined blue browser
+ * default links stacked under their icons. Measured, not reasoned: the <nav> below carries
+ * b-n6bz4e4m0v and the <a> inside it carries only href/class/aria-current.
+ *
+ * `.app__nav` IS this component's own markup, so it takes the attribute and can host the ::deep.
+ */
 
-.top-row {
-    height: 3.5rem;
-    background-color: rgba(0,0,0,0.4);
-}
+.app__nav { display: flex; flex-direction: column; gap: 2px; }
 
-.navbar-brand {
-    font-size: 1.1rem;
-}
-
-.brand-with-logo {
-    display: inline-flex;
+.app__nav ::deep .app__nav-link {
+    display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 10px;
+    height: var(--control-height);
+    padding: 0 10px;
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
+    font-size: 13.5px;
+    font-weight: var(--weight-strong);
+    white-space: nowrap;
+    text-decoration: none;
+    transition: color 0.15s ease, background 0.15s ease;
 }
 
-.brand-logo {
-    width: 24px;
-    height: 24px;
-    object-fit: contain;
+.app__nav ::deep .app__nav-link:hover {
+    background: var(--surface-hover);
+    color: var(--text-primary);
+    text-decoration: none;
 }
 
-.oi {
-    width: 2rem;
-    font-size: 1.1rem;
-    vertical-align: text-top;
-    top: -2px;
+.app__nav ::deep .app__nav-link--active { background: var(--accent-soft); color: var(--accent); }
+
+.app__nav ::deep .app__nav-link:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 3px var(--accent-ring);
 }
 
-.nav-item {
-    font-size: 0.9rem;
-    padding-bottom: 0.5rem;
-}
+.app__nav ::deep .app__nav-link__label { overflow: hidden; text-overflow: ellipsis; }
 
-    .nav-item:first-of-type {
-        padding-top: 1rem;
-    }
-
-    .nav-item:last-of-type {
-        padding-bottom: 1rem;
-    }
-
-    .nav-item ::deep a {
-        color: #d7d7d7;
-        border-radius: 4px;
-        height: 3rem;
-        display: flex;
-        align-items: center;
-        line-height: 3rem;
-    }
-
-.nav-item ::deep a.active {
-    background-color: rgba(255,255,255,0.25);
-    color: white;
-}
-
-.nav-item ::deep a:hover {
-    background-color: rgba(255,255,255,0.1);
-    color: white;
-}
-
-.nav-section-label {
-    padding: 1rem 1rem 0.25rem 1.2rem;
-    font-size: 0.7rem;
-    font-weight: 700;
+.app__nav-group {
+    font-size: 10.5px;
+    font-weight: var(--weight-strong);
     letter-spacing: 0.08em;
     text-transform: uppercase;
-    color: rgba(255, 255, 255, 0.45);
-}
-
-@media (min-width: 641px) {
-    .navbar-toggler {
-        display: none;
-    }
-
-    .collapse {
-        display: block;
-    }
-
-    .nav-scrollable {
-        height: calc(100vh - 3.5rem);
-        overflow-y: auto;
-    }
+    color: var(--text-tertiary);
+    padding: 14px 10px 4px;
 }
