@@ -7,10 +7,6 @@
 
 <PageTitle>Advanced Cloud Self Service</PageTitle>
 
-<MudThemeProvider IsDarkMode="_isDarkMode" />
-<MudPopoverProvider />
-<MudDialogProvider />
-<MudSnackbarProvider />
 
 <div class="page">
     <div class="sidebar">
@@ -111,7 +107,7 @@
         {
             new("✨ Added", new()
             {
-                "Initial scaffold: Blazor Server (.NET 10, MudBlazor 9) skeleton matching the suite brand palette (cyan #019EC0 accent, navy-to-teal sidebar, full dark-mode support).",
+                "Initial scaffold: Blazor Server (.NET 10) skeleton matching the suite brand palette (cyan #019EC0 accent, navy-to-teal sidebar, full dark-mode support).",
                 "Topbar with full Advanced logo, version chip that opens this release-notes panel, and a Light/Dark toggle.",
                 "Sidebar navigation: Dashboard (/), Service Health (/service-health), App Services (/app-services).",
                 "Auth intentionally NOT yet wired — scaffolded with Microsoft Entra OIDC placeholder comments for future addition (Auth:Provider = None; GitHub OAuth is not used — it was retired suite-wide).",

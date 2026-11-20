@@ -1,15 +1,14 @@
+using CloudSelfService;
 using CloudSelfService.Services;
-using MudBlazor.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
 // Force en-US culture so date/number formatting is consistent regardless of host locale
-System.Globalization.CultureInfo.DefaultThreadCurrentCulture   = System.Globalization.CultureInfo.InvariantCulture;
-System.Globalization.CultureInfo.DefaultThreadCurrentUICulture = System.Globalization.CultureInfo.InvariantCulture;
+var usCulture = new System.Globalization.CultureInfo("en-US");
+System.Globalization.CultureInfo.DefaultThreadCurrentCulture   = usCulture;
+System.Globalization.CultureInfo.DefaultThreadCurrentUICulture = usCulture;
 
-builder.Services.AddRazorPages();
-builder.Services.AddServerSideBlazor();
-builder.Services.AddMudServices();
+builder.Services.AddRazorComponents().AddInteractiveServerComponents();
 builder.Services.AddSingleton<AppVersionService>();
 builder.Services.AddHsts(options => { options.MaxAge = TimeSpan.FromDays(365); });
 
@@ -30,13 +29,11 @@ var app = builder.Build();
 
 if (!app.Environment.IsDevelopment())
 {
-    app.UseExceptionHandler("/Error");
+    app.UseExceptionHandler("/Error", createScopeForErrors: true);
     app.UseHsts();
 }
 
 app.UseHttpsRedirection();
-app.UseStaticFiles();
-app.UseRouting();
 
 app.Use(async (ctx, next) =>
 {
@@ -58,7 +55,11 @@ app.Use(async (ctx, next) =>
     await next();
 });
 
-app.MapBlazorHub();
-app.MapFallbackToPage("/_Host");
+app.UseAntiforgery();
+
+app.MapStaticAssets();
+app.MapRazorComponents<App>().AddInteractiveServerRenderMode();
 
 app.Run();
+
+public partial class Program;

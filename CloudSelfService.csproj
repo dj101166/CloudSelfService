@@ -8,6 +8,13 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="MudBlazor" Version="9.1.0" />
+    <InternalsVisibleTo Include="CloudSelfService.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="CloudSelfService.Tests\**" />
+    <Content Remove="CloudSelfService.Tests\**" />
+    <EmbeddedResource Remove="CloudSelfService.Tests\**" />
+    <None Remove="CloudSelfService.Tests\**" />
   </ItemGroup>
 </Project>

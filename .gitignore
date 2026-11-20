@@ -5,3 +5,4 @@ appsettings.Development.json
 .claude/settings.local.json
 CLAUDE.local.md
 Data/
+*.msg

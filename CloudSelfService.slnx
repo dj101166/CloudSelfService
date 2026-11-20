@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="CloudSelfService.Tests/CloudSelfService.Tests.csproj" />
+  <Project Path="CloudSelfService.csproj" />
+</Solution>
