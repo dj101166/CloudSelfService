@@ -166,7 +166,14 @@ public class PgStoresIntegrationTests
         Assert.True((await store.GetAsync(s.Id))!.Overwrite);
 
         Assert.Contains(await store.ListExpiredOpenAsync(now.AddHours(25)), x => x.Id == s.Id);
-        Assert.True(await store.TrySetStatusAsync(s.Id, UploadStatus.Open, UploadStatus.Completing));
+        Assert.Contains(await store.ListActiveForPathAsync(target, "Docs/a b#.bin", now), x => x.Id == s.Id);
+        Assert.Empty(await store.ListActiveForPathAsync(target, "Docs/a b#.bin", now.AddHours(24)));
+        var claimed = now.AddMinutes(3);
+        Assert.True(await store.TrySetStatusAsync(s.Id, UploadStatus.Open, UploadStatus.Completing, claimed));
+        Assert.Equal(claimed, (await store.GetAsync(s.Id))!.ClaimedAt);
+        Assert.Contains(await store.ListActiveForPathAsync(target, "Docs/a b#.bin", now), x => x.Id == s.Id);
+        Assert.Contains(await store.ListStuckCompletingAsync(claimed.AddMinutes(1)), x => x.Id == s.Id);
+        Assert.DoesNotContain(await store.ListStuckCompletingAsync(claimed), x => x.Id == s.Id);
         Assert.False(await store.TrySetStatusAsync(s.Id, UploadStatus.Open, UploadStatus.Aborted));
         Assert.DoesNotContain(await store.ListExpiredOpenAsync(now.AddHours(25)), x => x.Id == s.Id);
         Assert.Null(await store.FindResumableAsync(user, target, "Docs/a b#.bin", s.Size, now));

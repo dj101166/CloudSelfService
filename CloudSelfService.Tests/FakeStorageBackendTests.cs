@@ -277,14 +277,30 @@ public class FakeStorageBackendTests
     }
 
     [Fact]
-    public async Task WriteChunk_ShortStream_Conflict()
+    public async Task WriteChunk_StreamLengthMismatch_Throws()
     {
         var name = Stage("f");
         await _fake.BeginUploadAsync(T, name, 5, _ct);
-        var ex = await Assert.ThrowsAsync<StorageFailureException>(() =>
+        await Assert.ThrowsAsync<ArgumentException>(() =>
             _fake.WriteChunkAsync(T, name, "f", "b0", 0, new MemoryStream(new byte[2]), 5, new byte[16], _ct));
-        Assert.Equal(StorageFailureKind.Conflict, ex.Kind);
-        Assert.Equal("Upload piece was shorter than expected.", ex.Message);
+        Assert.Equal(0, _fake.BytesWritten);
+    }
+
+    // Mirrors Azure.Core's "stream must be seekable": the Kestrel request body must never be handed to storage.
+    [Fact]
+    public async Task WriteChunk_NonSeekableStream_Throws()
+    {
+        var name = Stage("f");
+        await _fake.BeginUploadAsync(T, name, 3, _ct);
+        var bytes = new byte[] { 1, 2, 3 };
+        var ex = await Assert.ThrowsAsync<ArgumentException>(() =>
+            _fake.WriteChunkAsync(T, name, "f", "b0", 0, new BufferedStream(new NonSeekable(bytes)), 3, MD5.HashData(bytes), _ct));
+        Assert.Contains("seekable", ex.Message);
+    }
+
+    private sealed class NonSeekable(byte[] data) : MemoryStream(data)
+    {
+        public override bool CanSeek => false;
     }
 
     [Fact]

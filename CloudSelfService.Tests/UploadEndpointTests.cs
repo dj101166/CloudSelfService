@@ -264,7 +264,7 @@ public sealed class UploadEndpointTests : IDisposable
     }
 
     [Fact]
-    public async Task PutChunk_BadMd5_503_Retryable()
+    public async Task PutChunk_BadMd5_400_NoStorageCall()
     {
         var (client, token, target) = await ContributorAsync();
         var data = Bytes(10);
@@ -272,7 +272,37 @@ public sealed class UploadEndpointTests : IDisposable
 
         var response = await client.SendAsync(Chunk(token, session, 0, data, Convert.ToBase64String(new byte[16])));
 
-        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(UploadSessionService.ChunkCorruptedMessage, (await JsonOf(response)).GetProperty("error").GetString());
+        Assert.DoesNotContain(_factory.Storage.Calls, c => c.StartsWith("WriteChunk"));
+    }
+
+    // The fake enforces the Azure SDK contract (seekable stream, exact length), so this fails if the raw body reaches storage.
+    [Fact]
+    public async Task PutChunk_FullSizePiece_ReachesStorageAsSeekableStream()
+    {
+        var (client, token, target) = await ContributorAsync();
+        var file = Bytes(ChunkMath.ChunkSize);
+        var session = await BeginOkAsync(client, token, target, "a.bin", file.Length);
+
+        var response = await client.SendAsync(Chunk(token, session, 0, file));
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        Assert.Equal(ChunkMath.ChunkSize, _factory.Storage.BytesWritten);
+    }
+
+    [Fact]
+    public async Task Complete_StagedDataLost_409()
+    {
+        var (client, token, target) = await ContributorAsync();
+        var session = await BeginOkAsync(client, token, target, "a.bin", 0);
+        var staging = (await _factory.Services.GetRequiredService<IUploadSessionStore>().GetAsync(session))!.StagingPath;
+        await _factory.Storage.AbortUploadAsync(target, staging, default);
+
+        var response = await client.SendAsync(Request(HttpMethod.Post, $"/api/uploads/{session}/complete", token));
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal(UploadSessionService.UploadLostMessage, (await JsonOf(response)).GetProperty("error").GetString());
     }
 
     [Fact]
@@ -320,7 +350,12 @@ public sealed class UploadEndpointTests : IDisposable
         public Task MarkChunkAsync(Guid id, int index, CancellationToken ct = default) => throw Down();
         public Task<IReadOnlyList<int>> ReceivedChunksAsync(Guid id, CancellationToken ct = default) => throw Down();
         public Task SetStatusAsync(Guid id, string status, CancellationToken ct = default) => throw Down();
-        public Task<bool> TrySetStatusAsync(Guid id, string expected, string next, CancellationToken ct = default) => throw Down();
+        public Task<bool> TrySetStatusAsync(Guid id, string expected, string next, DateTimeOffset? claimedAt = null,
+            CancellationToken ct = default) => throw Down();
+        public Task<IReadOnlyList<UploadSession>> ListActiveForPathAsync(Guid targetId, string finalPath, DateTimeOffset now,
+            CancellationToken ct = default) => throw Down();
+        public Task<IReadOnlyList<UploadSession>> ListStuckCompletingAsync(DateTimeOffset claimedBefore, CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlyList<UploadSession>>(Array.Empty<UploadSession>());
         public Task SetOverwriteAsync(Guid id, bool overwrite, CancellationToken ct = default) => throw Down();
         public Task<IReadOnlyList<UploadSession>> ListExpiredOpenAsync(DateTimeOffset now, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<UploadSession>>(Array.Empty<UploadSession>());

@@ -1,4 +1,6 @@
+using System.Buffers;
 using System.Globalization;
+using System.Security.Cryptography;
 using CloudSelfService.Models;
 using CloudSelfService.Services.Access;
 using CloudSelfService.Services.Data;
@@ -25,6 +27,11 @@ public sealed class UploadSessionService
     public const string NegativeSizeMessage = "File size can't be negative.";
     public const string Md5RequiredMessage = "Each piece needs a Content-MD5 header holding its base64 MD5 hash.";
     public const string NameTooLongMessage = "That file name is too long.";
+    public const string LongChunkMessage = "Upload piece was longer than expected.";
+    public const string ChunkCorruptedMessage = "Upload piece was corrupted in transit; it will be retried.";
+    public const string ChunkIncompleteMessage = "Upload piece did not arrive completely; it will be retried.";
+    public const string OtherUserUploadingMessage = "Someone else is uploading this file right now.";
+    public const string UploadLostMessage = "This upload's data is no longer in storage. Please start it again.";
     private const string StagingSuffix = ".cssupload-";
     private const int MaxSegmentLength = 255;
     private static readonly string Operation = StorageOperation.Upload.ToString();
@@ -117,6 +124,12 @@ public sealed class UploadSessionService
         }
 
         var now = _time.GetUtcNow();
+        // Blob blocks are staged on the final name, so two users' sessions there share one uncommitted block list and
+        // whichever commits first discards the other's blocks.
+        if (target.Kind == StorageKind.BlobContainer
+            && (await _sessions.ListActiveForPathAsync(target.Id, finalPath, now, ct)).Any(o => o.UserId != userId))
+            return new(AccessOutcome.Conflict, null, OtherUserUploadingMessage);
+
         var resumable = await _sessions.FindResumableAsync(userId, target.Id, finalPath, req.Size, now, ct);
         if (resumable is not null)
         {
@@ -137,7 +150,7 @@ public sealed class UploadSessionService
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            await _sessions.TrySetStatusAsync(id, UploadStatus.Open, UploadStatus.Aborted, CancellationToken.None);
+            await _sessions.TrySetStatusAsync(id, UploadStatus.Open, UploadStatus.Aborted, ct: CancellationToken.None);
             if (ex is StorageFailureException failure)
             {
                 LogStorageFailure(failure, "begin", target.Id, finalPath, ctx);
@@ -181,10 +194,22 @@ public sealed class UploadSessionService
             return new(auth.Outcome, auth.Message);
         var target = auth.Value!;
 
+        // The Azure SDKs need a seekable stream of known length and Kestrel's request body is neither, so the piece is
+        // buffered (at most ChunkSize; the Chunks rate limit bounds how many per user) and checked here before storage
+        // sees it. Storage still verifies the same MD5 end to end.
+        var length = (int)expected;
+        var buffer = ArrayPool<byte>.Shared.Rent(Math.Max(1, length));
         try
         {
+            var read = await ReadPieceAsync(body, buffer, length, target.Id, session.FinalPath, ctx, ct);
+            if (read.Outcome != AccessOutcome.Ok)
+                return read;
+            if (!MD5.HashData(buffer.AsSpan(0, length)).AsSpan().SequenceEqual(md5))
+                return new(AccessOutcome.Invalid, ChunkCorruptedMessage);
+
+            using var piece = new MemoryStream(buffer, 0, length, writable: false);
             await _backends.For(target).WriteChunkAsync(target, session.StagingPath, session.FinalPath,
-                ChunkMath.BlockId(session.Id, index), (long)index * ChunkMath.ChunkSize, body, expected, md5, ct);
+                ChunkMath.BlockId(session.Id, index), (long)index * ChunkMath.ChunkSize, piece, expected, md5, ct);
         }
         catch (StorageFailureException failure)
         {
@@ -196,9 +221,42 @@ public sealed class UploadSessionService
             LogUnexpected(ex, "chunk", target.Id, session.FinalPath, ctx);
             return new(AccessOutcome.Unavailable, StorageErrorMapper.UnreachableMessage);
         }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
 
         await _sessions.MarkChunkAsync(session.Id, index, ct);
         return new(AccessOutcome.Ok);
+    }
+
+    /// <summary>Reads exactly <paramref name="length"/> bytes and confirms nothing follows.</summary>
+    private async Task<AccessResult> ReadPieceAsync(Stream body, byte[] buffer, int length, Guid targetId, string path,
+        AuditContext ctx, CancellationToken ct)
+    {
+        try
+        {
+            var total = 0;
+            while (total < length)
+            {
+                var n = await body.ReadAsync(buffer.AsMemory(total, length - total), ct);
+                if (n == 0)
+                    return new(AccessOutcome.Invalid, StorageErrorMapper.ShortChunkMessage);
+                total += n;
+            }
+            var probe = new byte[1];
+            if (await body.ReadAsync(probe, ct) > 0)
+                return new(AccessOutcome.Invalid, LongChunkMessage);
+            return new(AccessOutcome.Ok);
+        }
+        catch (IOException ex)
+        {
+            // A dropped connection or malformed body (BadHttpRequestException is an IOException) is the client's
+            // problem, not storage's: no error-level noise, and the client simply retries the piece.
+            _logger.LogInformation("Upload piece for target {TargetId} at {Path} was not received completely: {Reason} (correlation {CorrelationId}).",
+                targetId, path, ex.Message, ctx.CorrelationId);
+            return new(AccessOutcome.Invalid, ChunkIncompleteMessage);
+        }
     }
 
     public async Task<AccessResult> CompleteAsync(Guid userId, Guid sessionId, AuditContext ctx, CancellationToken ct = default)
@@ -218,12 +276,13 @@ public sealed class UploadSessionService
         var target = auth.Value!;
 
         // Claiming Completing is what keeps the expiry sweep, a parallel Complete, or an Abort off this session.
-        if (!await _sessions.TrySetStatusAsync(session.Id, UploadStatus.Open, UploadStatus.Completing, ct))
+        if (!await _sessions.TrySetStatusAsync(session.Id, UploadStatus.Open, UploadStatus.Completing, _time.GetUtcNow(), ct))
             return new(AccessOutcome.NotFound, StorageErrorMapper.NotFoundMessage);
 
         var blockIds = Enumerable.Range(0, count).Select(i => ChunkMath.BlockId(session.Id, i)).ToList();
         string? failureMessage = null;
         var outcome = AccessOutcome.Ok;
+        var lost = false;
         try
         {
             // Not tied to the request: a client that disconnects mid-commit must not leave the session half-claimed.
@@ -234,6 +293,14 @@ public sealed class UploadSessionService
         {
             LogStorageFailure(failure, "complete", target.Id, session.FinalPath, ctx);
             (outcome, failureMessage) = (OutcomeOf(failure), failure.Message);
+            // The staged data is gone (Files staging removed, or blob blocks discarded by another commit), so a retry
+            // can never succeed: end the session and tell the client to start again.
+            if (failure.Kind is StorageFailureKind.NotFound or StorageFailureKind.Conflict)
+            {
+                lost = true;
+                (outcome, failureMessage) = (AccessOutcome.Conflict,
+                    failure.Kind == StorageFailureKind.Conflict ? failure.Message : UploadLostMessage);
+            }
         }
         catch (Exception ex)
         {
@@ -243,14 +310,23 @@ public sealed class UploadSessionService
 
         if (failureMessage is not null)
         {
-            // Back to Open so the user can retry, or resume with overwrite after a name clash.
-            await _sessions.TrySetStatusAsync(session.Id, UploadStatus.Completing, UploadStatus.Open, CancellationToken.None);
+            if (lost)
+            {
+                await _sessions.TrySetStatusAsync(session.Id, UploadStatus.Completing, UploadStatus.Aborted, ct: CancellationToken.None);
+                await AbortQuietlyAsync(target, session);
+            }
+            else
+            {
+                // Back to Open so the user can retry, or resume with overwrite after a name clash.
+                await _sessions.TrySetStatusAsync(session.Id, UploadStatus.Completing, UploadStatus.Open, ct: CancellationToken.None);
+            }
             await RecordAsync(userId, auth.UserUpn, target, session.FinalPath, 0, AuditResult.Failed, failureMessage, ctx);
             return new(outcome, failureMessage);
         }
 
-        await _sessions.SetStatusAsync(session.Id, UploadStatus.Completed, CancellationToken.None);
-        await RecordAsync(userId, auth.UserUpn, target, session.FinalPath, session.Size, AuditResult.Success, "", ctx);
+        // Conditional so that if the cleanup sweep already settled a stuck commit, the Success row isn't written twice.
+        if (await _sessions.TrySetStatusAsync(session.Id, UploadStatus.Completing, UploadStatus.Completed, ct: CancellationToken.None))
+            await RecordAsync(userId, auth.UserUpn, target, session.FinalPath, session.Size, AuditResult.Success, "", ctx);
         return new(AccessOutcome.Ok);
     }
 
@@ -265,7 +341,7 @@ public sealed class UploadSessionService
             return new(auth.Outcome, auth.Message);
         var target = auth.Value!;
 
-        if (!await _sessions.TrySetStatusAsync(session.Id, UploadStatus.Open, UploadStatus.Aborted, ct))
+        if (!await _sessions.TrySetStatusAsync(session.Id, UploadStatus.Open, UploadStatus.Aborted, ct: ct))
             return new(AccessOutcome.NotFound, StorageErrorMapper.NotFoundMessage);
 
         try
@@ -275,7 +351,7 @@ public sealed class UploadSessionService
         catch (Exception ex)
         {
             // Left Open so a retry, or the expiry sweep, removes the staged data.
-            await _sessions.TrySetStatusAsync(session.Id, UploadStatus.Aborted, UploadStatus.Open, CancellationToken.None);
+            await _sessions.TrySetStatusAsync(session.Id, UploadStatus.Aborted, UploadStatus.Open, ct: CancellationToken.None);
             if (ex is StorageFailureException failure)
             {
                 LogStorageFailure(failure, "abort", target.Id, session.FinalPath, ctx);
@@ -287,6 +363,18 @@ public sealed class UploadSessionService
 
         await RecordAsync(userId, auth.UserUpn, target, session.FinalPath, 0, AuditResult.Failed, CancelledByUserMessage, ctx);
         return new(AccessOutcome.Ok);
+    }
+
+    private async Task AbortQuietlyAsync(StorageTarget target, UploadSession session)
+    {
+        try
+        {
+            await _backends.For(target).AbortUploadAsync(target, session.StagingPath, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not remove staged data for upload {SessionId} on target {TargetId}.", session.Id, target.Id);
+        }
     }
 
     /// <summary>The caller's own Open, unexpired session; null for anything else, so another user's id is indistinguishable from a missing one.</summary>

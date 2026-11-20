@@ -23,6 +23,7 @@ public static class StorageErrorMapper
     public const string OtherMessage = "Something went wrong talking to storage.";
     public const string MoveIntoItselfMessage = "Can't move a folder into itself.";
     public const string ShortChunkMessage = "Upload piece was shorter than expected.";
+    public const string UploadInterruptedMessage = "This upload was interrupted by another upload of the same file. Please start it again.";
     public const string NotFoundMessage = "That item no longer exists.";
     public const string AlreadyExistsMessage = "An item with that name already exists.";
 
@@ -57,6 +58,7 @@ public static class StorageErrorMapper
             412 => new(StorageFailureKind.AlreadyExists, AlreadyExistsMessage, ex),
             401 or 403 => new(StorageFailureKind.NotAuthorised, NotAuthorisedMessage, ex),
             400 when code == "Md5Mismatch" => new(StorageFailureKind.Conflict, CorruptedChunkMessage, ex),
+            400 when code == "InvalidBlockList" => new(StorageFailureKind.Conflict, UploadInterruptedMessage, ex),
             0 => new(StorageFailureKind.Unreachable, UnreachableMessage, ex),
             _ => new(StorageFailureKind.Other, OtherMessage, ex),
         };

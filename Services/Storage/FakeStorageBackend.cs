@@ -282,6 +282,10 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
         Stream data, long length, byte[] md5, CancellationToken ct)
     {
         Enter($"WriteChunk:{stagingPath}:{blockId}");
+        // The Azure SDKs reject a non-seekable stream ("stream must be seekable") and send Length - Position bytes.
+        if (!data.CanSeek) throw new ArgumentException("stream must be seekable", nameof(data));
+        if (data.Length - data.Position != length)
+            throw new ArgumentException($"stream holds {data.Length - data.Position} bytes, expected {length}", nameof(data));
         var buffer = new byte[length];
         try { await data.ReadExactlyAsync(buffer, ct); }
         catch (EndOfStreamException)

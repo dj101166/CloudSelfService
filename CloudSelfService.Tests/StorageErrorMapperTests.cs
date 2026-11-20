@@ -74,6 +74,14 @@ public class StorageErrorMapperTests
     }
 
     [Fact]
+    public void Map_InvalidBlockList_ConflictWithRestartMessage()
+    {
+        var mapped = StorageErrorMapper.Map(new RequestFailedException(400, "bad list", "InvalidBlockList", null));
+        Assert.Equal(StorageFailureKind.Conflict, mapped.Kind);
+        Assert.Equal("This upload was interrupted by another upload of the same file. Please start it again.", mapped.Message);
+    }
+
+    [Fact]
     public void Map_Anything_Other()
     {
         var mapped = StorageErrorMapper.Map(new InvalidOperationException("secret detail"));

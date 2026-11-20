@@ -8,6 +8,8 @@ namespace CloudSelfService.Endpoints;
 /// Per-user limits for the transfer endpoints. Downloads and the upload control calls share <see cref="Transfers"/>;
 /// chunk PUTs use <see cref="Chunks"/>, concurrency only, because one large file is thousands of chunks
 /// (a 10 GB file is 2,560) and a per-minute bucket would throttle a legitimate upload to a crawl.
+/// Each in-flight chunk PUT buffers one piece in memory, so the chunk limit is also the memory bound: worst case
+/// ChunkSize (4 MiB) x MaxConcurrentChunksPerUser (default 16) = 64 MiB per signed-in user.
 /// </summary>
 public static class RateLimits
 {

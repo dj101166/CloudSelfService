@@ -20,8 +20,7 @@ public sealed class PgsqlContext : IAsyncDisposable
     public NpgsqlDataSource DataSource => _dataSource
         ?? throw new InvalidOperationException("PgsqlContext is not configured (ConnectionStrings:Default missing).");
 
-    // Enums are stored as TEXT holding their names. upload_sessions/upload_chunks are
-    // created here but their store arrives with the upload task.
+    // Enums are stored as TEXT holding their names.
     internal const string SchemaSql = """
         CREATE TABLE IF NOT EXISTS customers (
             id                  UUID PRIMARY KEY,
@@ -142,6 +141,11 @@ public sealed class PgsqlContext : IAsyncDisposable
             expires_at   TIMESTAMPTZ NOT NULL,
             status       TEXT NOT NULL
         );
+
+        ALTER TABLE upload_sessions ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ NULL;
+        CREATE INDEX IF NOT EXISTS idx_upload_sessions_owner_path ON upload_sessions (user_id, target_id, final_path);
+        CREATE INDEX IF NOT EXISTS idx_upload_sessions_target_path ON upload_sessions (target_id, final_path);
+        CREATE INDEX IF NOT EXISTS idx_upload_sessions_status_expiry ON upload_sessions (status, expires_at);
 
         CREATE TABLE IF NOT EXISTS upload_chunks (
             session_id UUID NOT NULL REFERENCES upload_sessions(id) ON DELETE CASCADE,

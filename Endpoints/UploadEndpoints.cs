@@ -86,19 +86,13 @@ public static class UploadEndpoints
     private static Task<IResult> PutChunkAsync(Guid id, int index, HttpContext ctx, UploadSessionService uploads, ILoggerFactory loggers) =>
         RunAsync(ctx, loggers, "chunk", async (userId, audit, ct) =>
         {
+            // A declared length over the piece size is refused before reading. A body with no declared length can't
+            // pass the service's exact-length check, so Kestrel's body limit is a backstop rather than a reachable path.
             if (ctx.Request.ContentLength > ChunkMath.ChunkSize)
                 return Error(StatusCodes.Status413PayloadTooLarge, TooLargeMessage);
 
-            AccessResult result;
-            try
-            {
-                result = await uploads.PutChunkAsync(userId, id, index, ctx.Request.Body, ctx.Request.ContentLength,
-                    ctx.Request.Headers["Content-MD5"].ToString(), audit, ct);
-            }
-            catch (BadHttpRequestException ex) when (ex.StatusCode == StatusCodes.Status413PayloadTooLarge)
-            {
-                return Error(StatusCodes.Status413PayloadTooLarge, TooLargeMessage);
-            }
+            var result = await uploads.PutChunkAsync(userId, id, index, ctx.Request.Body, ctx.Request.ContentLength,
+                ctx.Request.Headers["Content-MD5"].ToString(), audit, ct);
             return result.Outcome == AccessOutcome.Ok ? Results.NoContent() : ErrorFor(result.Outcome, result.Message);
         });
 
@@ -143,7 +137,7 @@ public static class UploadEndpoints
         AccessOutcome.Denied => Error(StatusCodes.Status403Forbidden, message),
         AccessOutcome.NotFound => Error(StatusCodes.Status404NotFound, message),
         AccessOutcome.Invalid => Error(StatusCodes.Status400BadRequest, message),
-        AccessOutcome.AlreadyExists => Error(StatusCodes.Status409Conflict, message),
+        AccessOutcome.AlreadyExists or AccessOutcome.Conflict => Error(StatusCodes.Status409Conflict, message),
         _ => Error(StatusCodes.Status503ServiceUnavailable, message ?? DownloadEndpoints.UnavailableMessage),
     };
 

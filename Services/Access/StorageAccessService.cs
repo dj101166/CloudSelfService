@@ -5,7 +5,8 @@ using CloudSelfService.Services.Storage;
 
 namespace CloudSelfService.Services.Access;
 
-public enum AccessOutcome { Ok, Denied, NotFound, Invalid, AlreadyExists, Unavailable }
+/// <summary>Conflict: the operation clashed with another one in flight and must be started again (HTTP 409, unlike AlreadyExists).</summary>
+public enum AccessOutcome { Ok, Denied, NotFound, Invalid, AlreadyExists, Unavailable, Conflict }
 
 public sealed record AccessResult(AccessOutcome Outcome, string? Message = null);
 
