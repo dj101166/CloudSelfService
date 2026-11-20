@@ -25,7 +25,7 @@ public static class StoragePaths
 
     public static bool IsMarker(string path) => Leaf(path) == FolderMarker;
 
-    private static readonly Regex StagingName = new(@"^\..+\.cssupload-[0-9a-f]{32}\z", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+    private static readonly Regex StagingName = new(@"^\..+\.cssupload-[0-9a-f]{32}\z", RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
 
     /// <summary>Caller-chosen upload staging names ("{folder}/.{name}.cssupload-{sessionId:N}") must never be listed.</summary>
     public static bool IsStagingName(string name) => StagingName.IsMatch(name);

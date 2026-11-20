@@ -17,6 +17,8 @@ public sealed record ReachableTarget(StorageTarget Target, Customer? Customer, A
 /// The only gate to storage. Every call re-reads the user, customer, target and grant from the
 /// stores, so a revoked grant, a deactivated user or customer, or a de-configured Owner takes
 /// effect on the very next call — nothing is trusted from the circuit or the cookie.
+/// Store (database) failures propagate unhandled by design, so the gate fails closed; callers at the
+/// HTTP and circuit boundary must catch them.
 /// </summary>
 public sealed class StorageAccessService
 {
@@ -35,10 +37,15 @@ public sealed class StorageAccessService
     private readonly IStorageBackendResolver _backends;
     private readonly AuditService _audit;
     private readonly OwnerConfig _owners;
+    private readonly TimeProvider _time;
+    private readonly ILogger<StorageAccessService> _logger;
 
     public StorageAccessService(IUserStore users, ICustomerStore customers, ITargetStore targets, IGrantStore grants,
-        IStorageBackendResolver backends, AuditService audit, OwnerConfig owners)
+        IStorageBackendResolver backends, AuditService audit, OwnerConfig owners, TimeProvider time,
+        ILogger<StorageAccessService> logger)
     {
+        _time = time;
+        _logger = logger;
         _users = users;
         _customers = customers;
         _targets = targets;
@@ -107,6 +114,7 @@ public sealed class StorageAccessService
         }
         catch (StorageFailureException failure)
         {
+            LogFailure(failure, StorageOperation.List, targetId, path, ctx);
             return new(OutcomeOf(failure), null, failure.Message);
         }
     }
@@ -135,6 +143,7 @@ public sealed class StorageAccessService
         }
         catch (StorageFailureException failure)
         {
+            LogFailure(failure, StorageOperation.Download, targetId, normalized, ctx);
             return new(OutcomeOf(failure), default, failure.Message);
         }
     }
@@ -168,14 +177,17 @@ public sealed class StorageAccessService
             return new(AccessOutcome.Invalid, RootNotAllowedMessage);
         if (source == dest)
             return new(AccessOutcome.Invalid, SameLocationMessage);
-        // Case-insensitive because Azure Files is: "Docs" -> "docs/Sub" is a move into itself there.
-        if (dest.StartsWith(source + "/", StringComparison.OrdinalIgnoreCase))
+        if (StoragePaths.IsMoveIntoItself(source, dest))
             return new(AccessOutcome.Invalid, StorageErrorMapper.MoveIntoItselfMessage);
 
         var auditPath = $"{source} -> {dest}";
         var r = await ResolveAsync(userId, targetId, ct);
         if (!await AllowedAsync(r, targetId, StorageOperation.Move, auditPath, ctx))
             return new(AccessOutcome.Denied, DeniedMessage);
+        // Azure Files names are case-insensitive, so "Docs" -> "docs/Sub" is a move into itself there; blob names are not.
+        // Checked after authorisation because it needs the target's kind.
+        if (r.Target!.Kind == StorageKind.FileShare && dest.StartsWith(source + "/", StringComparison.OrdinalIgnoreCase))
+            return new(AccessOutcome.Invalid, StorageErrorMapper.MoveIntoItselfMessage);
 
         return await ExecuteAsync(r, StorageOperation.Move, auditPath, ctx, async (backend, t) =>
         {
@@ -279,6 +291,7 @@ public sealed class StorageAccessService
         }
         catch (StorageFailureException failure)
         {
+            LogFailure(failure, op, target.Id, auditPath, ctx);
             await RecordAsync(r, target.Id, op, auditPath, AuditResult.Failed, failure.Message, ctx);
             return new(OutcomeOf(failure), failure.Message);
         }
@@ -288,14 +301,27 @@ public sealed class StorageAccessService
             await RecordAsync(r, target.Id, op, auditPath, AuditResult.Failed, CancelledMessage, ctx);
             throw;
         }
+        catch (Exception ex) when (ex is not StorageFailureException)
+        {
+            _logger.LogError(ex, "Unexpected storage error during {Operation} on target {TargetId} at {Path} (correlation {CorrelationId}).",
+                op, target.Id, auditPath, ctx.CorrelationId);
+            await RecordAsync(r, target.Id, op, auditPath, AuditResult.Failed, StorageErrorMapper.OtherMessage, ctx);
+            throw;
+        }
         await RecordAsync(r, target.Id, op, auditPath, AuditResult.Success, "", ctx);
         return new(AccessOutcome.Ok);
     }
 
+    // The user only sees the mapped message, so the underlying SDK exception is kept here for support.
+    private void LogFailure(StorageFailureException failure, StorageOperation op, Guid targetId, string path, AuditContext ctx) =>
+        _logger.LogWarning(failure.InnerException ?? failure,
+            "Storage {Operation} failed on target {TargetId} at {Path}: {Kind} (correlation {CorrelationId}).",
+            op, targetId, path, failure.Kind, ctx.CorrelationId);
+
     // Not tied to the request token: a client that disconnects mid-operation must not erase the audit row.
     private Task RecordAsync(Resolution r, Guid targetId, StorageOperation op, string path, AuditResult result, string error,
         AuditContext ctx) =>
-        _audit.RecordAsync(new AuditEvent(Guid.NewGuid(), DateTimeOffset.UtcNow, r.UserId, r.User?.Upn ?? "",
+        _audit.RecordAsync(new AuditEvent(Guid.NewGuid(), _time.GetUtcNow(), r.UserId, r.User?.Upn ?? "",
             r.User is { Kind: UserKind.Customer } ? r.User.CustomerId : r.Target?.CustomerId, targetId, op.ToString(), path, null, result, error,
             ctx.SourceIp, ctx.CorrelationId), CancellationToken.None);
 

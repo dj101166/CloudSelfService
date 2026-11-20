@@ -37,7 +37,8 @@ public class StoragePathsTests
     [Theory]
     [InlineData(".big.bin.cssupload-0123456789abcdef0123456789abcdef", true)]
     [InlineData(".a.cssupload-0123456789abcdef0123456789abcde", false)]
-    [InlineData(".a.cssupload-0123456789ABCDEF0123456789abcdef", false)]
+    [InlineData(".a.cssupload-0123456789ABCDEF0123456789abcdef", true)]
+    [InlineData(".a.CSSUPLOAD-0123456789abcdef0123456789abcdef", true)]
     [InlineData("big.bin.cssupload-0123456789abcdef0123456789abcdef", false)]
     [InlineData("report.txt", false)]
     public void IsStagingName_MatchesOnlyCallerStagingNames(string name, bool expected) =>

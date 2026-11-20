@@ -4,6 +4,7 @@ using CloudSelfService.Services.Access;
 using CloudSelfService.Services.Data;
 using CloudSelfService.Services.Identity;
 using CloudSelfService.Services.Storage;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
@@ -21,6 +22,7 @@ public class StorageAccessServiceTests
     private readonly InMemoryGrantStore _grants;
     private readonly InMemoryAuditStore _audit = new();
     private readonly FakeStorageBackend _fake = new();
+    private readonly ListLogger _log = new();
     private readonly StorageAccessService _svc;
 
     private readonly Customer _custA = new(Guid.NewGuid(), "Alpha", true, "", null, CustomerCloud.Commercial, CrossTenantStatus.NotRequired);
@@ -61,9 +63,13 @@ public class StorageAccessServiceTests
         _grants.SetAsync(new Grant(_custA.Id, _inactive.Id, AccessLevel.Full, "admin", Now)).Wait();
         _grants.SetAsync(new Grant(_custB.Id, _tb.Id, AccessLevel.Read, "admin", Now)).Wait();
 
-        _svc = new StorageAccessService(_users, _customers, _targets, _grants, _fake,
-            new AuditService(_audit, NullLogger<AuditService>.Instance), new OwnerConfig(OwnerUpn));
+        _svc = Service();
     }
+
+    private StorageAccessService Service(IGrantStore? grants = null, IStorageBackendResolver? backends = null) =>
+        new(_users, _customers, _targets, grants ?? _grants, backends ?? _fake,
+            new AuditService(_audit, NullLogger<AuditService>.Instance), new OwnerConfig(OwnerUpn),
+            new AppRoleHandlerTests.FixedTime(Now), _log);
 
     private static StorageTarget Target(Guid? customerId, string name, StorageKind kind, string container, bool active = true) =>
         new(Guid.NewGuid(), customerId, name, "sub", "rg", "acct", kind, container, "core.windows.net", active);
@@ -167,6 +173,7 @@ public class StorageAccessServiceTests
         Assert.Equal(_custA.Id, row.CustomerId);
         Assert.Equal("10.0.0.1", row.SourceIp);
         Assert.Equal("corr-1", row.CorrelationId);
+        Assert.Equal(Now, row.At);
     }
 
     [Fact]
@@ -334,6 +341,96 @@ public class StorageAccessServiceTests
         Assert.Equal("List:", Assert.Single(_fake.Calls));
     }
 
+    [Fact]
+    public async Task List_BackendUnavailable_LogsInnerException()
+    {
+        var inner = new HttpRequestException("connection refused");
+        var svc = Service(backends: new ThrowingBackend(StorageErrorMapper.Map(inner)));
+
+        var result = await svc.ListAsync(_fullUserA.Id, _ta.Id, "Docs", null, Ctx);
+
+        Assert.Equal(AccessOutcome.Unavailable, result.Outcome);
+        Assert.Equal(StorageErrorMapper.UnreachableMessage, result.Message);
+        var entry = Assert.Single(_log.Entries);
+        Assert.Equal(LogLevel.Warning, entry.Level);
+        Assert.Same(inner, entry.Exception);
+        Assert.Contains("corr-1", entry.Message);
+        Assert.Contains(_ta.Id.ToString(), entry.Message);
+        Assert.Contains("Unreachable", entry.Message);
+    }
+
+    [Fact]
+    public async Task AuthorizeDownload_BackendFailure_LogsWarning()
+    {
+        var svc = Service(backends: new ThrowingBackend(StorageErrorMapper.Map(new Exception("boom"))));
+
+        var result = await svc.AuthorizeDownloadAsync(_fullUserA.Id, _ta.Id, "a.txt", Ctx);
+
+        Assert.Equal(AccessOutcome.Unavailable, result.Outcome);
+        Assert.Equal(LogLevel.Warning, Assert.Single(_log.Entries).Level);
+    }
+
+    [Fact]
+    public async Task Delete_BackendFailure_LogsWarningAndAuditsFailed()
+    {
+        _fake.ThrowNotAuthorised = true;
+
+        await _svc.DeleteAsync(_fullUserA.Id, _ta.Id, "a.txt", Ctx);
+
+        Assert.Equal(LogLevel.Warning, Assert.Single(_log.Entries).Level);
+        Assert.Equal(AuditResult.Failed, Assert.Single(await Audits()).Result);
+    }
+
+    [Fact]
+    public async Task Delete_UnexpectedBackendException_AuditsFailed_LogsError_Propagates()
+    {
+        var svc = Service(backends: new ThrowingBackend(new InvalidOperationException("bug")));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => svc.DeleteAsync(_fullUserA.Id, _ta.Id, "a.txt", Ctx));
+
+        var row = Assert.Single(await Audits());
+        Assert.Equal((AuditResult.Failed, StorageErrorMapper.OtherMessage), (row.Result, row.Error));
+        Assert.Equal(LogLevel.Error, Assert.Single(_log.Entries).Level);
+    }
+
+    [Fact]
+    public async Task List_TargetReassignedToOtherCustomerUnderExistingGrant_Denied()
+    {
+        // The stores forbid this state; a stale grant row must still not open a target now owned by B.
+        await _grants.RemoveAsync(_custA.Id, _ta.Id);
+        await _targets.UpsertAsync(_ta with { CustomerId = _custB.Id });
+        var svc = Service(grants: new StaleGrantStore(new Grant(_custA.Id, _ta.Id, AccessLevel.Full, "admin", Now)));
+
+        var result = await svc.ListAsync(_fullUserA.Id, _ta.Id, "", null, Ctx);
+
+        Assert.Equal(AccessOutcome.Denied, result.Outcome);
+        Assert.Empty(_fake.Calls);
+        Assert.Empty(await svc.ListReachableTargetsAsync(_fullUserA.Id));
+    }
+
+    [Fact]
+    public async Task List_PercentEncodedDotDot_TreatedAsLiteralName()
+    {
+        var result = await _svc.ListAsync(_fullUserA.Id, _ta.Id, "%2e%2e/%2E%2E", null, Ctx);
+
+        Assert.Equal(AccessOutcome.NotFound, result.Outcome);
+        Assert.Equal("List:%2e%2e/%2E%2E", Assert.Single(_fake.Calls));
+    }
+
+    [Fact]
+    public async Task List_ContinuationTokenFromOtherTarget_UsesRequestedTarget()
+    {
+        await Seed(_ta, Enumerable.Range(0, 250).Select(i => $"a{i:D3}").ToArray());
+        await Seed(_tb, Enumerable.Range(0, 205).Select(i => $"b{i:D3}").ToArray());
+        var token = (await _svc.ListAsync(_staffAdmin.Id, _ta.Id, "", null, Ctx)).Value!.ContinuationToken;
+
+        var result = await _svc.ListAsync(_staffAdmin.Id, _tb.Id, "", token, Ctx);
+
+        Assert.Equal(AccessOutcome.Ok, result.Outcome);
+        Assert.NotEmpty(result.Value!.Items);
+        Assert.All(result.Value.Items, i => Assert.StartsWith("b", i.Name));
+    }
+
     // ---- AuthorizeDownloadAsync ----
 
     [Fact]
@@ -482,6 +579,29 @@ public class StorageAccessServiceTests
 
         Assert.Equal(AccessOutcome.Invalid, result.Outcome);
         Assert.DoesNotContain(_fake.Calls, c => c.StartsWith("Move:"));
+    }
+
+    [Fact]
+    public async Task Move_Files_CaseDifferentSubtree_Invalid()
+    {
+        await Seed(_ta, "Docs");
+
+        var result = await _svc.MoveAsync(_staffAdmin.Id, _ta.Id, "Docs", "docs/Docs", Ctx);
+
+        Assert.Equal(AccessOutcome.Invalid, result.Outcome);
+        Assert.Equal(StorageErrorMapper.MoveIntoItselfMessage, result.Message);
+        Assert.DoesNotContain(_fake.Calls, c => c.StartsWith("Move:"));
+    }
+
+    [Fact]
+    public async Task Move_Blob_CaseDifferentSubtree_Allowed()
+    {
+        await Seed(_tb, "Docs");
+
+        var result = await _svc.MoveAsync(_staffAdmin.Id, _tb.Id, "Docs", "docs/Docs", Ctx);
+
+        Assert.Equal(AccessOutcome.Ok, result.Outcome);
+        Assert.Contains("Move:Docs->docs/Docs", _fake.Calls);
     }
 
     [Fact]
@@ -708,6 +828,43 @@ public class StorageAccessServiceTests
     [Fact]
     public async Task Authorize_ListRoot_Ok() =>
         Assert.Equal(AccessOutcome.Ok, (await _svc.AuthorizeAsync(_userB.Id, _tb.Id, StorageOperation.List, "", Ctx)).Outcome);
+
+    private sealed class ListLogger : ILogger<StorageAccessService>
+    {
+        public readonly List<(LogLevel Level, Exception? Exception, string Message)> Entries = new();
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter) => Entries.Add((logLevel, exception, formatter(state, exception)));
+    }
+
+    private sealed class StaleGrantStore(Grant grant) : IGrantStore
+    {
+        public Task<Grant?> GetAsync(Guid customerId, Guid targetId, CancellationToken ct = default) => Task.FromResult<Grant?>(grant);
+        public Task<IReadOnlyList<Grant>> ListForCustomerAsync(Guid customerId, CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlyList<Grant>>(new[] { grant });
+        public Task SetAsync(Grant g, CancellationToken ct = default) => throw new NotSupportedException();
+        public Task RemoveAsync(Guid customerId, Guid targetId, CancellationToken ct = default) => throw new NotSupportedException();
+    }
+
+    private sealed class ThrowingBackend(Exception ex) : IStorageBackend, IStorageBackendResolver
+    {
+        public IStorageBackend For(StorageTarget t) => this;
+        private Task<T> Fail<T>() => Task.FromException<T>(ex);
+        public Task<StorageListing> ListAsync(StorageTarget t, string folder, string? continuation, int pageSize, CancellationToken ct) => Fail<StorageListing>();
+        public Task<StorageItem?> GetItemAsync(StorageTarget t, string path, CancellationToken ct) => Fail<StorageItem?>();
+        public Task<Stream> OpenReadAsync(StorageTarget t, string path, long offset, long? length, CancellationToken ct) => Fail<Stream>();
+        public Task CreateFolderAsync(StorageTarget t, string path, CancellationToken ct) => Fail<bool>();
+        public Task MoveAsync(StorageTarget t, string from, string to, bool isFolder, CancellationToken ct) => Fail<bool>();
+        public Task DeleteAsync(StorageTarget t, string path, bool isFolder, CancellationToken ct) => Fail<bool>();
+        public Task BeginUploadAsync(StorageTarget t, string stagingPath, long size, CancellationToken ct) => Fail<bool>();
+        public Task WriteChunkAsync(StorageTarget t, string stagingPath, string finalPath, string blockId, long offset,
+            Stream data, long length, byte[] md5, CancellationToken ct) => Fail<bool>();
+        public Task CompleteUploadAsync(StorageTarget t, string stagingPath, string finalPath, IReadOnlyList<string> blockIds,
+            bool overwrite, CancellationToken ct) => Fail<bool>();
+        public Task AbortUploadAsync(StorageTarget t, string stagingPath, CancellationToken ct) => Fail<bool>();
+        public Task ProbeAsync(StorageTarget t, CancellationToken ct) => Fail<bool>();
+    }
 
     private async Task PutFile(StorageTarget t, string path, string content)
     {
