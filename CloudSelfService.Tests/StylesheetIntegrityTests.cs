@@ -6,28 +6,25 @@ using Xunit;
 namespace CloudSelfService.Tests;
 
 /// <summary>
-/// A dropped <c>*/</c> is the one CSS mistake that leaves no trace anywhere else. Task 5's fix
-/// round lost one and swallowed the entire base <c>.btn</c> rule into a 60-line comment: the app
-/// compiled, every test passed, and the diff read as a clean deletion — sumi buttons kept their
-/// variant colours and silently fell back to Bootstrap for all of their geometry.
+/// A dropped <c>*/</c> is the one CSS mistake that leaves no trace anywhere else: the next rule
+/// is swallowed into the comment, the app compiles, every other test passes, and the diff reads
+/// as a clean deletion.
 /// </summary>
 /// <remarks>
-/// Every task from 6 through 13 edits <c>app.css</c>, so the count is asserted per file and the
-/// failure names the file: a single repo-wide total says something is wrong without saying where.
-/// <para>
-/// The enumeration is the top level of <c>wwwroot/css/</c> only, which is exactly the set this
-/// migration writes. The vendored <c>bootstrap/</c> and <c>open-iconic/</c> directories are gone, so
-/// the directory holds nothing but the two authored files.
-/// </para>
+/// The count is asserted per file and the failure names the file: a single total says something
+/// is wrong without saying where. The set is every authored stylesheet — the top level of
+/// <c>wwwroot/css/</c> AND every scoped <c>*.razor.css</c> under Pages/ and Shared/. The scoped
+/// ones matter: ComponentStyleContractTests strips comments with a regex that leaves an
+/// unterminated one in place, so nothing else would notice a lost terminator there.
 /// <para>
 /// The counts are of literal markers, so a CSS string or a <c>content:</c> value containing
-/// <c>/*</c> or <c>*/</c> would skew them. No such value exists in any of these files today; if one
-/// is ever added, fix this test rather than deleting it.
+/// <c>/*</c> or <c>*/</c> would skew them. No such value exists today; if one is added, fix this
+/// test rather than deleting it.
 /// </para>
 /// </remarks>
 public class StylesheetIntegrityTests
 {
-    private static string CssDirectory()
+    private static DirectoryInfo Root()
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
         while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "App.razor")))
@@ -36,16 +33,23 @@ public class StylesheetIntegrityTests
         }
 
         Assert.NotNull(dir);
-        return Path.Combine(dir!.FullName, "wwwroot", "css");
+        return dir!;
     }
 
+    /// <summary>Authored stylesheets as paths relative to the app root, forward-slashed.</summary>
     private static string[] CssFileNames()
     {
-        return Directory
-            .GetFiles(CssDirectory(), "*.css", SearchOption.TopDirectoryOnly)
-            .Select(Path.GetFileName)
+        var root = Root().FullName;
+        var top = Directory.GetFiles(Path.Combine(root, "wwwroot", "css"), "*.css", SearchOption.TopDirectoryOnly);
+        var scoped = new[] { "Pages", "Shared" }
+            .Select(d => Path.Combine(root, d))
+            .Where(Directory.Exists)
+            .SelectMany(d => Directory.GetFiles(d, "*.razor.css", SearchOption.AllDirectories));
+
+        return top.Concat(scoped)
+            .Select(f => Path.GetRelativePath(root, f).Replace(Path.DirectorySeparatorChar, '/'))
             .OrderBy(name => name, StringComparer.Ordinal)
-            .ToArray()!;
+            .ToArray();
     }
 
     public static TheoryData<string> Stylesheets()
@@ -63,7 +67,7 @@ public class StylesheetIntegrityTests
     [MemberData(nameof(Stylesheets))]
     public void EveryComment_IsTerminated(string fileName)
     {
-        var path = Path.Combine(CssDirectory(), fileName);
+        var path = Path.Combine(Root().FullName, fileName);
         var css = File.ReadAllText(path);
 
         var opened = Regex.Matches(css, @"/\*").Count;
@@ -71,37 +75,24 @@ public class StylesheetIntegrityTests
 
         Assert.True(
             opened == closed,
-            $"wwwroot/css/{fileName}: {opened} '/*' against {closed} '*/'. An unterminated comment " +
+            $"{fileName}: {opened} '/*' against {closed} '*/'. An unterminated comment " +
             "swallows every rule after it until the next terminator, and nothing else reports that.");
     }
 
-    /// <summary>
-    /// Split out of the named-file check below so the anti-vacuous protection does not depend on
-    /// any particular file name being present.
-    /// </summary>
-    /// <remarks>
-    /// The theory above asserts nothing if the directory enumeration returns nothing — zero cases
-    /// is a pass. It was split out when this app's `wwwroot/css` held only `site.css` and the named
-    /// check below had to be skipped; a guard that cannot see an empty enumeration is exactly the
-    /// "looks total, is not" shape the whole suite exists to avoid, and that stays true now that
-    /// both checks are live.
-    /// </remarks>
     [Fact]
     public void TheGuard_EnumeratesAtLeastOneStylesheet()
     {
+        // The theory asserts nothing if the enumeration returns nothing: zero cases is a pass.
         Assert.NotEmpty(CssFileNames());
     }
 
     [Fact]
-    public void TheGuard_CoversTheStylesheetsThisMigrationEdits()
+    public void TheGuard_CoversTopLevelAndScopedStylesheets()
     {
-        // A directory enumeration that silently returned nothing would pass the theory above by
-        // running zero cases. These two are named because they outlive the migration, and they
-        // are now the WHOLE of wwwroot/css: site.css was deliberately never named here, so its
-        // deletion did not have to be paid for with an edit to this list.
         var names = CssFileNames();
 
-        Assert.Contains("app.css", names);
-        Assert.Contains("theme.css", names);
+        Assert.Contains("wwwroot/css/app.css", names);
+        Assert.Contains("wwwroot/css/theme.css", names);
+        Assert.Contains("Shared/MainLayout.razor.css", names);
     }
 }

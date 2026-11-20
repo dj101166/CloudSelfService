@@ -2,19 +2,17 @@
 
 @*
     The release notes, opened from the version chip in the header. A centred dialog, like
-    Nexus's own release notes and like every other overlay the sumi skin will ship — NOT a
-    slide-over and not the fixed panel pinned under the topbar that this app used before.
+    every other overlay the sumi skin ships.
 
     This component renders; it does not parse. ChangelogDocument reads CHANGELOG.md out of the
     assembly and turns it into entries, and each entry's body arrives here as HTML that Markdig
     already produced from the markdown — which is why a new "### 🛡️ Security" heading needs no
     change here or in ChangelogDocument.
 
-    CHANGELOG.md is now the ONLY place a release is recorded. The hand-maintained `_changelog`
-    list that MainLayout.razor carried is gone, and with it the standing obligation to write
-    every entry twice and keep the two copies in step.
+    CHANGELOG.md is the ONLY place a release is recorded. When it yields no entries the dialog
+    still opens and says "No release notes yet." rather than rendering nothing.
 *@
-@if (this.IsOpen && ChangelogDocument.Entries.Count > 0)
+@if (this.IsOpen)
 {
     <div class="modal__scrim" @onclick="this.OnClose">
         <div class="modal changelog"
@@ -33,6 +31,10 @@
             </div>
 
             <div class="changelog__body">
+                @if (ChangelogDocument.Entries.Count == 0)
+                {
+                    <p class="changelog__empty" data-testid="changelog-empty">No release notes yet.</p>
+                }
                 @foreach (ChangelogEntry entry in ChangelogDocument.Entries)
                 {
                     bool isOpen = this._expandedVersions.Contains(entry.Version);

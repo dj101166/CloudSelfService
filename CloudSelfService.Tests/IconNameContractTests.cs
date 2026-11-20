@@ -18,10 +18,9 @@ namespace CloudSelfService.Tests;
 /// styled, the SVG element is present and correctly sized, and the only symptom is a blank 16px
 /// gap where a glyph should be.
 /// <para>
-/// Task 12 shipped <c>&lt;Icon Name="lock" /&gt;</c> on a page it could not render — the Test Case
-/// Builder is <c>RequireSuperUser</c> — and nothing in the build or the suite said the glyph did
-/// not exist. It was caught by hand. This test is what would have caught it, and it matters most
-/// exactly where a page cannot be looked at.
+/// An <c>&lt;Icon Name="lock" /&gt;</c> on a page nobody can render would ship with nothing in the
+/// build or the suite saying the glyph does not exist. This test is what catches it, and it
+/// matters most exactly where a page cannot be looked at.
 /// </para>
 /// <para>
 /// <b>What this test still cannot see.</b> A computed <c>Name</c> is checked by reading the string

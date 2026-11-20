@@ -1,13 +1,12 @@
 @*
-    Blazor's reconnect overlay, ported from Nexus's Components/Layout/ReconnectModal.razor.
+    Blazor's reconnect overlay, a <dialog> driven by Blazor's own state classes.
 
-    A <dialog> with SIX states, not the three-state <div> this app carried before: first
-    attempt, retrying with a countdown, failed (with a Retry button), paused by the server,
+    Six states: first attempt, retrying with a countdown, failed (with a Retry button), paused by the server,
     resume failed (with a Resume button), and rejected (which reloads). Blazor drives all six
     by swapping a class on this element; the ids and class names below are the framework's and
     must not be renamed.
 
-    The seventh line is this suite's addition rather than Nexus's framework inheritance:
+    The seventh line is this suite's addition rather than the framework's:
     session-guard.js adds .session-guard-reloading just before it reloads the page, which hides
     the "retry or reload yourself" copy and reveals "Restoring your session". The distinction
     matters to the reader — "failed, retry yourself" and "failed, recovering for you" call for

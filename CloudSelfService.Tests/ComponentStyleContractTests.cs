@@ -14,10 +14,8 @@ namespace CloudSelfService.Tests;
 /// A component's <c>@code</c> block hands the browser two kinds of style string: a class name
 /// (<c>badge--success</c>) and a token reference (<c>var(--outcome-fail)</c>). Neither is checked
 /// by anything. A class nothing styles renders unstyled, and an undefined custom property resolves
-/// to the empty string rather than throwing — which is how a segment paints nothing while its
-/// markup reads as correct. Task 10 moved four hard-coded hexes in
-/// <c>Shared/PlanExecutionsWidget.razor</c> onto <c>--outcome-*</c> tokens, so the widget now has
-/// exactly that exposure; the same argument theme.css makes for its <c>--chart-*</c> aliases.
+/// to the empty string rather than throwing — which is how a rule paints nothing while its markup
+/// reads as correct.
 /// <para>
 /// All three read the scoped <c>.razor.css</c> files as well as <c>wwwroot/css/</c>. That is where
 /// every remaining page task does its work, so a guard confined to the top-level stylesheets would
@@ -65,14 +63,12 @@ public class ComponentStyleContractTests
     /// Every authored stylesheet, concatenated, with <c>/* ... */</c> comments removed.
     /// </summary>
     /// <remarks>
-    /// The stripping is load-bearing for all three checks below, each of which asks "does this
-    /// name appear in the CSS". These files are heavily commented and the comments name classes
-    /// and tokens constantly — every scoped file here opens by explaining which classes it
-    /// replaced. So a name existing ONLY inside a comment would vouch for itself: a class deleted
-    /// from the stylesheet but still described in the paragraph above where it used to be would
-    /// keep passing. Zero such cases exist today; this closes the hole rather than fixing a
-    /// visible break. Found by Task 12's review, which noticed that Task 12's own audit script
-    /// stripped comments and these checks did not.
+    /// The stripping is load-bearing for all checks below, each of which asks "does this name
+    /// appear in the CSS". These files are heavily commented and the comments name classes and
+    /// tokens constantly, so a name existing ONLY inside a comment would vouch for itself: a class
+    /// deleted from the stylesheet but still described in a comment would keep passing. An
+    /// unterminated comment is not stripped here at all, which is why StylesheetIntegrityTests
+    /// counts <c>/*</c> against <c>*/</c> in every authored stylesheet, scoped ones included.
     /// </remarks>
     private static string AllAuthoredCss() =>
         Regex.Replace(
@@ -126,11 +122,9 @@ public class ComponentStyleContractTests
             // The `__?` in the block part is equally load-bearing, and its absence made this check
             // blind to most of what it exists to guard. `[_-]` matches ONE separator, so the
             // pattern only ever reached `block--modifier`; every `block__element--modifier` —
-            // `table__row--link`, `repo__opt--full`, `import__field--key`, and all five of Task
-            // 12's `gen__dot--*` states — matched nothing here, and the element check below
+            // `table__row--link` — matched nothing here, and the element check below
             // excludes them too because its `$` anchor forbids a `--` suffix. So that whole shape
-            // was checked by NEITHER test. Measured in Task 12 by planting an unstyled
-            // `gen__probe--nostyle` and watching the suite stay green.
+            // was checked by NEITHER test.
             foreach (Match m in Regex.Matches(text, @"(?<![\w-])[a-z][a-z0-9]*(?:__?[a-z0-9]+|-[a-z0-9]+)*--[a-z0-9-]+"))
             {
                 var name = m.Value;
@@ -156,24 +150,16 @@ public class ComponentStyleContractTests
     }
 
     /// <summary>
-    /// <b>Empty, and meant to stay that way.</b> Task 9 switched the element check on and found five
-    /// pre-existing unstyled BEM names across four earlier tasks' files; rather than edit closed tasks
-    /// while another session was live in the repo, it quarantined them here. Task 15 cleared the list
-    /// by dropping all five classes from the markup: <c>audit__filter-bar</c>, <c>audit__modal</c>,
-    /// <c>dash__bar</c>, <c>login__door-label</c> and <c>runs__clear</c> were each a hook whose parent
-    /// or sibling already carried every rule the element needed — <c>.page-head__filters</c>,
-    /// <c>.modal</c>, <c>.dash__bars</c> plus <c>.dash__track</c>, <c>.login__door</c>'s own flex row,
-    /// and <c>.btn--secondary</c> — so naming them bought a selector nothing could ever use.
+    /// <b>Empty, and meant to stay that way.</b> A place to quarantine a known-unstyled BEM name
+    /// rather than delay a change that cannot style it yet.
     /// <para>
     /// Adding a name here is a deferral, not a fix, and the staleness assertion below makes it an
     /// expensive one: the gate fails when a quarantined name stops being needed, so a list entry has
     /// to be removed deliberately rather than left to rot.
     /// </para>
     /// <para>
-    /// Two of the original five were missed by a hand-rolled shell scan of the same question, because
-    /// a `grep -w`-style word boundary treats `-` as a separator and so lets `.dash__bar-head` vouch
-    /// for `.dash__bar`. The regex below uses <c>(?![\w-])</c> instead, which is the whole reason this
-    /// is a test and not a habit.
+    /// The regex below uses <c>(?![\w-])</c> rather than a `grep -w`-style boundary, which treats
+    /// `-` as a separator and so lets `.dash__bar-head` vouch for `.dash__bar`.
     /// </para>
     /// </summary>
     private static readonly string[] KnownUnstyledClasses = [];
@@ -396,12 +382,40 @@ public class ComponentStyleContractTests
     /// </summary>
     /// <remarks>
     /// <c>EveryComponentModifierNamedInARazorFile_IsStyledSomewhere</c> only sees names carrying a
-    /// <c>--</c> modifier, so a plain element name — <c>conn__mono</c>, <c>trash__preview</c>,
-    /// <c>key-editor__input</c> — could be misspelt, renamed, or simply never given a rule and
-    /// nothing would say so. That is not hypothetical: every page task in this migration invents a
-    /// dozen of these, and the page they land on is usually one the implementer can render, which is
-    /// exactly the assurance a role-gated page does not have.
+    /// <c>--</c> modifier, so a plain element name — <c>conn__mono</c> — could be misspelt, renamed, or simply never given a rule and
+    /// nothing would say so.
+    /// <para>
+    /// Names are read from <c>class="..."</c> attributes AND from BEM-shaped string literals in
+    /// <c>.razor</c> and <c>.cs</c> files under Pages/ and Shared/, so a class returned by a helper
+    /// or a ternary in an <c>@code</c> block is held to the same rule.
+    /// </para>
     /// </remarks>
+    private static bool IsBemElement(string name) =>
+        Regex.IsMatch(name, @"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:__[a-z0-9]+(?:-[a-z0-9]+)*)+$");
+
+    /// <summary>
+    /// Space-separated tokens of every string literal in the component sources, for the names a
+    /// <c>class="..."</c> scan cannot see: a helper's return value, a field, a ternary in @code.
+    /// Only BEM-shaped tokens are acted on by the caller, so ordinary prose never matches.
+    /// </summary>
+    private static IEnumerable<(string File, string Token)> CodeLiteralTokens()
+    {
+        var files = RazorFiles().Concat(ComponentDirectories()
+            .SelectMany(d => Directory.GetFiles(d, "*.cs", SearchOption.AllDirectories)));
+
+        foreach (var file in files)
+        {
+            foreach (Match lit in Regex.Matches(File.ReadAllText(file), @"""(?<lit>[^""\
+]*)"""))
+            {
+                foreach (var t in lit.Groups["lit"].Value.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+                {
+                    yield return (file, t);
+                }
+            }
+        }
+    }
+
     [Fact]
     public void EveryComponentElementClassNamedInARazorFile_IsStyledSomewhere()
     {
@@ -421,12 +435,8 @@ public class ComponentStyleContractTests
                     //
                     // The `__` segment REPEATS. With it written once, a two-`__` name was matched by
                     // neither check — the modifier regex requires a `--` and this one anchored at `$`
-                    // after a single element part. Four such names exist, all in the shell:
-                    // `app__brand__text` (Shared/MainLayout.razor) and `app__nav-link__count` /
-                    // `__done` / `__label` (Shared/NavMenu.razor). All four are styled, so the gate
-                    // was not hiding a defect; it simply was not watching them. Found by Task 12's
-                    // review after Task 12 widened the modifier half for the same class of gap.
-                    if (!Regex.IsMatch(name, @"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:__[a-z0-9]+(?:-[a-z0-9]+)*)+$")) continue;
+                    // after a single element part, e.g. `app__brand__text`.
+                    if (!IsBemElement(name)) continue;
 
                     if (KnownUnstyledClasses.Contains(name)) { quarantineHit.Add(name); continue; }
 
@@ -435,6 +445,17 @@ public class ComponentStyleContractTests
                         missing.Add($"{Path.GetFileName(file)} uses .{name}");
                     }
                 }
+            }
+        }
+
+        foreach (var (file, name) in CodeLiteralTokens())
+        {
+            if (!IsBemElement(name)) continue;
+            if (KnownUnstyledClasses.Contains(name)) { quarantineHit.Add(name); continue; }
+
+            if (!Regex.IsMatch(css, @"\." + Regex.Escape(name) + @"(?![\w-])"))
+            {
+                missing.Add($"{Path.GetFileName(file)} uses .{name}");
             }
         }
 

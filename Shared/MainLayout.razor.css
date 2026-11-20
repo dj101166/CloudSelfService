@@ -46,11 +46,11 @@
     white-space: nowrap;
 
     /* At rest as well as on hover. app.css styles bare `a` without clearing the decoration,
-       so a hover-only rule leaves the wordmark underlined until the pointer is on it. Caught
-       on RegressionResults by MEASURING the computed style, after reading the markup did not. */
+       so a hover-only rule leaves the wordmark underlined until the pointer is on it. */
     text-decoration: none;
 }
 
+.app__brand__text { text-transform: uppercase; }
 .app__brand:hover { text-decoration: none; color: var(--text-primary); }
 
 .app__logo { width: 22px; height: 22px; }

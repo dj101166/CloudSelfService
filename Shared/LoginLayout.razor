@@ -3,14 +3,10 @@
 @*
     The sign-in shell: no header, no sidebar, no account menu — there is no account yet.
 
-    It no longer calls into JS to apply the theme. App.razor's pre-paint script already did
-    that before this component existed, and the old `initializeTheme()` call here ran AFTER
-    first paint, so it could only ever repeat a decision already made or, on a slow circuit,
-    undo nothing visibly. 
+    It does not call into JS to apply the theme: App.razor's pre-paint script already did.
 
-    `.login-shell` was `.login-page` in this file's own scoped stylesheet; renamed and moved
-    into app.css alongside the sign-in pages it wraps, as a fixed scrollable grid so the open
-    column centres at any viewport height without clipping on a short one.
+    `.login-shell` lives in app.css as a fixed scrollable grid so the open column centres at
+    any viewport height without clipping on a short one.
 *@
 <div class="login-shell">
     @Body

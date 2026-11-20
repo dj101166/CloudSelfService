@@ -54,6 +54,7 @@
     box-shadow: var(--shadow-overlay);
 }
 
+/* The identity and sign-out rules below are for the markup Task 5 restores. */
 .appmenu__who { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; }
 
 .appmenu__who-name {

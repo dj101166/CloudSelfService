@@ -22,7 +22,7 @@ public sealed record ChangelogEntry(string Version, string? Date, string HtmlBod
 /// <para>
 /// <b>This class never throws.</b> The version chip lives in the layout and therefore renders on
 /// every page — so a missing resource or a changelog whose headings have drifted yields no
-/// entries, the chip simply does not render, and nothing else is affected. A failure to read
+/// entries, the release-notes dialog says there are none, and nothing else is affected. A failure to read
 /// release notes must never take down the application the notes describe.
 /// </para>
 /// </remarks>
