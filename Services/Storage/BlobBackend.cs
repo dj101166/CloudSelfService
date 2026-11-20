@@ -65,7 +65,8 @@ public sealed class BlobBackend(StorageClientFactory clients) : IStorageBackend
             try
             {
                 var props = await container.GetBlobClient(path).GetPropertiesAsync(cancellationToken: ct).ConfigureAwait(false);
-                return new StorageItem(StoragePaths.Leaf(path), path, false, props.Value.ContentLength, props.Value.LastModified);
+                return new StorageItem(StoragePaths.Leaf(path), path, false, props.Value.ContentLength, props.Value.LastModified,
+                    props.Value.ETag.ToString("H"));
             }
             catch (RequestFailedException ex) when (ex.Status == 404) { }
 
@@ -74,16 +75,25 @@ public sealed class BlobBackend(StorageClientFactory clients) : IStorageBackend
             return null;
         }, ct);
 
-    public Task<Stream> OpenReadAsync(StorageTarget t, string path, long offset, long? length, CancellationToken ct) =>
+    public Task<Stream> OpenReadAsync(StorageTarget t, string path, long offset, long? length, CancellationToken ct, string? expectedETag = null) =>
         StorageErrorMapper.RunAsync(async () =>
         {
             if (length == 0) return (Stream)new MemoryStream(Array.Empty<byte>(), writable: false);
             // A Range header on an empty blob is a 416, so a whole-blob read must not send one.
             var options = offset == 0 && length is null
-                ? null
+                ? new BlobDownloadOptions()
                 : new BlobDownloadOptions { Range = length is null ? new HttpRange(offset) : new HttpRange(offset, length.Value) };
-            var resp = await clients.Container(t).GetBlobClient(path).DownloadStreamingAsync(options, ct).ConfigureAwait(false);
-            return resp.Value.Content;
+            if (expectedETag is not null)
+                options.Conditions = new BlobRequestConditions { IfMatch = new ETag(expectedETag) };
+            try
+            {
+                var resp = await clients.Container(t).GetBlobClient(path).DownloadStreamingAsync(options, ct).ConfigureAwait(false);
+                return resp.Value.Content;
+            }
+            catch (RequestFailedException ex) when (ex.Status == 412)
+            {
+                throw new StorageFailureException(StorageFailureKind.Conflict, StorageErrorMapper.ChangedDuringReadMessage, ex);
+            }
         }, ct);
 
     public Task CreateFolderAsync(StorageTarget t, string path, CancellationToken ct) =>

@@ -14,7 +14,7 @@ public sealed record Grant(Guid CustomerId, Guid TargetId, AccessLevel Level, st
 public sealed record AuditEvent(Guid Id, DateTimeOffset At, Guid? UserId, string UserDisplay, Guid? CustomerId,
     Guid? TargetId, string Operation, string Path, long? Bytes, AuditResult Result, string Error, string SourceIp, string CorrelationId);
 
-public sealed record StorageItem(string Name, string Path, bool IsFolder, long? Size, DateTimeOffset? LastModified);
+public sealed record StorageItem(string Name, string Path, bool IsFolder, long? Size, DateTimeOffset? LastModified, string? ETag = null);
 
 public sealed record StorageListing(IReadOnlyList<StorageItem> Items, string? ContinuationToken);
 

@@ -16,6 +16,10 @@ namespace CloudSelfService.Tests.Infrastructure;
 /// </summary>
 public sealed class TestAppFactory : WebApplicationFactory<Program>
 {
+    private readonly (string Key, string Value)[] _settings;
+
+    public TestAppFactory(params (string Key, string Value)[] settings) => _settings = settings;
+
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment("Development");
@@ -24,6 +28,7 @@ public sealed class TestAppFactory : WebApplicationFactory<Program>
         builder.UseSetting("ConnectionStrings:Default", "");
         builder.UseSetting("Authorization:Owners", "");
         builder.UseSetting("Entra:StaffEmailDomain", "advancedutility.com");
+        foreach (var (key, value) in _settings) builder.UseSetting(key, value);
     }
 
     public FakeStorageBackend Storage => Services.GetRequiredService<FakeStorageBackend>();

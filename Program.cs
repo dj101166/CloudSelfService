@@ -55,6 +55,7 @@ else
     builder.Services.AddSingleton<IStorageBackendResolver, StorageBackendResolver>();
 }
 builder.Services.AddScoped<StorageAccessService>();
+builder.Services.AddRateLimiter(o => RateLimits.Configure(o, builder.Configuration));
 builder.Services.AddHsts(options => { options.MaxAge = TimeSpan.FromDays(365); });
 
 builder.Services.AddSingleton(TimeProvider.System);
@@ -200,6 +201,7 @@ app.Use(async (ctx, next) =>
 app.MapStaticAssets();
 
 app.UseAuthentication();
+app.UseRateLimiter();
 app.UseAuthorization();
 app.UseAntiforgery();
 

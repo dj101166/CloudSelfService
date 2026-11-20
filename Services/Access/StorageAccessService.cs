@@ -9,7 +9,8 @@ public enum AccessOutcome { Ok, Denied, NotFound, Invalid, AlreadyExists, Unavai
 
 public sealed record AccessResult(AccessOutcome Outcome, string? Message = null);
 
-public sealed record AccessResult<T>(AccessOutcome Outcome, T? Value, string? Message = null);
+/// <summary>UserUpn is the store-read user, set only once the caller has been authorised, so a denial never carries it.</summary>
+public sealed record AccessResult<T>(AccessOutcome Outcome, T? Value, string? Message = null, string? UserUpn = null);
 
 public sealed record ReachableTarget(StorageTarget Target, Customer? Customer, AccessLevel Level);
 
@@ -134,27 +135,28 @@ public sealed class StorageAccessService
 
         // After authorisation every result carries the target and the normalised path, so the endpoint can audit
         // without another lookup. Invalid with Item.IsFolder set is the explicit "that is a folder" signal.
+        var upn = r.User?.Upn;
         var known = (r.Target!, new StorageItem(StoragePath.Leaf(normalized), normalized, false, null, null));
         try
         {
             var item = await _backends.For(r.Target!).GetItemAsync(r.Target!, normalized, ct);
             if (item is null)
-                return new(AccessOutcome.NotFound, known, StorageErrorMapper.NotFoundMessage);
+                return new(AccessOutcome.NotFound, known, StorageErrorMapper.NotFoundMessage, upn);
             if (item.IsFolder)
-                return new(AccessOutcome.Invalid, (r.Target!, item), NotAFileMessage);
-            return new(AccessOutcome.Ok, (r.Target!, item));
+                return new(AccessOutcome.Invalid, (r.Target!, item), NotAFileMessage, upn);
+            return new(AccessOutcome.Ok, (r.Target!, item), null, upn);
         }
         catch (StorageFailureException failure)
         {
             LogFailure(failure, StorageOperation.Download, targetId, normalized, ctx);
-            return new(OutcomeOf(failure), known, failure.Message);
+            return new(OutcomeOf(failure), known, failure.Message, upn);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             // Only store (database) failures may propagate; anything from the backend is storage trouble.
             _logger.LogError(ex, "Storage {Operation} failed unexpectedly on target {TargetId} at {Path} (correlation {CorrelationId}).",
                 StorageOperation.Download, targetId, normalized, ctx.CorrelationId);
-            return new(AccessOutcome.Unavailable, known, StorageErrorMapper.UnreachableMessage);
+            return new(AccessOutcome.Unavailable, known, StorageErrorMapper.UnreachableMessage, upn);
         }
     }
 

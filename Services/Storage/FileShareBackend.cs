@@ -43,7 +43,8 @@ public sealed class FileShareBackend(StorageClientFactory clients) : IStorageBac
             try
             {
                 var props = await File(share, path).GetPropertiesAsync(cancellationToken: ct).ConfigureAwait(false);
-                return new StorageItem(StoragePaths.Leaf(path), path, false, props.Value.ContentLength, props.Value.LastModified);
+                return new StorageItem(StoragePaths.Leaf(path), path, false, props.Value.ContentLength, props.Value.LastModified,
+                    props.Value.ETag.ToString("H"));
             }
             catch (RequestFailedException ex) when (ex.Status == 404 || ex.ErrorCode == "ResourceTypeMismatch") { }
 
@@ -55,7 +56,7 @@ public sealed class FileShareBackend(StorageClientFactory clients) : IStorageBac
             catch (RequestFailedException ex) when (ex.Status == 404) { return null; }
         }, ct);
 
-    public Task<Stream> OpenReadAsync(StorageTarget t, string path, long offset, long? length, CancellationToken ct) =>
+    public Task<Stream> OpenReadAsync(StorageTarget t, string path, long offset, long? length, CancellationToken ct, string? expectedETag = null) =>
         StorageErrorMapper.RunAsync(async () =>
         {
             if (length == 0) return (Stream)new MemoryStream(Array.Empty<byte>(), writable: false);
@@ -64,6 +65,12 @@ public sealed class FileShareBackend(StorageClientFactory clients) : IStorageBac
                 ? null
                 : new ShareFileDownloadOptions { Range = length is null ? new HttpRange(offset) : new HttpRange(offset, length.Value) };
             var resp = await File(clients.Share(t), path).DownloadAsync(options, ct).ConfigureAwait(false);
+            // Azure Files has no If-Match on download, so a file replaced between the check and the read is caught here.
+            if (expectedETag is not null && resp.Value.Details.ETag.ToString("H") != expectedETag)
+            {
+                await resp.Value.Content.DisposeAsync().ConfigureAwait(false);
+                throw new StorageFailureException(StorageFailureKind.Conflict, StorageErrorMapper.ChangedDuringReadMessage);
+            }
             return resp.Value.Content;
         }, ct);
 

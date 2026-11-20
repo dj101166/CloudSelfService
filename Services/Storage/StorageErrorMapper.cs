@@ -19,6 +19,7 @@ public static class StorageErrorMapper
     public const string NotAuthorisedMessage = "The portal is not authorised on this storage account. Contact Advanced support.";
     public const string UnreachableMessage = "Storage is temporarily unreachable. Please try again shortly.";
     public const string CorruptedChunkMessage = "A piece of the upload was corrupted in transit and will be retried.";
+    public const string ChangedDuringReadMessage = "The file changed while it was being downloaded. Please try again.";
     public const string OtherMessage = "Something went wrong talking to storage.";
     public const string MoveIntoItselfMessage = "Can't move a folder into itself.";
     public const string ShortChunkMessage = "Upload piece was shorter than expected.";

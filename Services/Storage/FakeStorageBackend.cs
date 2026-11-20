@@ -112,12 +112,14 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
     private static bool Exists(Tree tree, string path) =>
         path.Length == 0 || tree.Files.ContainsKey(path) || tree.Folders.Contains(path);
 
+    private static string ETagOf(Tree tree, string path) => $"\"v{tree.Versions.GetValueOrDefault(path)}\"";
+
     private static StorageItem? Item(Tree tree, string path)
     {
         if (path.Length == 0) return new StorageItem("", "", true, null, null);
         if (StoragePaths.IsHiddenName(StoragePaths.Leaf(path))) return null;
         if (tree.Files.TryGetValue(path, out var f))
-            return new StorageItem(StoragePaths.Leaf(path), path, false, f.Data.LongLength, f.Modified);
+            return new StorageItem(StoragePaths.Leaf(path), path, false, f.Data.LongLength, f.Modified, ETagOf(tree, path));
         return tree.Folders.Contains(path) ? new StorageItem(StoragePaths.Leaf(path), path, true, null, null) : null;
     }
 
@@ -147,13 +149,16 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
         lock (_gate) return Task.FromResult(Item(TreeFor(t.Id), path));
     }
 
-    public Task<Stream> OpenReadAsync(StorageTarget t, string path, long offset, long? length, CancellationToken ct)
+    public Task<Stream> OpenReadAsync(StorageTarget t, string path, long offset, long? length, CancellationToken ct, string? expectedETag = null)
     {
         Enter($"OpenRead:{path}");
         if (UnexpectedOnOpenRead is { } openFault) throw openFault;
         lock (_gate)
         {
-            if (!TreeFor(t.Id).Files.TryGetValue(path, out var f)) throw Fail(StorageFailureKind.NotFound);
+            var tree = TreeFor(t.Id);
+            if (!tree.Files.TryGetValue(path, out var f)) throw Fail(StorageFailureKind.NotFound);
+            if (expectedETag is not null && expectedETag != ETagOf(tree, path))
+                throw new StorageFailureException(StorageFailureKind.Conflict, StorageErrorMapper.ChangedDuringReadMessage);
             var start = Math.Min(offset, f.Data.LongLength);
             var count = Math.Min(length ?? long.MaxValue, f.Data.LongLength - start);
             Stream stream = new MemoryStream(f.Data, checked((int)start), checked((int)count), writable: false);

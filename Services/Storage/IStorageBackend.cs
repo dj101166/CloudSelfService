@@ -7,7 +7,8 @@ public interface IStorageBackend
 {
     Task<StorageListing> ListAsync(StorageTarget t, string folder, string? continuation, int pageSize, CancellationToken ct);
     Task<StorageItem?> GetItemAsync(StorageTarget t, string path, CancellationToken ct);
-    Task<Stream> OpenReadAsync(StorageTarget t, string path, long offset, long? length, CancellationToken ct);
+    /// <summary>When <paramref name="expectedETag"/> is set and the stored item has changed, fails with a Conflict instead of reading it.</summary>
+    Task<Stream> OpenReadAsync(StorageTarget t, string path, long offset, long? length, CancellationToken ct, string? expectedETag = null);
     Task CreateFolderAsync(StorageTarget t, string path, CancellationToken ct);
     Task MoveAsync(StorageTarget t, string from, string to, bool isFolder, CancellationToken ct);
     Task DeleteAsync(StorageTarget t, string path, bool isFolder, CancellationToken ct);

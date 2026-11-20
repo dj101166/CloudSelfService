@@ -1,9 +1,13 @@
+using System.Globalization;
+using System.Text;
+
 namespace CloudSelfService.Services.Access;
 
 public static class StoragePath
 {
     private const int MaxSegmentLength = 255;
     private const int MaxPathLength = 1024;
+    public const string InvisibleCharactersMessage = "Names can't contain invisible or direction-changing characters.";
     private const string ReservedChars = "\"\\:|<>*?";
 
     public static bool TryNormalizePath(string? raw, out string normalized, out string? error)
@@ -61,7 +65,7 @@ public static class StoragePath
         return i < 0 ? path : path[(i + 1)..];
     }
 
-    private static bool TryValidateSegment(string segment, out string? error)
+    public static bool TryValidateSegment(string segment, out string? error)
     {
         error = null;
         if (segment is "." or "..")
@@ -78,6 +82,14 @@ public static class StoragePath
         {
             error = "A name cannot end with a '.' or a space.";
             return false;
+        }
+        foreach (var rune in segment.EnumerateRunes())
+        {
+            if (rune.Value is >= 0x80 and <= 0x9F || Rune.GetUnicodeCategory(rune) == UnicodeCategory.Format)
+            {
+                error = InvisibleCharactersMessage;
+                return false;
+            }
         }
         foreach (var c in segment)
         {

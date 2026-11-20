@@ -25,10 +25,10 @@ public static class StoragePaths
 
     public static bool IsMarker(string path) => Leaf(path) == FolderMarker;
 
-    private static readonly Regex StagingName = new(@"^\..+\.cssupload-[0-9a-f]{32}\z", RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+    private static readonly Regex StagingName = new(@"^\..+\.CSSUPLOAD-[0-9A-F]{32}\z", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
-    /// <summary>Caller-chosen upload staging names ("{folder}/.{name}.cssupload-{sessionId:N}") must never be listed.</summary>
-    public static bool IsStagingName(string name) => StagingName.IsMatch(name);
+    /// <summary>Matched on the upper-cased name, so a character that case-folds into "cssupload" (such as U+017F) is covered. Caller-chosen upload staging names ("{folder}/.{name}.cssupload-{sessionId:N}") must never be listed.</summary>
+    public static bool IsStagingName(string name) => StagingName.IsMatch(name.ToUpperInvariant());
 
     /// <summary>Entries users must never see: the folder marker and in-flight upload staging files.</summary>
     public static bool IsHiddenName(string name) => name == FolderMarker || IsStagingName(name);

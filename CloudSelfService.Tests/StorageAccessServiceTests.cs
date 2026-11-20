@@ -1185,7 +1185,7 @@ public class StorageAccessServiceTests
         private Task<T> Fail<T>() => Task.FromException<T>(ex);
         public Task<StorageListing> ListAsync(StorageTarget t, string folder, string? continuation, int pageSize, CancellationToken ct) => Fail<StorageListing>();
         public Task<StorageItem?> GetItemAsync(StorageTarget t, string path, CancellationToken ct) => Fail<StorageItem?>();
-        public Task<Stream> OpenReadAsync(StorageTarget t, string path, long offset, long? length, CancellationToken ct) => Fail<Stream>();
+        public Task<Stream> OpenReadAsync(StorageTarget t, string path, long offset, long? length, CancellationToken ct, string? expectedETag = null) => Fail<Stream>();
         public Task CreateFolderAsync(StorageTarget t, string path, CancellationToken ct) => Fail<bool>();
         public Task MoveAsync(StorageTarget t, string from, string to, bool isFolder, CancellationToken ct) => Fail<bool>();
         public Task DeleteAsync(StorageTarget t, string path, bool isFolder, CancellationToken ct) => Fail<bool>();
