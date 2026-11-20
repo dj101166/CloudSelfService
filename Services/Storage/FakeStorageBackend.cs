@@ -18,8 +18,10 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
         public readonly Dictionary<string, Dictionary<string, (long Offset, byte[] Data)>> Staging = new(StringComparer.Ordinal);
         public readonly Dictionary<string, (string Source, long Version)> MovedFrom = new(StringComparer.Ordinal);
         public readonly Dictionary<string, long> Versions = new(StringComparer.Ordinal);
-        // Blob only: what the last commit at a path wrote, valid while the path's version is unchanged.
+        // What the last upload commit at a path wrote, valid while the path's version is unchanged.
         public readonly Dictionary<string, (IReadOnlyList<string> BlockIds, Guid? Session, long Version)> Committed = new(StringComparer.Ordinal);
+        // Files only: the staging file's logical size (what Azure Files charges quota on).
+        public readonly Dictionary<string, long> StagingSizes = new(StringComparer.Ordinal);
         public long Counter;
         public long Bump(string path) => Versions[path] = ++Counter;
         public bool Seeded;
@@ -48,12 +50,30 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
 
     public long BytesWritten => Interlocked.Read(ref _bytesWritten);
 
+    /// <summary>The logical size of a Files staging file, or null if it doesn't exist.</summary>
+    public long? StagingLength(Guid targetId, string stagingPath)
+    {
+        lock (_gate) return TreeFor(targetId).StagingSizes.TryGetValue(stagingPath, out var n) ? n : null;
+    }
+
+    /// <summary>Sum of every Files staging file's logical size across all targets.</summary>
+    public long TotalStagingBytes
+    {
+        get { lock (_gate) return _trees.Values.Sum(t => t.StagingSizes.Values.Sum()); }
+    }
+
     public IReadOnlyList<string> Calls
     {
         get { lock (_gate) return _calls.ToArray(); }
     }
 
     public IStorageBackend For(StorageTarget t) => this;
+
+    /// <summary>Test seeding: writes a file directly, bypassing the upload protocol.</summary>
+    public void SeedFile(Guid targetId, string path, byte[] data)
+    {
+        lock (_gate) Put(TreeFor(targetId), path, data);
+    }
 
     /// <summary>Gives a target a few folders and files so dev personas have something to browse. Runs once per target.</summary>
     public void Seed(Guid targetId)
@@ -262,9 +282,11 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
         return Task.CompletedTask;
     }
 
-    public Task BeginUploadAsync(StorageTarget t, string stagingPath, long size, CancellationToken ct)
+    public Task BeginUploadAsync(StorageTarget t, string stagingPath, long size, CancellationToken ct, Guid? uploadSessionId = null)
     {
         Enter($"BeginUpload:{stagingPath}");
+        if (t.Kind != StorageKind.BlobContainer && !StoragePaths.IsStagingName(StoragePaths.Leaf(stagingPath)))
+            throw Fail(StorageFailureKind.Other);
         lock (_gate)
         {
             var tree = TreeFor(t.Id);
@@ -276,6 +298,21 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
             }
             tree.Staging[stagingPath] = new Dictionary<string, (long, byte[])>();
             Put(tree, stagingPath, Array.Empty<byte>());
+            tree.StagingSizes[stagingPath] = 0;
+            tree.Committed[stagingPath] = (Array.Empty<string>(), uploadSessionId, tree.Versions[stagingPath]);
+        }
+        return Task.CompletedTask;
+    }
+
+    public Task GrowStagingAsync(StorageTarget t, string stagingPath, long size, CancellationToken ct)
+    {
+        Enter($"GrowStaging:{stagingPath}:{size}");
+        if (t.Kind == StorageKind.BlobContainer) return Task.CompletedTask;
+        lock (_gate)
+        {
+            var tree = TreeFor(t.Id);
+            if (!tree.StagingSizes.ContainsKey(stagingPath)) throw Fail(StorageFailureKind.NotFound);
+            tree.StagingSizes[stagingPath] = size;
         }
         return Task.CompletedTask;
     }
@@ -294,7 +331,11 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
 
         lock (_gate)
         {
-            if (!TreeFor(t.Id).Staging.TryGetValue(stagingPath, out var blocks)) throw Fail(StorageFailureKind.NotFound);
+            var tree = TreeFor(t.Id);
+            if (!tree.Staging.TryGetValue(stagingPath, out var blocks)) throw Fail(StorageFailureKind.NotFound);
+            // Put Range past the end of an Azure Files file fails (416 InvalidRange); the file must be grown first.
+            if (t.Kind != StorageKind.BlobContainer && offset + length > tree.StagingSizes.GetValueOrDefault(stagingPath))
+                throw Fail(StorageFailureKind.Other);
             blocks[blockId] = (offset, buffer);
         }
         Interlocked.Add(ref _bytesWritten, length);
@@ -314,10 +355,14 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
 
             var assembled = blockIds.SelectMany(id => blocks[id].Data).ToArray();
             tree.Staging.Remove(stagingPath);
-            if (stagingPath != finalPath) tree.Files.Remove(stagingPath);
+            if (stagingPath != finalPath)
+            {
+                tree.Files.Remove(stagingPath);
+                tree.StagingSizes.Remove(stagingPath);
+                tree.Committed.Remove(stagingPath);
+            }
             Put(tree, finalPath, assembled);
-            if (t.Kind == StorageKind.BlobContainer)
-                tree.Committed[finalPath] = (blockIds.ToArray(), uploadSessionId, tree.Versions[finalPath]);
+            tree.Committed[finalPath] = (blockIds.ToArray(), uploadSessionId, tree.Versions[finalPath]);
         }
         return Task.CompletedTask;
     }
@@ -329,11 +374,13 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
         lock (_gate)
         {
             var tree = TreeFor(t.Id);
-            if (t.Kind != StorageKind.BlobContainer)
-                return Task.FromResult(!tree.Files.ContainsKey(stagingPath) && tree.Files.ContainsKey(finalPath));
+            if (t.Kind != StorageKind.BlobContainer && tree.Files.ContainsKey(stagingPath))
+                return Task.FromResult(false);
             if (!tree.Files.ContainsKey(finalPath)
                 || !tree.Committed.TryGetValue(finalPath, out var c) || c.Version != tree.Versions.GetValueOrDefault(finalPath))
                 return Task.FromResult(false);
+            if (t.Kind != StorageKind.BlobContainer)
+                return Task.FromResult(c.Session == sessionId);
             return Task.FromResult(size > 0
                 ? c.BlockIds.Count > 0 && c.BlockIds[0] == CloudSelfService.Services.Transfers.ChunkMath.BlockId(sessionId, 0)
                 : c.BlockIds.Count == 0 && c.Session == sessionId);
@@ -343,11 +390,18 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
     public Task AbortUploadAsync(StorageTarget t, string stagingPath, CancellationToken ct)
     {
         Enter($"AbortUpload:{stagingPath}");
+        if (t.Kind != StorageKind.BlobContainer && !StoragePaths.IsStagingName(StoragePaths.Leaf(stagingPath)))
+            throw Fail(StorageFailureKind.Other);
         lock (_gate)
         {
             var tree = TreeFor(t.Id);
             tree.Staging.Remove(stagingPath);
-            if (t.Kind != StorageKind.BlobContainer) tree.Files.Remove(stagingPath);
+            if (t.Kind != StorageKind.BlobContainer)
+            {
+                tree.Files.Remove(stagingPath);
+                tree.StagingSizes.Remove(stagingPath);
+                tree.Committed.Remove(stagingPath);
+            }
         }
         return Task.CompletedTask;
     }

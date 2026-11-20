@@ -5,8 +5,11 @@ using CloudSelfService.Services.Storage;
 
 namespace CloudSelfService.Services.Access;
 
-/// <summary>Conflict: the operation clashed with another one in flight and must be started again (HTTP 409, unlike AlreadyExists).</summary>
-public enum AccessOutcome { Ok, Denied, NotFound, Invalid, AlreadyExists, Unavailable, Conflict }
+/// <summary>
+/// Conflict: the operation clashed with another one in flight and must be started again (HTTP 409, unlike AlreadyExists).
+/// Busy: a per-user limit is reached; try again later (HTTP 429).
+/// </summary>
+public enum AccessOutcome { Ok, Denied, NotFound, Invalid, AlreadyExists, Unavailable, Conflict, Busy }
 
 /// <summary>Code is an optional machine-readable refinement of Outcome for API clients (see Endpoints.UploadErrorCodes).</summary>
 public sealed record AccessResult(AccessOutcome Outcome, string? Message = null, string? Code = null);

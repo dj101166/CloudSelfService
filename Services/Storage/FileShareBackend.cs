@@ -117,13 +117,30 @@ public sealed class FileShareBackend(StorageClientFactory clients) : IStorageBac
                 folder => share.GetDirectoryClient(folder).DeleteAsync(ct)).ConfigureAwait(false);
         }, ct);
 
-    public Task BeginUploadAsync(StorageTarget t, string stagingPath, long size, CancellationToken ct) =>
+    public Task BeginUploadAsync(StorageTarget t, string stagingPath, long size, CancellationToken ct, Guid? uploadSessionId = null) =>
         StorageErrorMapper.RunAsync(async () =>
         {
+            RequireStagingName(stagingPath);
             var share = clients.Share(t);
             await EnsureFoldersAsync(share, StoragePaths.Parent(stagingPath), ct).ConfigureAwait(false);
-            await File(share, stagingPath).CreateAsync(size, cancellationToken: ct).ConfigureAwait(false);
+            await File(share, stagingPath).CreateAsync(0, new ShareFileCreateOptions { Metadata = UploadMetadata.For(uploadSessionId) },
+                conditions: null, ct).ConfigureAwait(false);
         }, ct);
+
+    public Task GrowStagingAsync(StorageTarget t, string stagingPath, long size, CancellationToken ct) =>
+        StorageErrorMapper.RunAsync(async () =>
+        {
+            RequireStagingName(stagingPath);
+            await File(clients.Share(t), stagingPath).SetHttpHeadersAsync(new ShareFileSetHttpHeadersOptions { NewSize = size },
+                conditions: null, ct).ConfigureAwait(false);
+        }, ct);
+
+    // Every staging write and delete goes through this, so a corrupted session row can never touch a user's file.
+    private static void RequireStagingName(string stagingPath)
+    {
+        if (!StoragePaths.IsStagingName(StoragePaths.Leaf(stagingPath)))
+            throw new StorageFailureException(StorageFailureKind.Other, StorageErrorMapper.OtherMessage);
+    }
 
     public Task WriteChunkAsync(StorageTarget t, string stagingPath, string finalPath, string blockId, long offset,
         Stream data, long length, byte[] md5, CancellationToken ct) =>
@@ -139,8 +156,10 @@ public sealed class FileShareBackend(StorageClientFactory clients) : IStorageBac
         {
             var share = clients.Share(t);
             await EnsureFoldersAsync(share, StoragePaths.Parent(finalPath), ct).ConfigureAwait(false);
+            // The stamp is passed explicitly rather than relying on Rename carrying the staging file's metadata across.
             await File(share, stagingPath).RenameAsync(finalPath,
-                new ShareFileRenameOptions { ReplaceIfExists = overwrite }, ct).ConfigureAwait(false);
+                new ShareFileRenameOptions { ReplaceIfExists = overwrite, Metadata = UploadMetadata.For(uploadSessionId) }, ct)
+                .ConfigureAwait(false);
         }, ct);
 
     public Task<bool> HasLandedAsync(StorageTarget t, string stagingPath, string finalPath, Guid sessionId, long size,
@@ -149,12 +168,21 @@ public sealed class FileShareBackend(StorageClientFactory clients) : IStorageBac
         {
             var share = clients.Share(t);
             if ((await File(share, stagingPath).ExistsAsync(ct).ConfigureAwait(false)).Value) return false;
-            return (await File(share, finalPath).ExistsAsync(ct).ConfigureAwait(false)).Value;
+            try
+            {
+                var props = await File(share, finalPath).GetPropertiesAsync(cancellationToken: ct).ConfigureAwait(false);
+                return UploadMetadata.Matches(props.Value.Metadata, sessionId);
+            }
+            catch (RequestFailedException ex) when (ex.Status == 404)
+            {
+                return false;
+            }
         }, ct);
 
     public Task AbortUploadAsync(StorageTarget t, string stagingPath, CancellationToken ct) =>
         StorageErrorMapper.RunAsync(async () =>
         {
+            RequireStagingName(stagingPath);
             await File(clients.Share(t), stagingPath).DeleteIfExistsAsync(cancellationToken: ct).ConfigureAwait(false);
         }, ct);
 

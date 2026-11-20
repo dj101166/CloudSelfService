@@ -1,4 +1,4 @@
-namespace CloudSelfService.Endpoints;
+namespace CloudSelfService.Services.Transfers;
 
 /// <summary>
 /// The machine-readable <c>code</c> in every upload API error body (<c>{ "error": "…", "code": "…" }</c>). uploader.js
@@ -25,7 +25,7 @@ public static class UploadErrorCodes
     public const string NotFound = "not_found";
     public const string TooLarge = "too_large";
 
-    /// <summary>429: a per-user rate or concurrency limit; wait for Retry-After.</summary>
+    /// <summary>429: a rate or concurrency limit, or too many uploads in progress; wait for Retry-After.</summary>
     public const string Busy = "busy";
 
     /// <summary>503: storage or the database is unavailable; retry later.</summary>

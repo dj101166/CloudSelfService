@@ -19,6 +19,7 @@ public class FakeStorageBackendTests
         var bytes = Encoding.UTF8.GetBytes(content);
         var staging = Stage(path);
         await _fake.BeginUploadAsync(T, staging, bytes.Length, _ct);
+        await _fake.GrowStagingAsync(T, staging, bytes.Length, _ct);
         await _fake.WriteChunkAsync(T, staging, path, "b0", 0, new MemoryStream(bytes), bytes.Length, MD5.HashData(bytes), _ct);
         await _fake.CompleteUploadAsync(T, staging, path, new[] { "b0" }, overwrite, _ct);
     }
@@ -36,9 +37,11 @@ public class FakeStorageBackendTests
     public async Task WriteChunk_Md5Mismatch_ThrowsConflict()
     {
         var bytes = new byte[] { 1, 2, 3 };
-        await _fake.BeginUploadAsync(T, "s", 3, _ct);
+        var s = Stage("f.bin");
+        await _fake.BeginUploadAsync(T, s, 3, _ct);
+        await _fake.GrowStagingAsync(T, s, 3, _ct);
         var ex = await Assert.ThrowsAsync<StorageFailureException>(() =>
-            _fake.WriteChunkAsync(T, "s", "f.bin", "b0", 0, new MemoryStream(bytes), 3, new byte[16], _ct));
+            _fake.WriteChunkAsync(T, s, "f.bin", "b0", 0, new MemoryStream(bytes), 3, new byte[16], _ct));
         Assert.Equal(StorageFailureKind.Conflict, ex.Kind);
         Assert.Equal(0, _fake.BytesWritten);
     }
@@ -66,6 +69,7 @@ public class FakeStorageBackendTests
         var bytes = Encoding.UTF8.GetBytes("abc");
         var s = Stage("f.txt");
         await _fake.BeginUploadAsync(T, s, 3, _ct);
+        await _fake.GrowStagingAsync(T, s, 3, _ct);
         await _fake.WriteChunkAsync(T, s, "f.txt", "b0", 0, new MemoryStream(bytes), 3, MD5.HashData(bytes), _ct);
         Assert.Null(await _fake.GetItemAsync(T, "f.txt", _ct));
         Assert.Empty((await _fake.ListAsync(T, "", null, 50, _ct)).Items);
@@ -76,10 +80,12 @@ public class FakeStorageBackendTests
     {
         var a = Encoding.UTF8.GetBytes("AAA");
         var b = Encoding.UTF8.GetBytes("BB");
-        await _fake.BeginUploadAsync(T, "s", 5, _ct);
-        await _fake.WriteChunkAsync(T, "s", "f", "b1", 3, new MemoryStream(b), 2, MD5.HashData(b), _ct);
-        await _fake.WriteChunkAsync(T, "s", "f", "b0", 0, new MemoryStream(a), 3, MD5.HashData(a), _ct);
-        await _fake.CompleteUploadAsync(T, "s", "f", new[] { "b0", "b1" }, true, _ct);
+        var s = Stage("f");
+        await _fake.BeginUploadAsync(T, s, 5, _ct);
+        await _fake.GrowStagingAsync(T, s, 5, _ct);
+        await _fake.WriteChunkAsync(T, s, "f", "b1", 3, new MemoryStream(b), 2, MD5.HashData(b), _ct);
+        await _fake.WriteChunkAsync(T, s, "f", "b0", 0, new MemoryStream(a), 3, MD5.HashData(a), _ct);
+        await _fake.CompleteUploadAsync(T, s, "f", new[] { "b0", "b1" }, true, _ct);
         Assert.Equal("AAABB", await ReadAll(await _fake.OpenReadAsync(T, "f", 0, null, _ct)));
     }
 
@@ -87,12 +93,14 @@ public class FakeStorageBackendTests
     public async Task Abort_DiscardsStagedChunks_AndIgnoresUnknown()
     {
         var bytes = new byte[] { 1 };
-        await _fake.BeginUploadAsync(T, "s", 1, _ct);
-        await _fake.WriteChunkAsync(T, "s", "f", "b0", 0, new MemoryStream(bytes), 1, MD5.HashData(bytes), _ct);
-        await _fake.AbortUploadAsync(T, "s", _ct);
-        await _fake.AbortUploadAsync(T, "never", _ct);
+        var s = Stage("f");
+        await _fake.BeginUploadAsync(T, s, 1, _ct);
+        await _fake.GrowStagingAsync(T, s, 1, _ct);
+        await _fake.WriteChunkAsync(T, s, "f", "b0", 0, new MemoryStream(bytes), 1, MD5.HashData(bytes), _ct);
+        await _fake.AbortUploadAsync(T, s, _ct);
+        await _fake.AbortUploadAsync(T, Stage("never"), _ct);
         var ex = await Assert.ThrowsAsync<StorageFailureException>(() =>
-            _fake.CompleteUploadAsync(T, "s", "f", new[] { "b0" }, true, _ct));
+            _fake.CompleteUploadAsync(T, s, "f", new[] { "b0" }, true, _ct));
         Assert.Equal(StorageFailureKind.NotFound, ex.Kind);
     }
 
@@ -281,6 +289,7 @@ public class FakeStorageBackendTests
     {
         var name = Stage("f");
         await _fake.BeginUploadAsync(T, name, 5, _ct);
+        await _fake.GrowStagingAsync(T, name, 5, _ct);
         await Assert.ThrowsAsync<ArgumentException>(() =>
             _fake.WriteChunkAsync(T, name, "f", "b0", 0, new MemoryStream(new byte[2]), 5, new byte[16], _ct));
         Assert.Equal(0, _fake.BytesWritten);
@@ -299,14 +308,48 @@ public class FakeStorageBackendTests
     }
 
     [Fact]
-    public async Task HasLanded_Files_StagingGoneAndFinalPresent()
+    public async Task HasLanded_Files_StagingGoneAndFinalPresentWithSessionStamp()
     {
+        var mine = Guid.NewGuid();
         var staging = Stage("f.txt");
-        await _fake.BeginUploadAsync(T, staging, 0, _ct);
+        await _fake.BeginUploadAsync(T, staging, 0, _ct, mine);
+        Assert.False(await _fake.HasLandedAsync(T, staging, "f.txt", mine, 0, _ct));
+        await _fake.CompleteUploadAsync(T, staging, "f.txt", Array.Empty<string>(), false, _ct, mine);
+        Assert.True(await _fake.HasLandedAsync(T, staging, "f.txt", mine, 0, _ct));
         Assert.False(await _fake.HasLandedAsync(T, staging, "f.txt", Guid.NewGuid(), 0, _ct));
-        await _fake.CompleteUploadAsync(T, staging, "f.txt", Array.Empty<string>(), false, _ct);
-        Assert.True(await _fake.HasLandedAsync(T, staging, "f.txt", Guid.NewGuid(), 0, _ct));
-        Assert.False(await _fake.HasLandedAsync(T, staging, "other.txt", Guid.NewGuid(), 0, _ct));
+        Assert.False(await _fake.HasLandedAsync(T, staging, "other.txt", mine, 0, _ct));
+    }
+
+    // R32: Azure Files charges quota on logical size, so Begin must not reserve the declared size.
+    [Fact]
+    public async Task Begin_Files_CreatesEmptyStaging_GrowsOnlyWhenAsked()
+    {
+        var staging = Stage("big.iso");
+        await _fake.BeginUploadAsync(T, staging, 50L * 1024 * 1024 * 1024, _ct);
+        Assert.Equal(0, _fake.StagingLength(T.Id, staging));
+
+        var bytes = new byte[] { 1, 2, 3 };
+        var tooFar = await Assert.ThrowsAsync<StorageFailureException>(() =>
+            _fake.WriteChunkAsync(T, staging, "big.iso", "b0", 0, new MemoryStream(bytes), 3, MD5.HashData(bytes), _ct));
+        Assert.Equal(StorageFailureKind.Other, tooFar.Kind);
+
+        await _fake.GrowStagingAsync(T, staging, 3, _ct);
+        await _fake.WriteChunkAsync(T, staging, "big.iso", "b0", 0, new MemoryStream(bytes), 3, MD5.HashData(bytes), _ct);
+        Assert.Equal(3, _fake.StagingLength(T.Id, staging));
+    }
+
+    [Theory]
+    [InlineData("report.pdf")]
+    [InlineData("Docs/report.pdf")]
+    [InlineData("Docs/.report.pdf.cssupload-xyz")]
+    public async Task Abort_Files_RefusesNonStagingName(string path)
+    {
+        await PutAsync("Docs/report.pdf", "keep");
+
+        var ex = await Assert.ThrowsAsync<StorageFailureException>(() => _fake.AbortUploadAsync(T, path, _ct));
+
+        Assert.Equal(StorageFailureKind.Other, ex.Kind);
+        Assert.Equal("keep", await ReadAll(await _fake.OpenReadAsync(T, "Docs/report.pdf", 0, null, _ct)));
     }
 
     [Fact]

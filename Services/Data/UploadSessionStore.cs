@@ -1,3 +1,4 @@
+using CloudSelfService.Models;
 using Npgsql;
 
 namespace CloudSelfService.Services.Data;
@@ -16,11 +17,20 @@ public static class UploadStatus
 
 /// <summary>
 /// ClaimedAt is when the session last entered Completing, so the sweep can spot a commit that never finished.
-/// LastActivityAt is when a chunk last landed, so a stalled blob upload stops holding the file name.
+/// LastActivityAt is when a chunk last landed (idle expiry, and how long a blob upload holds the file name).
+/// TargetKind is the target's kind at Begin; cleanup refuses to touch storage if the target has changed kind since.
+/// ExistedAtBegin records that Begin found a file to replace, so Complete audits Overwrite rather than Upload.
+/// StagingRemoved is true once nothing of this session is left in storage; until then the row is kept so cleanup
+/// can retry. Blob sessions start true because uncommitted blocks need no cleanup.
+/// StagingSize is the logical size the Files staging file has been grown to (it starts empty, see R32).
 /// </summary>
 public sealed record UploadSession(Guid Id, Guid UserId, Guid TargetId, string FinalPath, string StagingPath,
     long Size, int ChunkSize, bool Overwrite, DateTimeOffset CreatedAt, DateTimeOffset ExpiresAt, string Status,
-    DateTimeOffset? ClaimedAt = null, DateTimeOffset? LastActivityAt = null);
+    DateTimeOffset? ClaimedAt = null, DateTimeOffset? LastActivityAt = null, StorageKind TargetKind = StorageKind.FileShare,
+    bool ExistedAtBegin = false, bool StagingRemoved = false, long StagingSize = 0);
+
+/// <summary>A purged row whose staging data was never confirmed removed, for a staff clean-up log line.</summary>
+public sealed record AbandonedStaging(Guid SessionId, Guid TargetId, string StagingPath);
 
 public interface IUploadSessionStore
 {
@@ -49,21 +59,53 @@ public interface IUploadSessionStore
     Task<IReadOnlyList<UploadSession>> ListActiveForPathAsync(Guid targetId, string finalPath, DateTimeOffset now,
         CancellationToken ct = default);
 
+    /// <summary>Open sessions of this user on this exact target and final path (any size, expired or not).</summary>
+    Task<IReadOnlyList<UploadSession>> ListOpenForUserPathAsync(Guid userId, Guid targetId, string finalPath, CancellationToken ct = default);
+
     /// <summary>Sessions still Completing whose claim is older than <paramref name="claimedBefore"/>.</summary>
     Task<IReadOnlyList<UploadSession>> ListStuckCompletingAsync(DateTimeOffset claimedBefore, CancellationToken ct = default);
-    Task SetOverwriteAsync(Guid id, bool overwrite, CancellationToken ct = default);
-    Task<IReadOnlyList<UploadSession>> ListExpiredOpenAsync(DateTimeOffset now, CancellationToken ct = default);
+    Task SetOverwriteAsync(Guid id, bool overwrite, bool existedAtBegin, CancellationToken ct = default);
+
+    /// <summary>Open sessions that have expired, or have had no activity (creation or last chunk) since <paramref name="idleBefore"/>.</summary>
+    Task<IReadOnlyList<UploadSession>> ListSweepableOpenAsync(DateTimeOffset now, DateTimeOffset idleBefore, CancellationToken ct = default);
+
+    /// <summary>Aborted sessions whose staging data has not been confirmed removed.</summary>
+    Task<IReadOnlyList<UploadSession>> ListAbortedWithStagingAsync(CancellationToken ct = default);
+    Task SetStagingRemovedAsync(Guid id, CancellationToken ct = default);
+
+    /// <summary>Open and Completing sessions of this user, unexpired.</summary>
+    Task<int> CountOpenForUserAsync(Guid userId, DateTimeOffset now, CancellationToken ct = default);
+
+    /// <summary>Total declared size of this user's Open and Completing, unexpired sessions.</summary>
+    Task<long> SumOpenSizeForUserAsync(Guid userId, DateTimeOffset now, CancellationToken ct = default);
     Task DeleteAsync(Guid id, CancellationToken ct = default);
 
-    /// <summary>Deletes every session (and its chunk rows) that expired before <paramref name="cutoff"/>.</summary>
-    Task<int> PurgeExpiredBeforeAsync(DateTimeOffset cutoff, CancellationToken ct = default);
+    /// <summary>
+    /// Runs <paramref name="grow"/> only if the recorded StagingSize is below <paramref name="size"/>, then records it.
+    /// Calls for one session are serialised (a row lock in PostgreSQL), so parallel chunks can never resize the staging
+    /// file out of order and shrink it under a piece another chunk just wrote.
+    /// </summary>
+    Task EnsureStagingSizeAsync(Guid id, long size, Func<CancellationToken, Task> grow, CancellationToken ct = default);
+
+    /// <summary>
+    /// Deletes settled sessions (and their chunk rows) that expired before <paramref name="cutoff"/> and have no staging
+    /// left (Completed, or Aborted with StagingRemoved), plus any settled session that expired before
+    /// <paramref name="hardCutoff"/> regardless. Returns the rows
+    /// removed by the hard cutoff whose staging was never confirmed gone.
+    /// </summary>
+    Task<(int Deleted, IReadOnlyList<AbandonedStaging> Abandoned)> PurgeAsync(DateTimeOffset cutoff, DateTimeOffset hardCutoff,
+        CancellationToken ct = default);
 }
 
 public sealed class InMemoryUploadSessionStore : IUploadSessionStore
 {
     private readonly Dictionary<Guid, UploadSession> _sessions = new();
     private readonly Dictionary<Guid, HashSet<int>> _chunks = new();
+    private readonly Dictionary<Guid, SemaphoreSlim> _growLocks = new();
     private readonly object _lock = new();
+
+    private static bool IsActive(UploadSession s) => s.Status is UploadStatus.Open or UploadStatus.Completing;
+    private static bool IsSettled(UploadSession s) => s.Status is UploadStatus.Completed or UploadStatus.Aborted;
 
     public Task CreateAsync(UploadSession s, CancellationToken ct = default)
     {
@@ -99,7 +141,8 @@ public sealed class InMemoryUploadSessionStore : IUploadSessionStore
             if (!_chunks.TryGetValue(id, out var set))
                 throw new InvalidOperationException("Upload session not found.");
             set.Add(index);
-            if (_sessions.TryGetValue(id, out var s)) _sessions[id] = s with { LastActivityAt = at };
+            if (_sessions.TryGetValue(id, out var s) && (s.LastActivityAt is null || s.LastActivityAt < at))
+                _sessions[id] = s with { LastActivityAt = at };
         }
         return Task.CompletedTask;
     }
@@ -138,8 +181,16 @@ public sealed class InMemoryUploadSessionStore : IUploadSessionStore
     {
         lock (_lock)
             return Task.FromResult<IReadOnlyList<UploadSession>>(_sessions.Values
-                .Where(s => s.TargetId == targetId && s.FinalPath == finalPath && s.ExpiresAt > now
-                            && s.Status is UploadStatus.Open or UploadStatus.Completing)
+                .Where(s => s.TargetId == targetId && s.FinalPath == finalPath && s.ExpiresAt > now && IsActive(s))
+                .ToList());
+    }
+
+    public Task<IReadOnlyList<UploadSession>> ListOpenForUserPathAsync(Guid userId, Guid targetId, string finalPath,
+        CancellationToken ct = default)
+    {
+        lock (_lock)
+            return Task.FromResult<IReadOnlyList<UploadSession>>(_sessions.Values
+                .Where(s => s.UserId == userId && s.TargetId == targetId && s.FinalPath == finalPath && s.Status == UploadStatus.Open)
                 .ToList());
     }
 
@@ -151,20 +202,51 @@ public sealed class InMemoryUploadSessionStore : IUploadSessionStore
                 .ToList());
     }
 
-    public Task SetOverwriteAsync(Guid id, bool overwrite, CancellationToken ct = default)
+    public Task SetOverwriteAsync(Guid id, bool overwrite, bool existedAtBegin, CancellationToken ct = default)
     {
         lock (_lock)
         {
-            if (_sessions.TryGetValue(id, out var s)) _sessions[id] = s with { Overwrite = overwrite };
+            if (_sessions.TryGetValue(id, out var s)) _sessions[id] = s with { Overwrite = overwrite, ExistedAtBegin = existedAtBegin };
         }
         return Task.CompletedTask;
     }
 
-    public Task<IReadOnlyList<UploadSession>> ListExpiredOpenAsync(DateTimeOffset now, CancellationToken ct = default)
+    public Task<IReadOnlyList<UploadSession>> ListSweepableOpenAsync(DateTimeOffset now, DateTimeOffset idleBefore,
+        CancellationToken ct = default)
     {
         lock (_lock)
             return Task.FromResult<IReadOnlyList<UploadSession>>(_sessions.Values
-                .Where(s => s.Status == UploadStatus.Open && s.ExpiresAt <= now).ToList());
+                .Where(s => s.Status == UploadStatus.Open
+                            && (s.ExpiresAt <= now || (s.LastActivityAt ?? s.CreatedAt) < idleBefore))
+                .ToList());
+    }
+
+    public Task<IReadOnlyList<UploadSession>> ListAbortedWithStagingAsync(CancellationToken ct = default)
+    {
+        lock (_lock)
+            return Task.FromResult<IReadOnlyList<UploadSession>>(_sessions.Values
+                .Where(s => s.Status == UploadStatus.Aborted && !s.StagingRemoved).ToList());
+    }
+
+    public Task SetStagingRemovedAsync(Guid id, CancellationToken ct = default)
+    {
+        lock (_lock)
+        {
+            if (_sessions.TryGetValue(id, out var s)) _sessions[id] = s with { StagingRemoved = true };
+        }
+        return Task.CompletedTask;
+    }
+
+    public Task<int> CountOpenForUserAsync(Guid userId, DateTimeOffset now, CancellationToken ct = default)
+    {
+        lock (_lock)
+            return Task.FromResult(_sessions.Values.Count(s => s.UserId == userId && IsActive(s) && s.ExpiresAt > now));
+    }
+
+    public Task<long> SumOpenSizeForUserAsync(Guid userId, DateTimeOffset now, CancellationToken ct = default)
+    {
+        lock (_lock)
+            return Task.FromResult(_sessions.Values.Where(s => s.UserId == userId && IsActive(s) && s.ExpiresAt > now).Sum(s => s.Size));
     }
 
     public Task DeleteAsync(Guid id, CancellationToken ct = default)
@@ -173,42 +255,82 @@ public sealed class InMemoryUploadSessionStore : IUploadSessionStore
         {
             _sessions.Remove(id);
             _chunks.Remove(id);
+            _growLocks.Remove(id);
         }
         return Task.CompletedTask;
     }
 
-    public Task<int> PurgeExpiredBeforeAsync(DateTimeOffset cutoff, CancellationToken ct = default)
+    public async Task EnsureStagingSizeAsync(Guid id, long size, Func<CancellationToken, Task> grow, CancellationToken ct = default)
+    {
+        SemaphoreSlim gate;
+        lock (_lock)
+        {
+            if (!_growLocks.TryGetValue(id, out gate!)) _growLocks[id] = gate = new SemaphoreSlim(1, 1);
+        }
+        await gate.WaitAsync(ct);
+        try
+        {
+            lock (_lock)
+            {
+                if (!_sessions.TryGetValue(id, out var current) || current.StagingSize >= size) return;
+            }
+            await grow(ct);
+            lock (_lock)
+            {
+                if (_sessions.TryGetValue(id, out var current) && current.StagingSize < size)
+                    _sessions[id] = current with { StagingSize = size };
+            }
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    public Task<(int Deleted, IReadOnlyList<AbandonedStaging> Abandoned)> PurgeAsync(DateTimeOffset cutoff, DateTimeOffset hardCutoff,
+        CancellationToken ct = default)
     {
         lock (_lock)
         {
-            var old = _sessions.Values.Where(s => s.ExpiresAt < cutoff).Select(s => s.Id).ToList();
-            foreach (var id in old)
+            var old = _sessions.Values
+                .Where(s => IsSettled(s)
+                            && ((s.ExpiresAt < cutoff && (s.StagingRemoved || s.Status == UploadStatus.Completed)) || s.ExpiresAt < hardCutoff))
+                .ToList();
+            var abandoned = old.Where(s => !s.StagingRemoved && s.Status == UploadStatus.Aborted)
+                .Select(s => new AbandonedStaging(s.Id, s.TargetId, s.StagingPath)).ToList();
+            foreach (var s in old)
             {
-                _sessions.Remove(id);
-                _chunks.Remove(id);
+                _sessions.Remove(s.Id);
+                _chunks.Remove(s.Id);
+                _growLocks.Remove(s.Id);
             }
-            return Task.FromResult(old.Count);
+            return Task.FromResult<(int, IReadOnlyList<AbandonedStaging>)>((old.Count, abandoned));
         }
     }
 }
 
 public sealed class PgUploadSessionStore : IUploadSessionStore
 {
-    private const string Cols = "id, user_id, target_id, final_path, staging_path, size, chunk_size, overwrite, created_at, expires_at, status, claimed_at, last_activity_at";
+    private const string Cols = "id, user_id, target_id, final_path, staging_path, size, chunk_size, overwrite, created_at, " +
+                                "expires_at, status, claimed_at, last_activity_at, target_kind, existed_at_begin, staging_removed, staging_size";
     private readonly PgsqlContext _db;
     public PgUploadSessionStore(PgsqlContext db) => _db = db;
 
     private static UploadSession Map(NpgsqlDataReader r) => new(r.GetGuid(0), r.GetGuid(1), r.GetGuid(2), r.GetString(3),
         r.GetString(4), r.GetInt64(5), r.GetInt32(6), r.GetBoolean(7), r.GetFieldValue<DateTimeOffset>(8),
         r.GetFieldValue<DateTimeOffset>(9), r.GetString(10), r.IsDBNull(11) ? null : r.GetFieldValue<DateTimeOffset>(11),
-        r.IsDBNull(12) ? null : r.GetFieldValue<DateTimeOffset>(12));
+        r.IsDBNull(12) ? null : r.GetFieldValue<DateTimeOffset>(12), r.Enum<StorageKind>(13), r.GetBoolean(14), r.GetBoolean(15), r.GetInt64(16));
+
+    private static void AddTime(NpgsqlCommand cmd, string name, DateTimeOffset? value) =>
+        cmd.Parameters.AddWithValue(name, NpgsqlTypes.NpgsqlDbType.TimestampTz, (object?)value?.ToUniversalTime() ?? DBNull.Value);
 
     public async Task CreateAsync(UploadSession s, CancellationToken ct = default)
     {
         await using var conn = await _db.DataSource.OpenConnectionAsync(ct);
         await using var cmd = new NpgsqlCommand($"""
             INSERT INTO upload_sessions ({Cols})
-            VALUES (@id, @uid, @tid, @final, @staging, @size, @chunk, @overwrite, @created, @expires, @status, @claimed, @activity)
+            VALUES (@id, @uid, @tid, @final, @staging, @size, @chunk, @overwrite, @created, @expires, @status, @claimed, @activity,
+                    @kind, @existed, @removed, @stagingSize)
             """, conn);
         cmd.Parameters.AddWithValue("id", s.Id);
         cmd.Parameters.AddWithValue("uid", s.UserId);
@@ -221,8 +343,12 @@ public sealed class PgUploadSessionStore : IUploadSessionStore
         cmd.Parameters.AddWithValue("created", s.CreatedAt.ToUniversalTime());
         cmd.Parameters.AddWithValue("expires", s.ExpiresAt.ToUniversalTime());
         cmd.Parameters.AddWithValue("status", s.Status);
-        cmd.Parameters.AddWithValue("claimed", NpgsqlTypes.NpgsqlDbType.TimestampTz, (object?)s.ClaimedAt?.ToUniversalTime() ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("activity", NpgsqlTypes.NpgsqlDbType.TimestampTz, (object?)s.LastActivityAt?.ToUniversalTime() ?? DBNull.Value);
+        AddTime(cmd, "claimed", s.ClaimedAt);
+        AddTime(cmd, "activity", s.LastActivityAt);
+        cmd.Parameters.AddWithValue("kind", s.TargetKind.ToString());
+        cmd.Parameters.AddWithValue("existed", s.ExistedAtBegin);
+        cmd.Parameters.AddWithValue("removed", s.StagingRemoved);
+        cmd.Parameters.AddWithValue("stagingSize", s.StagingSize);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -291,12 +417,11 @@ public sealed class PgUploadSessionStore : IUploadSessionStore
             "UPDATE upload_sessions SET status = @next, claimed_at = COALESCE(@claimed, claimed_at) WHERE id = @id AND status = @expected" +
             (requireClaim ? " AND claimed_at IS NOT DISTINCT FROM @expectedClaim" : ""),
             conn);
-        cmd.Parameters.AddWithValue("expectedClaim", NpgsqlTypes.NpgsqlDbType.TimestampTz,
-            (object?)expectedClaim?.ToUniversalTime() ?? DBNull.Value);
+        AddTime(cmd, "expectedClaim", expectedClaim);
         cmd.Parameters.AddWithValue("id", id);
         cmd.Parameters.AddWithValue("expected", expected);
         cmd.Parameters.AddWithValue("next", next);
-        cmd.Parameters.AddWithValue("claimed", NpgsqlTypes.NpgsqlDbType.TimestampTz, (object?)claimedAt?.ToUniversalTime() ?? DBNull.Value);
+        AddTime(cmd, "claimed", claimedAt);
         return await cmd.ExecuteNonQueryAsync(ct) == 1;
     }
 
@@ -313,6 +438,19 @@ public sealed class PgUploadSessionStore : IUploadSessionStore
         return await cmd.ReadAllAsync(Map, ct);
     }
 
+    public async Task<IReadOnlyList<UploadSession>> ListOpenForUserPathAsync(Guid userId, Guid targetId, string finalPath,
+        CancellationToken ct = default)
+    {
+        await using var conn = await _db.DataSource.OpenConnectionAsync(ct);
+        await using var cmd = new NpgsqlCommand(
+            $"SELECT {Cols} FROM upload_sessions WHERE user_id = @uid AND target_id = @tid AND final_path = @final AND status = 'Open'",
+            conn);
+        cmd.Parameters.AddWithValue("uid", userId);
+        cmd.Parameters.AddWithValue("tid", targetId);
+        cmd.Parameters.AddWithValue("final", finalPath);
+        return await cmd.ReadAllAsync(Map, ct);
+    }
+
     public async Task<IReadOnlyList<UploadSession>> ListStuckCompletingAsync(DateTimeOffset claimedBefore, CancellationToken ct = default)
     {
         await using var conn = await _db.DataSource.OpenConnectionAsync(ct);
@@ -322,22 +460,66 @@ public sealed class PgUploadSessionStore : IUploadSessionStore
         return await cmd.ReadAllAsync(Map, ct);
     }
 
-    public async Task SetOverwriteAsync(Guid id, bool overwrite, CancellationToken ct = default)
-    {
-        await using var conn = await _db.DataSource.OpenConnectionAsync(ct);
-        await using var cmd = new NpgsqlCommand("UPDATE upload_sessions SET overwrite = @overwrite WHERE id = @id", conn);
-        cmd.Parameters.AddWithValue("id", id);
-        cmd.Parameters.AddWithValue("overwrite", overwrite);
-        await cmd.ExecuteNonQueryAsync(ct);
-    }
-
-    public async Task<IReadOnlyList<UploadSession>> ListExpiredOpenAsync(DateTimeOffset now, CancellationToken ct = default)
+    public async Task SetOverwriteAsync(Guid id, bool overwrite, bool existedAtBegin, CancellationToken ct = default)
     {
         await using var conn = await _db.DataSource.OpenConnectionAsync(ct);
         await using var cmd = new NpgsqlCommand(
-            $"SELECT {Cols} FROM upload_sessions WHERE status = 'Open' AND expires_at <= @now ORDER BY expires_at", conn);
+            "UPDATE upload_sessions SET overwrite = @overwrite, existed_at_begin = @existed WHERE id = @id", conn);
+        cmd.Parameters.AddWithValue("id", id);
+        cmd.Parameters.AddWithValue("overwrite", overwrite);
+        cmd.Parameters.AddWithValue("existed", existedAtBegin);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<IReadOnlyList<UploadSession>> ListSweepableOpenAsync(DateTimeOffset now, DateTimeOffset idleBefore,
+        CancellationToken ct = default)
+    {
+        await using var conn = await _db.DataSource.OpenConnectionAsync(ct);
+        await using var cmd = new NpgsqlCommand($"""
+            SELECT {Cols} FROM upload_sessions
+            WHERE status = 'Open' AND (expires_at <= @now OR COALESCE(last_activity_at, created_at) < @idle)
+            ORDER BY expires_at
+            """, conn);
         cmd.Parameters.AddWithValue("now", now.ToUniversalTime());
+        cmd.Parameters.AddWithValue("idle", idleBefore.ToUniversalTime());
         return await cmd.ReadAllAsync(Map, ct);
+    }
+
+    public async Task<IReadOnlyList<UploadSession>> ListAbortedWithStagingAsync(CancellationToken ct = default)
+    {
+        await using var conn = await _db.DataSource.OpenConnectionAsync(ct);
+        await using var cmd = new NpgsqlCommand(
+            $"SELECT {Cols} FROM upload_sessions WHERE status = 'Aborted' AND NOT staging_removed", conn);
+        return await cmd.ReadAllAsync(Map, ct);
+    }
+
+    public async Task SetStagingRemovedAsync(Guid id, CancellationToken ct = default)
+    {
+        await using var conn = await _db.DataSource.OpenConnectionAsync(ct);
+        await using var cmd = new NpgsqlCommand("UPDATE upload_sessions SET staging_removed = TRUE WHERE id = @id", conn);
+        cmd.Parameters.AddWithValue("id", id);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<int> CountOpenForUserAsync(Guid userId, DateTimeOffset now, CancellationToken ct = default)
+    {
+        await using var conn = await _db.DataSource.OpenConnectionAsync(ct);
+        await using var cmd = new NpgsqlCommand(
+            "SELECT COUNT(*) FROM upload_sessions WHERE user_id = @uid AND status IN ('Open', 'Completing') AND expires_at > @now", conn);
+        cmd.Parameters.AddWithValue("uid", userId);
+        cmd.Parameters.AddWithValue("now", now.ToUniversalTime());
+        return Convert.ToInt32(await cmd.ExecuteScalarAsync(ct));
+    }
+
+    public async Task<long> SumOpenSizeForUserAsync(Guid userId, DateTimeOffset now, CancellationToken ct = default)
+    {
+        await using var conn = await _db.DataSource.OpenConnectionAsync(ct);
+        await using var cmd = new NpgsqlCommand(
+            "SELECT COALESCE(SUM(size), 0) FROM upload_sessions WHERE user_id = @uid AND status IN ('Open', 'Completing') AND expires_at > @now",
+            conn);
+        cmd.Parameters.AddWithValue("uid", userId);
+        cmd.Parameters.AddWithValue("now", now.ToUniversalTime());
+        return Convert.ToInt64(await cmd.ExecuteScalarAsync(ct));
     }
 
     public async Task DeleteAsync(Guid id, CancellationToken ct = default)
@@ -348,11 +530,45 @@ public sealed class PgUploadSessionStore : IUploadSessionStore
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
-    public async Task<int> PurgeExpiredBeforeAsync(DateTimeOffset cutoff, CancellationToken ct = default)
+    public async Task EnsureStagingSizeAsync(Guid id, long size, Func<CancellationToken, Task> grow, CancellationToken ct = default)
     {
         await using var conn = await _db.DataSource.OpenConnectionAsync(ct);
-        await using var cmd = new NpgsqlCommand("DELETE FROM upload_sessions WHERE expires_at < @cutoff", conn);
+        await using var tx = await conn.BeginTransactionAsync(ct);
+        long current;
+        await using (var read = new NpgsqlCommand("SELECT staging_size FROM upload_sessions WHERE id = @id FOR UPDATE", conn, tx))
+        {
+            read.Parameters.AddWithValue("id", id);
+            if (await read.ExecuteScalarAsync(ct) is not long value) return;
+            current = value;
+        }
+        if (current >= size) return;
+        // The row stays locked while storage is resized; a failure rolls back and leaves the recorded size unchanged.
+        await grow(ct);
+        await using (var write = new NpgsqlCommand("UPDATE upload_sessions SET staging_size = @size WHERE id = @id", conn, tx))
+        {
+            write.Parameters.AddWithValue("id", id);
+            write.Parameters.AddWithValue("size", size);
+            await write.ExecuteNonQueryAsync(ct);
+        }
+        await tx.CommitAsync(ct);
+    }
+
+    public async Task<(int Deleted, IReadOnlyList<AbandonedStaging> Abandoned)> PurgeAsync(DateTimeOffset cutoff, DateTimeOffset hardCutoff,
+        CancellationToken ct = default)
+    {
+        await using var conn = await _db.DataSource.OpenConnectionAsync(ct);
+        await using var cmd = new NpgsqlCommand("""
+            DELETE FROM upload_sessions
+            WHERE status IN ('Completed', 'Aborted')
+              AND ((expires_at < @cutoff AND (staging_removed OR status = 'Completed')) OR expires_at < @hard)
+            RETURNING id, target_id, staging_path, status, staging_removed
+            """, conn);
         cmd.Parameters.AddWithValue("cutoff", cutoff.ToUniversalTime());
-        return await cmd.ExecuteNonQueryAsync(ct);
+        cmd.Parameters.AddWithValue("hard", hardCutoff.ToUniversalTime());
+        var rows = await cmd.ReadAllAsync(r => (Id: r.GetGuid(0), Target: r.GetGuid(1), Staging: r.GetString(2),
+            Status: r.GetString(3), Removed: r.GetBoolean(4)), ct);
+        var abandoned = rows.Where(r => !r.Removed && r.Status == UploadStatus.Aborted)
+            .Select(r => new AbandonedStaging(r.Id, r.Target, r.Staging)).ToList();
+        return (rows.Count, abandoned);
     }
 }

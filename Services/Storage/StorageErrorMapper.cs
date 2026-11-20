@@ -22,7 +22,6 @@ public static class StorageErrorMapper
     public const string ChangedDuringReadMessage = "The file changed while it was being downloaded. Please try again.";
     public const string OtherMessage = "Something went wrong talking to storage.";
     public const string MoveIntoItselfMessage = "Can't move a folder into itself.";
-    public const string ShortChunkMessage = "Upload piece was shorter than expected.";
     public const string UploadInterruptedMessage = "This upload was interrupted by another upload of the same file. Please start it again.";
     public const string NotFoundMessage = "That item no longer exists.";
     public const string AlreadyExistsMessage = "An item with that name already exists.";

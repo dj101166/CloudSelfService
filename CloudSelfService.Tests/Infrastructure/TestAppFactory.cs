@@ -1,5 +1,4 @@
 using System.Net;
-using System.Security.Cryptography;
 using CloudSelfService.Models;
 using CloudSelfService.Services.Data;
 using CloudSelfService.Services.Storage;
@@ -53,11 +52,9 @@ public sealed class TestAppFactory : WebApplicationFactory<Program>
         return (await targets.ListAsync()).Single(t => t.DisplayName == $"Demo share ({level})");
     }
 
-    public async Task SeedFileAsync(StorageTarget target, string path, byte[] data)
+    public Task SeedFileAsync(StorageTarget target, string path, byte[] data)
     {
-        var staging = $"{path}.upload";
-        await Storage.BeginUploadAsync(target, staging, data.Length, default);
-        await Storage.WriteChunkAsync(target, staging, path, "b0", 0, new MemoryStream(data), data.Length, MD5.HashData(data), default);
-        await Storage.CompleteUploadAsync(target, staging, path, new[] { "b0" }, true, default);
+        Storage.SeedFile(target.Id, path, data);
+        return Task.CompletedTask;
     }
 }

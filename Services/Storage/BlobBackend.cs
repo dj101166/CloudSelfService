@@ -228,7 +228,10 @@ public sealed class BlobBackend(StorageClientFactory clients) : IStorageBackend
             if (!any) throw new StorageFailureException(StorageFailureKind.NotFound, StorageErrorMapper.NotFoundMessage);
         }, ct);
 
-    public Task BeginUploadAsync(StorageTarget t, string stagingPath, long size, CancellationToken ct) => Task.CompletedTask;
+    public Task BeginUploadAsync(StorageTarget t, string stagingPath, long size, CancellationToken ct, Guid? uploadSessionId = null) =>
+        Task.CompletedTask;
+
+    public Task GrowStagingAsync(StorageTarget t, string stagingPath, long size, CancellationToken ct) => Task.CompletedTask;
 
     public Task WriteChunkAsync(StorageTarget t, string stagingPath, string finalPath, string blockId, long offset,
         Stream data, long length, byte[] md5, CancellationToken ct) =>
@@ -251,12 +254,9 @@ public sealed class BlobBackend(StorageClientFactory clients) : IStorageBackend
         {
             var options = new CommitBlockListOptions();
             if (!overwrite) options.Conditions = new BlobRequestConditions { IfNoneMatch = ETag.All };
-            if (uploadSessionId is { } id)
-                options.Metadata = new Dictionary<string, string> { [UploadSessionKey] = id.ToString("N") };
+            options.Metadata = UploadMetadata.For(uploadSessionId);
             await clients.Container(t).GetBlockBlobClient(finalPath).CommitBlockListAsync(blockIds, options, ct).ConfigureAwait(false);
         }, ct);
-
-    public const string UploadSessionKey = "cssp_upload_session";
 
     public Task<bool> HasLandedAsync(StorageTarget t, string stagingPath, string finalPath, Guid sessionId, long size,
         CancellationToken ct) =>
@@ -271,7 +271,7 @@ public sealed class BlobBackend(StorageClientFactory clients) : IStorageBackend
                     return committed.Count > 0 && committed[0].Name == CloudSelfService.Services.Transfers.ChunkMath.BlockId(sessionId, 0);
                 if (committed.Count > 0) return false;
                 var props = await blob.GetPropertiesAsync(cancellationToken: ct).ConfigureAwait(false);
-                return props.Value.Metadata.TryGetValue(UploadSessionKey, out var stamped) && stamped == sessionId.ToString("N");
+                return UploadMetadata.Matches(props.Value.Metadata, sessionId);
             }
             catch (RequestFailedException ex) when (ex.Status == 404)
             {

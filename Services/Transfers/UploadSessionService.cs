@@ -1,7 +1,6 @@
 using System.Buffers;
 using System.Globalization;
 using System.Security.Cryptography;
-using CloudSelfService.Endpoints;
 using CloudSelfService.Models;
 using CloudSelfService.Services.Access;
 using CloudSelfService.Services.Data;
@@ -25,18 +24,23 @@ public sealed class UploadSessionService
     public const int DefaultParallelChunks = 4;
     public const int DefaultSessionHours = 24;
     public const int DefaultBlobLockMinutes = 15;
+    public const int DefaultMaxOpenSessionsPerUser = 8;
+    public static readonly TimeSpan DefaultPieceReadTimeout = TimeSpan.FromSeconds(120);
+    public const string BeginOperation = "UploadBegin";
     public const string CancelledByUserMessage = "Cancelled by user";
+    public const string ReplacedMessage = "Replaced by a new upload of the same file";
     public const string NegativeSizeMessage = "File size can't be negative.";
     public const string Md5RequiredMessage = "Each piece needs a Content-MD5 header holding its base64 MD5 hash.";
     public const string NameTooLongMessage = "That file name is too long.";
+    public const string ShortChunkMessage = "Upload piece was shorter than expected.";
     public const string LongChunkMessage = "Upload piece was longer than expected.";
     public const string ChunkCorruptedMessage = "Upload piece was corrupted in transit; it will be retried.";
     public const string ChunkIncompleteMessage = "Upload piece did not arrive completely; it will be retried.";
     public const string OtherUserUploadingMessage = "Someone else is uploading this file right now.";
     public const string UploadLostMessage = "This upload's data is no longer in storage. Please start it again.";
+    public const string TooManyUploadsMessage = "You have too many uploads in progress. Finish or cancel one, then try again.";
     private const string StagingSuffix = ".cssupload-";
     private const int MaxSegmentLength = 255;
-    private static readonly string Operation = StorageOperation.Upload.ToString();
 
     private readonly StorageAccessService _access;
     private readonly IUploadSessionStore _sessions;
@@ -48,6 +52,10 @@ public sealed class UploadSessionService
     private readonly int _parallel;
     private readonly TimeSpan _lifetime;
     private readonly TimeSpan _blobLock;
+    private readonly int _maxOpenSessions;
+
+    /// <summary>How long one piece may take to arrive before the read is abandoned. Settable for tests.</summary>
+    internal TimeSpan PieceReadTimeout { get; set; } = DefaultPieceReadTimeout;
 
     public UploadSessionService(StorageAccessService access, IUploadSessionStore sessions, IStorageBackendResolver backends,
         AuditService audit, TimeProvider time, IConfiguration config, ILogger<UploadSessionService> logger)
@@ -62,6 +70,7 @@ public sealed class UploadSessionService
         _parallel = Math.Clamp(config.GetValue<int?>("Transfers:ParallelChunks") ?? DefaultParallelChunks, 1, 16);
         _lifetime = TimeSpan.FromHours(Math.Max(1, config.GetValue<int?>("Transfers:SessionHours") ?? DefaultSessionHours));
         _blobLock = TimeSpan.FromMinutes(Math.Max(1, config.GetValue<int?>("Transfers:BlobLockMinutes") ?? DefaultBlobLockMinutes));
+        _maxOpenSessions = Math.Max(1, config.GetValue<int?>("Transfers:MaxOpenSessionsPerUser") ?? DefaultMaxOpenSessionsPerUser);
     }
 
     public static string TooLargeMessage(long maxBytes) =>
@@ -72,6 +81,28 @@ public sealed class UploadSessionService
 
     public static string StagingPathFor(string finalPath, Guid sessionId) =>
         StoragePath.Combine(StoragePath.Parent(finalPath), $".{StoragePath.Leaf(finalPath)}{StagingSuffix}{sessionId:N}");
+
+    /// <summary>
+    /// Whether <paramref name="session"/>'s staging path is safe to delete: for Files it must be exactly the name this
+    /// service derives from the final path and session id (and so a hidden staging name); Blob never deletes anything.
+    /// </summary>
+    public static bool StagingIsOwnedBy(UploadSession session) =>
+        session.TargetKind == StorageKind.BlobContainer
+            ? session.StagingPath == session.FinalPath
+            : session.StagingPath == StagingPathFor(session.FinalPath, session.Id)
+              && StoragePaths.IsStagingName(StoragePath.Leaf(session.StagingPath));
+
+    /// <summary>Cheap format checks a chunk PUT can fail before any database or storage call.</summary>
+    public static AccessResult? CheckChunkFormat(int index, long? contentLength, string? contentMd5Base64)
+    {
+        if (index < 0)
+            return new(AccessOutcome.Invalid, $"Piece {index} is out of range.");
+        if (contentLength is not { } length || length < 0 || length > ChunkMath.ChunkSize)
+            return new(AccessOutcome.Invalid, "Each piece needs a Content-Length of at most one piece size.");
+        if (!TryParseMd5(contentMd5Base64, out _))
+            return new(AccessOutcome.Invalid, Md5RequiredMessage);
+        return null;
+    }
 
     public async Task<AccessResult<BeginUploadResponse>> BeginAsync(Guid userId, BeginUploadRequest req, AuditContext ctx,
         CancellationToken ct = default)
@@ -98,7 +129,24 @@ public sealed class UploadSessionService
         if (target.Kind == StorageKind.FileShare && !StagingFits(finalPath))
             return new(AccessOutcome.Invalid, null, NameTooLongMessage);
 
+        var now = _time.GetUtcNow();
+        var resumable = await _sessions.FindResumableAsync(userId, target.Id, finalPath, req.Size, now, ct);
+
+        // Per-user caps, before any storage call: a session reserves its declared size until it settles, so one user
+        // can never stage more than MaxUploadBytes (or hold more than MaxOpenSessionsPerUser uploads) at a time.
+        // Resuming adds nothing, and an older session for the same file is about to be replaced, so neither counts.
+        if (resumable is null)
+        {
+            var replaced = (await _sessions.ListOpenForUserPathAsync(userId, target.Id, finalPath, ct))
+                .Where(o => o.ExpiresAt > now).ToList();
+            var open = await _sessions.CountOpenForUserAsync(userId, now, ct) - replaced.Count;
+            var reserved = await _sessions.SumOpenSizeForUserAsync(userId, now, ct) - replaced.Sum(o => o.Size);
+            if (open >= _maxOpenSessions || reserved + req.Size > _maxBytes)
+                return new(AccessOutcome.Busy, null, TooManyUploadsMessage, Code: UploadErrorCodes.Busy);
+        }
+
         var backend = _backends.For(target);
+        StorageItem? existing;
         try
         {
             // Storage creates missing folders implicitly, so a folder that doesn't exist yet is a new name.
@@ -106,7 +154,7 @@ public sealed class UploadSessionService
                 && await backend.GetItemAsync(target, newFolders, ct) is not { IsFolder: true })
                 return new(AccessOutcome.Invalid, null, StoragePath.InvisibleCharactersMessage);
 
-            var existing = await backend.GetItemAsync(target, finalPath, ct);
+            existing = await backend.GetItemAsync(target, finalPath, ct);
             if (existing is not null && (existing.IsFolder || !req.Overwrite))
                 return new(AccessOutcome.AlreadyExists, null, StorageErrorMapper.AlreadyExistsMessage);
             if (existing is not null)
@@ -126,8 +174,8 @@ public sealed class UploadSessionService
             LogUnexpected(ex, "begin", target.Id, finalPath, ctx);
             return new(AccessOutcome.Unavailable, null, StorageErrorMapper.UnreachableMessage);
         }
+        var existed = existing is not null;
 
-        var now = _time.GetUtcNow();
         // Blob blocks are staged on the final name, so two users' sessions there share one uncommitted block list and
         // whichever commits first discards the other's blocks. Only a recently active session holds the name: a stalled
         // one would otherwise lock the file for a day, and its owner gets a clean "restart" if they come back.
@@ -136,27 +184,42 @@ public sealed class UploadSessionService
                 .Any(o => o.UserId != userId && HoldsBlobName(o, now)))
             return new(AccessOutcome.Conflict, null, OtherUserUploadingMessage, Code: UploadErrorCodes.InProgress);
 
-        var resumable = await _sessions.FindResumableAsync(userId, target.Id, finalPath, req.Size, now, ct);
         if (resumable is not null)
         {
-            if (resumable.Overwrite != req.Overwrite)
-                await _sessions.SetOverwriteAsync(resumable.Id, req.Overwrite, ct);
+            if (resumable.Overwrite != req.Overwrite || resumable.ExistedAtBegin != existed)
+                await _sessions.SetOverwriteAsync(resumable.Id, req.Overwrite, existed, ct);
             var received = await _sessions.ReceivedChunksAsync(resumable.Id, ct);
             return new(AccessOutcome.Ok, Response(resumable.Id, req.Size, received), null, auth.UserUpn);
+        }
+
+        // The same file at a different size is a new upload of it: the older session can never complete usefully.
+        foreach (var older in await _sessions.ListOpenForUserPathAsync(userId, target.Id, finalPath, ct))
+        {
+            if (!await _sessions.TrySetStatusAsync(older.Id, UploadStatus.Open, UploadStatus.Aborted, ct: ct))
+                continue;
+            if (await RemoveStagingAsync(target, older))
+                await _sessions.SetStagingRemovedAsync(older.Id, CancellationToken.None);
+            await RecordAsync(userId, auth.UserUpn, target, Operation(older), older.FinalPath, 0, AuditResult.Failed, ReplacedMessage, ctx);
         }
 
         var id = Guid.NewGuid();
         var staging = target.Kind == StorageKind.FileShare ? StagingPathFor(finalPath, id) : finalPath;
         // The row is written first so the expiry sweep can always find (and remove) whatever storage was prepared.
-        await _sessions.CreateAsync(new UploadSession(id, userId, target.Id, finalPath, staging, req.Size, ChunkMath.ChunkSize,
-            req.Overwrite, now, now + _lifetime, UploadStatus.Open), ct);
+        var session = new UploadSession(id, userId, target.Id, finalPath, staging, req.Size, ChunkMath.ChunkSize,
+            req.Overwrite, now, now + _lifetime, UploadStatus.Open, TargetKind: target.Kind, ExistedAtBegin: existed,
+            StagingRemoved: target.Kind == StorageKind.BlobContainer);
+        await _sessions.CreateAsync(session, ct);
         try
         {
-            await backend.BeginUploadAsync(target, staging, req.Size, ct);
+            await backend.BeginUploadAsync(target, staging, req.Size, ct, id);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            // The create may have landed server-side even though the call failed, so try to remove it; the cleanup
+            // sweep retries for as long as StagingRemoved stays false.
             await _sessions.TrySetStatusAsync(id, UploadStatus.Open, UploadStatus.Aborted, ct: CancellationToken.None);
+            if (await RemoveStagingAsync(target, session))
+                await _sessions.SetStagingRemovedAsync(id, CancellationToken.None);
             if (ex is StorageFailureException failure)
             {
                 LogStorageFailure(failure, "begin", target.Id, finalPath, ctx);
@@ -165,6 +228,10 @@ public sealed class UploadSessionService
             LogUnexpected(ex, "begin", target.Id, finalPath, ctx);
             return new(AccessOutcome.Unavailable, null, StorageErrorMapper.UnreachableMessage);
         }
+
+        await _audit.RecordAsync(new AuditEvent(Guid.NewGuid(), _time.GetUtcNow(), userId, auth.UserUpn ?? "", target.CustomerId,
+            target.Id, BeginOperation, finalPath, req.Size, AuditResult.Success, req.Overwrite ? "overwrite" : "", ctx.SourceIp,
+            ctx.CorrelationId), CancellationToken.None);
         return new(AccessOutcome.Ok, Response(id, req.Size, Array.Empty<int>()), null, auth.UserUpn);
     }
 
@@ -182,18 +249,20 @@ public sealed class UploadSessionService
     public async Task<AccessResult> PutChunkAsync(Guid userId, Guid sessionId, int index, Stream body, long? contentLength,
         string? contentMd5Base64, AuditContext ctx, CancellationToken ct = default)
     {
+        if (CheckChunkFormat(index, contentLength, contentMd5Base64) is { } malformed)
+            return malformed;
+        TryParseMd5(contentMd5Base64, out var md5);
+
         var session = await LoadAsync(userId, sessionId, ct);
         if (session is null)
             return new(AccessOutcome.NotFound, StorageErrorMapper.NotFoundMessage);
 
         var count = ChunkMath.ChunkCount(session.Size);
-        if (index < 0 || index >= count)
+        if (index >= count)
             return new(AccessOutcome.Invalid, $"Piece {index} is out of range; this upload has {count}.");
         var expected = ChunkMath.ExpectedLength(session.Size, index);
         if (contentLength != expected)
             return new(AccessOutcome.Invalid, $"Piece {index} must be exactly {expected} bytes.");
-        if (!TryParseMd5(contentMd5Base64, out var md5))
-            return new(AccessOutcome.Invalid, Md5RequiredMessage);
 
         var auth = await _access.AuthorizeAsync(userId, session.TargetId, OperationOf(session), session.FinalPath, ctx, ct);
         if (auth.Outcome != AccessOutcome.Ok)
@@ -201,7 +270,7 @@ public sealed class UploadSessionService
         var target = auth.Value!;
 
         // The Azure SDKs need a seekable stream of known length and Kestrel's request body is neither, so the piece is
-        // buffered (at most ChunkSize; the Chunks rate limit bounds how many per user) and checked here before storage
+        // buffered (at most ChunkSize; the Chunks rate limits bound how many at once) and checked here before storage
         // sees it. Storage still verifies the same MD5 end to end.
         var length = (int)expected;
         var buffer = ArrayPool<byte>.Shared.Rent(Math.Max(1, length));
@@ -213,14 +282,24 @@ public sealed class UploadSessionService
             if (!MD5.HashData(buffer.AsSpan(0, length)).AsSpan().SequenceEqual(md5))
                 return new(AccessOutcome.Invalid, ChunkCorruptedMessage, UploadErrorCodes.Retry);
 
+            var backend = _backends.For(target);
+            var offset = (long)index * ChunkMath.ChunkSize;
+            // Files quota is charged on logical size, so the staging file grows only as far as pieces actually land.
+            if (target.Kind == StorageKind.FileShare)
+                await _sessions.EnsureStagingSizeAsync(session.Id, offset + expected,
+                    token => backend.GrowStagingAsync(target, session.StagingPath, offset + expected, token), ct);
+
             using var piece = new MemoryStream(buffer, 0, length, writable: false);
-            await _backends.For(target).WriteChunkAsync(target, session.StagingPath, session.FinalPath,
-                ChunkMath.BlockId(session.Id, index), (long)index * ChunkMath.ChunkSize, piece, expected, md5, ct);
+            await backend.WriteChunkAsync(target, session.StagingPath, session.FinalPath,
+                ChunkMath.BlockId(session.Id, index), offset, piece, expected, md5, ct);
         }
         catch (StorageFailureException failure)
         {
             LogStorageFailure(failure, "chunk", target.Id, session.FinalPath, ctx);
-            return new(OutcomeOf(failure), failure.Message);
+            // The staging file (or the session's blocks) is gone; no retry of this piece can succeed.
+            return failure.Kind == StorageFailureKind.NotFound
+                ? new(AccessOutcome.Conflict, UploadLostMessage, UploadErrorCodes.Restart)
+                : new(OutcomeOf(failure), failure.Message);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -236,29 +315,31 @@ public sealed class UploadSessionService
         return new(AccessOutcome.Ok);
     }
 
-    /// <summary>Reads exactly <paramref name="length"/> bytes and confirms nothing follows.</summary>
+    /// <summary>Reads exactly <paramref name="length"/> bytes within <see cref="PieceReadTimeout"/> and confirms nothing follows.</summary>
     private async Task<AccessResult> ReadPieceAsync(Stream body, byte[] buffer, int length, Guid targetId, string path,
         AuditContext ctx, CancellationToken ct)
     {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(PieceReadTimeout);
         try
         {
             var total = 0;
             while (total < length)
             {
-                var n = await body.ReadAsync(buffer.AsMemory(total, length - total), ct);
+                var n = await body.ReadAsync(buffer.AsMemory(total, length - total), timeout.Token);
                 if (n == 0)
-                    return new(AccessOutcome.Invalid, StorageErrorMapper.ShortChunkMessage);
+                    return new(AccessOutcome.Invalid, ShortChunkMessage);
                 total += n;
             }
             var probe = new byte[1];
-            if (await body.ReadAsync(probe, ct) > 0)
+            if (await body.ReadAsync(probe, timeout.Token) > 0)
                 return new(AccessOutcome.Invalid, LongChunkMessage);
             return new(AccessOutcome.Ok);
         }
-        catch (IOException ex)
+        catch (Exception ex) when (ex is IOException || (ex is OperationCanceledException && !ct.IsCancellationRequested))
         {
-            // A dropped connection or malformed body (BadHttpRequestException is an IOException) is the client's
-            // problem, not storage's: no error-level noise, and the client simply retries the piece.
+            // A dropped or stalled connection, or a malformed body (BadHttpRequestException is an IOException), is the
+            // client's problem, not storage's: no error-level noise, and the client simply retries the piece.
             _logger.LogInformation("Upload piece for target {TargetId} at {Path} was not received completely: {Reason} (correlation {CorrelationId}).",
                 targetId, path, ex.Message, ctx.CorrelationId);
             return new(AccessOutcome.Invalid, ChunkIncompleteMessage, UploadErrorCodes.Retry);
@@ -334,6 +415,7 @@ public sealed class UploadSessionService
             }
         }
 
+        var operation = Operation(session);
         if (failureMessage is not null)
         {
             if (lost)
@@ -347,22 +429,23 @@ public sealed class UploadSessionService
                         ? new(AccessOutcome.Ok)
                         : new(AccessOutcome.Conflict, failureMessage, UploadErrorCodes.Restart);
                 }
-                await AbortQuietlyAsync(target, session);
-                await RecordAsync(userId, auth.UserUpn, target, session.FinalPath, 0, AuditResult.Failed, failureMessage, ctx);
+                if (await RemoveStagingAsync(target, session))
+                    await _sessions.SetStagingRemovedAsync(session.Id, CancellationToken.None);
+                await RecordAsync(userId, auth.UserUpn, target, operation, session.FinalPath, 0, AuditResult.Failed, failureMessage, ctx);
                 return new(AccessOutcome.Conflict, failureMessage, UploadErrorCodes.Restart);
             }
-            else
-            {
-                // Back to Open so the user can retry, or resume with overwrite after a name clash.
-                await _sessions.TrySetStatusAsync(session.Id, UploadStatus.Completing, UploadStatus.Open, ct: CancellationToken.None);
-            }
-            await RecordAsync(userId, auth.UserUpn, target, session.FinalPath, 0, AuditResult.Failed, failureMessage, ctx);
+            // Back to Open so the user can retry, or resume with overwrite after a name clash.
+            await _sessions.TrySetStatusAsync(session.Id, UploadStatus.Completing, UploadStatus.Open, ct: CancellationToken.None);
+            await RecordAsync(userId, auth.UserUpn, target, operation, session.FinalPath, 0, AuditResult.Failed, failureMessage, ctx);
             return new(outcome, failureMessage);
         }
 
         // Conditional so that if the cleanup sweep already settled a stuck commit, the Success row isn't written twice.
         if (await _sessions.TrySetStatusAsync(session.Id, UploadStatus.Completing, UploadStatus.Completed, ct: CancellationToken.None))
-            await RecordAsync(userId, auth.UserUpn, target, session.FinalPath, session.Size, AuditResult.Success, "", ctx);
+        {
+            await _sessions.SetStagingRemovedAsync(session.Id, CancellationToken.None);
+            await RecordAsync(userId, auth.UserUpn, target, operation, session.FinalPath, session.Size, AuditResult.Success, "", ctx);
+        }
         else
             _logger.LogWarning("Upload {SessionId} committed but was already settled by cleanup; no second audit row written.", session.Id);
         return new(AccessOutcome.Ok);
@@ -384,6 +467,8 @@ public sealed class UploadSessionService
 
         try
         {
+            if (!StagingIsOwnedBy(session) || session.TargetKind != target.Kind)
+                throw new StorageFailureException(StorageFailureKind.Other, StorageErrorMapper.OtherMessage);
             await _backends.For(target).AbortUploadAsync(target, session.StagingPath, CancellationToken.None);
         }
         catch (Exception ex)
@@ -399,19 +484,35 @@ public sealed class UploadSessionService
             return new(AccessOutcome.Unavailable, StorageErrorMapper.UnreachableMessage);
         }
 
-        await RecordAsync(userId, auth.UserUpn, target, session.FinalPath, 0, AuditResult.Failed, CancelledByUserMessage, ctx);
+        await _sessions.SetStagingRemovedAsync(session.Id, CancellationToken.None);
+        await RecordAsync(userId, auth.UserUpn, target, Operation(session), session.FinalPath, 0, AuditResult.Failed,
+            CancelledByUserMessage, ctx);
         return new(AccessOutcome.Ok);
     }
 
-    private async Task AbortQuietlyAsync(StorageTarget target, UploadSession session)
+    /// <summary>
+    /// Best-effort removal of a session's staged data; true once nothing is left. Refuses (and logs an error) when the
+    /// staging path isn't this session's own derived name, or the target has changed kind since Begin.
+    /// </summary>
+    private async Task<bool> RemoveStagingAsync(StorageTarget target, UploadSession session)
     {
+        if (session.TargetKind == StorageKind.BlobContainer && target.Kind == StorageKind.BlobContainer)
+            return true;
+        if (!StagingIsOwnedBy(session) || session.TargetKind != target.Kind)
+        {
+            _logger.LogError("Refusing to remove staging {StagingPath} for upload {SessionId}: it isn't this session's staging name, " +
+                             "or target {TargetId} changed kind since the upload began.", session.StagingPath, session.Id, target.Id);
+            return false;
+        }
         try
         {
             await _backends.For(target).AbortUploadAsync(target, session.StagingPath, CancellationToken.None);
+            return true;
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Could not remove staged data for upload {SessionId} on target {TargetId}.", session.Id, target.Id);
+            return false;
         }
     }
 
@@ -433,6 +534,10 @@ public sealed class UploadSessionService
         || (s.LastActivityAt is { } active && now - active < _blobLock);
 
     private static StorageOperation OperationOf(UploadSession s) => s.Overwrite ? StorageOperation.Overwrite : StorageOperation.Upload;
+
+    /// <summary>The audit operation: Overwrite when the upload replaces a file that existed at Begin, otherwise Upload.</summary>
+    public static string Operation(UploadSession s) =>
+        (s.Overwrite && s.ExistedAtBegin ? StorageOperation.Overwrite : StorageOperation.Upload).ToString();
 
     private static bool StagingFits(string finalPath)
     {
@@ -466,8 +571,8 @@ public sealed class UploadSessionService
             step, targetId, path, ctx.CorrelationId);
 
     // Not tied to the request token: a client that disconnects must not erase the audit row.
-    private Task RecordAsync(Guid userId, string? upn, StorageTarget target, string path, long bytes, AuditResult result,
-        string error, AuditContext ctx) =>
+    private Task RecordAsync(Guid userId, string? upn, StorageTarget target, string operation, string path, long bytes,
+        AuditResult result, string error, AuditContext ctx) =>
         _audit.RecordAsync(new AuditEvent(Guid.NewGuid(), _time.GetUtcNow(), userId, upn ?? "", target.CustomerId, target.Id,
-            Operation, path, bytes, result, error, ctx.SourceIp, ctx.CorrelationId), CancellationToken.None);
+            operation, path, bytes, result, error, ctx.SourceIp, ctx.CorrelationId), CancellationToken.None);
 }

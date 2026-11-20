@@ -405,12 +405,8 @@ public class StorageAccessServiceTests
 
     private async Task SeedFile(StorageTarget t, string path)
     {
-        var data = new byte[] { 1, 2, 3 };
-        var staging = path + ".up";
-        await _fake.BeginUploadAsync(t, staging, 3, default);
-        await _fake.WriteChunkAsync(t, staging, path, "b0", 0, new MemoryStream(data), 3,
-            System.Security.Cryptography.MD5.HashData(data), default);
-        await _fake.CompleteUploadAsync(t, staging, path, new[] { "b0" }, true, default);
+        _fake.SeedFile(t.Id, path, new byte[] { 1, 2, 3 });
+        await Task.CompletedTask;
     }
 
     [Fact]
@@ -1307,7 +1303,9 @@ public class StorageAccessServiceTests
         public Task CreateFolderAsync(StorageTarget t, string path, CancellationToken ct) => Fail<bool>();
         public Task MoveAsync(StorageTarget t, string from, string to, bool isFolder, CancellationToken ct) => Fail<bool>();
         public Task DeleteAsync(StorageTarget t, string path, bool isFolder, CancellationToken ct) => Fail<bool>();
-        public Task BeginUploadAsync(StorageTarget t, string stagingPath, long size, CancellationToken ct) => Fail<bool>();
+        public Task BeginUploadAsync(StorageTarget t, string stagingPath, long size, CancellationToken ct, Guid? uploadSessionId = null) =>
+            Fail<bool>();
+        public Task GrowStagingAsync(StorageTarget t, string stagingPath, long size, CancellationToken ct) => Fail<bool>();
         public Task WriteChunkAsync(StorageTarget t, string stagingPath, string finalPath, string blockId, long offset,
             Stream data, long length, byte[] md5, CancellationToken ct) => Fail<bool>();
         public Task CompleteUploadAsync(StorageTarget t, string stagingPath, string finalPath, IReadOnlyList<string> blockIds,
@@ -1320,11 +1318,8 @@ public class StorageAccessServiceTests
 
     private async Task PutFile(StorageTarget t, string path, string content)
     {
-        var bytes = System.Text.Encoding.UTF8.GetBytes(content);
-        var staging = StoragePaths.Join(StoragePaths.Parent(path), $".{StoragePaths.Leaf(path)}.cssupload-{Guid.NewGuid():N}");
-        await _fake.BeginUploadAsync(t, staging, bytes.Length, default);
-        await _fake.WriteChunkAsync(t, staging, path, "b0", 0, new MemoryStream(bytes), bytes.Length,
-            System.Security.Cryptography.MD5.HashData(bytes), default);
-        await _fake.CompleteUploadAsync(t, staging, path, new[] { "b0" }, false, default);
+        if (await _fake.GetItemAsync(t, path, default) is not null)
+            throw new StorageFailureException(StorageFailureKind.AlreadyExists, StorageErrorMapper.AlreadyExistsMessage);
+        _fake.SeedFile(t.Id, path, System.Text.Encoding.UTF8.GetBytes(content));
     }
 }

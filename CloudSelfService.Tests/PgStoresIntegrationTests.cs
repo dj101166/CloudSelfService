@@ -163,10 +163,27 @@ public class PgStoresIntegrationTests
         await Task.WhenAll(Enumerable.Range(0, 20).Select(i => store.MarkChunkAsync(s.Id, i, now)));
         Assert.Equal(Enumerable.Range(0, 20), (await store.ReceivedChunksAsync(s.Id)).OrderBy(i => i));
 
-        await store.SetOverwriteAsync(s.Id, true);
+        await store.SetOverwriteAsync(s.Id, true, true);
         Assert.True((await store.GetAsync(s.Id))!.Overwrite);
+        Assert.True((await store.GetAsync(s.Id))!.ExistedAtBegin);
 
-        Assert.Contains(await store.ListExpiredOpenAsync(now.AddHours(25)), x => x.Id == s.Id);
+        Assert.Contains(await store.ListSweepableOpenAsync(now.AddHours(25), now), x => x.Id == s.Id);
+        Assert.Contains(await store.ListSweepableOpenAsync(now, now.AddMinutes(3)), x => x.Id == s.Id);
+        Assert.DoesNotContain(await store.ListSweepableOpenAsync(now, now.AddMinutes(2)), x => x.Id == s.Id);
+        Assert.Contains(await store.ListOpenForUserPathAsync(user, target, "Docs/a b#.bin"), x => x.Id == s.Id);
+        Assert.Empty(await store.ListOpenForUserPathAsync(Guid.NewGuid(), target, "Docs/a b#.bin"));
+        Assert.Equal(1, await store.CountOpenForUserAsync(user, now));
+        Assert.Equal(s.Size, await store.SumOpenSizeForUserAsync(user, now));
+        Assert.Equal(0, await store.CountOpenForUserAsync(user, now.AddHours(24)));
+        Assert.Equal(0L, await store.SumOpenSizeForUserAsync(Guid.NewGuid(), now));
+
+        var grows = 0;
+        await Task.WhenAll(new[] { 3L, 9L, 6L, 9L }.Select(n => store.EnsureStagingSizeAsync(s.Id, n,
+            _ => { Interlocked.Increment(ref grows); return Task.CompletedTask; })));
+        Assert.Equal(9, (await store.GetAsync(s.Id))!.StagingSize);
+        Assert.InRange(grows, 1, 2);
+        await Assert.ThrowsAsync<IOException>(() => store.EnsureStagingSizeAsync(s.Id, 20, _ => throw new IOException()));
+        Assert.Equal(9, (await store.GetAsync(s.Id))!.StagingSize);
         Assert.Contains(await store.ListActiveForPathAsync(target, "Docs/a b#.bin", now), x => x.Id == s.Id);
         Assert.Empty(await store.ListActiveForPathAsync(target, "Docs/a b#.bin", now.AddHours(24)));
         var claimed = now.AddMinutes(3);
@@ -180,14 +197,34 @@ public class PgStoresIntegrationTests
             requireClaim: true, expectedClaim: claimed));
         Assert.DoesNotContain(await store.ListStuckCompletingAsync(claimed), x => x.Id == s.Id);
         Assert.False(await store.TrySetStatusAsync(s.Id, UploadStatus.Open, UploadStatus.Aborted));
-        Assert.DoesNotContain(await store.ListExpiredOpenAsync(now.AddHours(25)), x => x.Id == s.Id);
+        Assert.DoesNotContain(await store.ListSweepableOpenAsync(now.AddHours(25), now.AddHours(25)), x => x.Id == s.Id);
         Assert.Null(await store.FindResumableAsync(user, target, "Docs/a b#.bin", s.Size, now));
         await store.SetStatusAsync(s.Id, UploadStatus.Completed);
         Assert.Equal(UploadStatus.Completed, (await store.GetAsync(s.Id))!.Status);
 
-        Assert.True(await store.PurgeExpiredBeforeAsync(now.AddHours(24).AddMinutes(1)) >= 1);
+        var purgedCompleted = await store.PurgeAsync(now.AddHours(24).AddMinutes(1), now.AddDays(-1));
+        Assert.True(purgedCompleted.Deleted >= 1);
         Assert.Null(await store.GetAsync(s.Id));
         Assert.Empty(await store.ReceivedChunksAsync(s.Id));
+
+        // An Aborted row keeps its place until its staging is confirmed removed, or the hard cutoff passes.
+        var aborted = s with { Id = Guid.NewGuid(), Status = UploadStatus.Aborted, StagingPath = "Docs/.x.cssupload-y" };
+        await store.CreateAsync(aborted);
+        Assert.Contains(await store.ListAbortedWithStagingAsync(), x => x.Id == aborted.Id);
+        await store.PurgeAsync(now.AddHours(25), now.AddDays(-1));
+        Assert.NotNull(await store.GetAsync(aborted.Id));
+        var hard = await store.PurgeAsync(now.AddHours(25), now.AddHours(25));
+        Assert.Contains(hard.Abandoned, a => a.SessionId == aborted.Id && a.StagingPath == "Docs/.x.cssupload-y");
+        Assert.Null(await store.GetAsync(aborted.Id));
+
+        var cleaned = s with { Id = Guid.NewGuid(), Status = UploadStatus.Aborted, TargetKind = StorageKind.BlobContainer };
+        await store.CreateAsync(cleaned);
+        await store.SetStagingRemovedAsync(cleaned.Id);
+        Assert.DoesNotContain(await store.ListAbortedWithStagingAsync(), x => x.Id == cleaned.Id);
+        Assert.Equal(StorageKind.BlobContainer, (await store.GetAsync(cleaned.Id))!.TargetKind);
+        var soft = await store.PurgeAsync(now.AddHours(25), now.AddDays(-1));
+        Assert.DoesNotContain(soft.Abandoned, a => a.SessionId == cleaned.Id);
+        Assert.Null(await store.GetAsync(cleaned.Id));
 
         var other = s with { Id = Guid.NewGuid() };
         await store.CreateAsync(other);

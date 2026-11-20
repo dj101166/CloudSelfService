@@ -2,7 +2,6 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text.Json;
-using CloudSelfService.Endpoints;
 using CloudSelfService.Models;
 using CloudSelfService.Services.Data;
 using CloudSelfService.Services.Transfers;
@@ -182,7 +181,7 @@ public sealed class UploadEndpointTests : IDisposable
         Assert.True(begin.StatusCode is HttpStatusCode.Redirect or HttpStatusCode.Unauthorized);
         Assert.True(token.StatusCode is HttpStatusCode.Redirect or HttpStatusCode.Unauthorized);
         Assert.DoesNotContain(_factory.Storage.Calls, c => c.StartsWith("BeginUpload"));
-        Assert.Empty(await _factory.Services.GetRequiredService<IUploadSessionStore>().ListExpiredOpenAsync(DateTimeOffset.MaxValue));
+        Assert.Empty(await _factory.Services.GetRequiredService<IUploadSessionStore>().ListSweepableOpenAsync(DateTimeOffset.MaxValue, DateTimeOffset.MaxValue));
     }
 
     [Theory]
@@ -350,6 +349,160 @@ public sealed class UploadEndpointTests : IDisposable
         Assert.Equal(HttpStatusCode.TooManyRequests, third.StatusCode);
     }
 
+    // ---- Round 3: M2 chunk bucket, L4 request shape, R32 caps over HTTP ----
+
+    [Fact]
+    public async Task PutChunks_PerUserBucket_429BusyAfterChunksPerMinute()
+    {
+        using var factory = new TestAppFactory(("Transfers:ChunksPerMinute", "3"));
+        var client = await factory.CreateClientAs("customer-contribute");
+        var other = await factory.CreateClientAs("customer-full");
+        var token = await TokenAsync(client);
+        var otherToken = await TokenAsync(other);
+        var target = await factory.DemoTargetAsync("Contribute");
+        var otherTarget = await factory.DemoTargetAsync("Full");
+        var file = Bytes(10);
+        var session = (await JsonOf(await client.SendAsync(Begin(token, target.Id, "", "a.bin", file.Length)))).GetProperty("sessionId").GetGuid();
+        var otherSession = (await JsonOf(await other.SendAsync(Begin(otherToken, otherTarget.Id, "", "a.bin", file.Length)))).GetProperty("sessionId").GetGuid();
+
+        for (var i = 0; i < 3; i++)
+            Assert.Equal(HttpStatusCode.NoContent, (await client.SendAsync(Chunk(token, session, 0, file))).StatusCode);
+        var fourth = await client.SendAsync(Chunk(token, session, 0, file));
+
+        await AssertError(fourth, HttpStatusCode.TooManyRequests, UploadErrorCodes.Busy);
+        Assert.Equal(HttpStatusCode.NoContent, (await other.SendAsync(Chunk(otherToken, otherSession, 0, file))).StatusCode);
+    }
+
+    [Fact]
+    public async Task PutChunks_GlobalConcurrencyCap_AppliesAcrossUsers()
+    {
+        using var factory = new TestAppFactory(("Transfers:MaxConcurrentChunksTotal", "1"));
+        var client = await factory.CreateClientAs("customer-contribute");
+        var other = await factory.CreateClientAs("customer-full");
+        var token = await TokenAsync(client);
+        var otherToken = await TokenAsync(other);
+        var target = await factory.DemoTargetAsync("Contribute");
+        var otherTarget = await factory.DemoTargetAsync("Full");
+        var file = Bytes(10);
+        var session = (await JsonOf(await client.SendAsync(Begin(token, target.Id, "", "a.bin", file.Length)))).GetProperty("sessionId").GetGuid();
+        var otherSession = (await JsonOf(await other.SendAsync(Begin(otherToken, otherTarget.Id, "", "a.bin", file.Length)))).GetProperty("sessionId").GetGuid();
+
+        var gate = new TaskCompletionSource();
+        var entered = new TaskCompletionSource();
+        factory.Storage.FailOnCall = call =>
+        {
+            if (!call.StartsWith("WriteChunk") || entered.Task.IsCompleted) return null;
+            entered.TrySetResult();
+            gate.Task.Wait();
+            return null;
+        };
+        var held = client.SendAsync(Chunk(token, session, 0, file));
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        var blocked = await other.SendAsync(Chunk(otherToken, otherSession, 0, file));
+        gate.SetResult();
+
+        await AssertError(blocked, HttpStatusCode.TooManyRequests, UploadErrorCodes.Busy);
+        Assert.Equal(HttpStatusCode.NoContent, (await held).StatusCode);
+    }
+
+    [Fact]
+    public async Task PutChunk_MalformedMd5_RejectedBeforeSessionLookup()
+    {
+        using var failing = _factory.WithWebHostBuilder(b => b.ConfigureTestServices(s =>
+            s.AddSingleton<IUploadSessionStore, ThrowingSessionStore>()));
+        var client = failing.CreateClient(new() { AllowAutoRedirect = false, HandleCookies = true });
+        await client.GetAsync("/dev/signin?as=customer-contribute");
+
+        var response = await client.SendAsync(Chunk(await TokenAsync(client), Guid.NewGuid(), 0, Bytes(10), "nope"));
+
+        await AssertError(response, HttpStatusCode.BadRequest, UploadErrorCodes.Invalid);
+    }
+
+    [Theory]
+    [InlineData("text/plain")]
+    [InlineData("application/x-www-form-urlencoded")]
+    [InlineData("multipart/form-data; boundary=x")]
+    public async Task Begin_NonJsonContentType_415(string contentType)
+    {
+        var (client, token, target) = await ContributorAsync();
+        var content = new StringContent($"{{\"targetId\":\"{target.Id}\",\"folder\":\"\",\"fileName\":\"a.bin\",\"size\":1}}");
+        content.Headers.Remove("Content-Type");
+        content.Headers.TryAddWithoutValidation("Content-Type", contentType);
+
+        var response = await client.SendAsync(Request(HttpMethod.Post, "/api/uploads", token, content));
+
+        await AssertError(response, HttpStatusCode.UnsupportedMediaType, UploadErrorCodes.Invalid);
+        Assert.DoesNotContain(_factory.Storage.Calls, c => c.StartsWith("BeginUpload"));
+    }
+
+    [Fact]
+    public async Task Complete_TextBody_415_EmptyBody_Allowed()
+    {
+        var (client, token, target) = await ContributorAsync();
+        var session = await BeginOkAsync(client, token, target, "a.bin", 0);
+
+        var text = await client.SendAsync(Request(HttpMethod.Post, $"/api/uploads/{session}/complete", token,
+            new StringContent("x", System.Text.Encoding.UTF8, "text/plain")));
+        var empty = await client.SendAsync(Request(HttpMethod.Post, $"/api/uploads/{session}/complete", token));
+
+        await AssertError(text, HttpStatusCode.UnsupportedMediaType, UploadErrorCodes.Invalid);
+        Assert.Equal(HttpStatusCode.NoContent, empty.StatusCode);
+    }
+
+    [Fact]
+    public async Task Begin_BodyOver16KiB_413()
+    {
+        var (client, token, target) = await ContributorAsync();
+        var padded = JsonContent.Create(new { targetId = target.Id, folder = "", fileName = "a.bin", size = 1, pad = new string('x', 17 * 1024) });
+
+        var response = await client.SendAsync(Request(HttpMethod.Post, "/api/uploads", token, padded));
+
+        await AssertError(response, HttpStatusCode.RequestEntityTooLarge, UploadErrorCodes.TooLarge);
+    }
+
+    [Fact]
+    public async Task Begin_TooManyUploads_429Busy()
+    {
+        using var factory = new TestAppFactory(("Transfers:MaxOpenSessionsPerUser", "1"));
+        var client = await factory.CreateClientAs("customer-contribute");
+        var token = await TokenAsync(client);
+        var target = await factory.DemoTargetAsync("Contribute");
+
+        Assert.Equal(HttpStatusCode.OK, (await client.SendAsync(Begin(token, target.Id, "", "a.bin", 1))).StatusCode);
+        var second = await client.SendAsync(Begin(token, target.Id, "", "b.bin", 1));
+
+        await AssertError(second, HttpStatusCode.TooManyRequests, UploadErrorCodes.Busy);
+        Assert.Equal("You have too many uploads in progress. Finish or cancel one, then try again.",
+            (await JsonOf(second)).GetProperty("error").GetString());
+        Assert.Equal("5", second.Headers.GetValues("Retry-After").Single());
+    }
+
+    [Fact]
+    public async Task Begin_AuditsUploadBegin()
+    {
+        var (client, token, target) = await ContributorAsync();
+
+        await BeginOkAsync(client, token, target, "a.bin", 42);
+
+        var row = Assert.Single(await _factory.Services.GetRequiredService<IAuditStore>().QueryAsync(new AuditQuery(Operation: "UploadBegin")));
+        Assert.Equal(("Uploads/a.bin", 42L), (row.Path, row.Bytes!.Value));
+    }
+
+    [Fact]
+    public async Task PutChunk_SetsMinimumBodyDataRate()
+    {
+        // TestServer has no Kestrel rate feature; this pins that the guard tolerates its absence and the config is read.
+        using var factory = new TestAppFactory(("Transfers:MinChunkBytesPerSecond", "1"));
+        var client = await factory.CreateClientAs("customer-contribute");
+        var token = await TokenAsync(client);
+        var target = await factory.DemoTargetAsync("Contribute");
+        var file = Bytes(10);
+        var session = (await JsonOf(await client.SendAsync(Begin(token, target.Id, "", "a.bin", file.Length)))).GetProperty("sessionId").GetGuid();
+
+        Assert.Equal(HttpStatusCode.NoContent, (await client.SendAsync(Chunk(token, session, 0, file))).StatusCode);
+    }
+
     // ---- R29: machine-readable error codes ----
 
     [Fact]
@@ -469,28 +622,5 @@ public sealed class UploadEndpointTests : IDisposable
 
         await AssertError(await full.SendAsync(Begin(await TokenAsync(full), blob.Id, "", "a.bin", 1)),
             HttpStatusCode.Conflict, UploadErrorCodes.InProgress);
-    }
-
-    private sealed class ThrowingSessionStore : IUploadSessionStore
-    {
-        private static Exception Down() => new InvalidOperationException("db down");
-        public Task CreateAsync(UploadSession s, CancellationToken ct = default) => throw Down();
-        public Task<UploadSession?> GetAsync(Guid id, CancellationToken ct = default) => throw Down();
-        public Task<UploadSession?> FindResumableAsync(Guid userId, Guid targetId, string finalPath, long size, DateTimeOffset now,
-            CancellationToken ct = default) => throw Down();
-        public Task MarkChunkAsync(Guid id, int index, DateTimeOffset at, CancellationToken ct = default) => throw Down();
-        public Task<IReadOnlyList<int>> ReceivedChunksAsync(Guid id, CancellationToken ct = default) => throw Down();
-        public Task SetStatusAsync(Guid id, string status, CancellationToken ct = default) => throw Down();
-        public Task<bool> TrySetStatusAsync(Guid id, string expected, string next, DateTimeOffset? claimedAt = null,
-            CancellationToken ct = default, bool requireClaim = false, DateTimeOffset? expectedClaim = null) => throw Down();
-        public Task<IReadOnlyList<UploadSession>> ListActiveForPathAsync(Guid targetId, string finalPath, DateTimeOffset now,
-            CancellationToken ct = default) => throw Down();
-        public Task<IReadOnlyList<UploadSession>> ListStuckCompletingAsync(DateTimeOffset claimedBefore, CancellationToken ct = default) =>
-            Task.FromResult<IReadOnlyList<UploadSession>>(Array.Empty<UploadSession>());
-        public Task SetOverwriteAsync(Guid id, bool overwrite, CancellationToken ct = default) => throw Down();
-        public Task<IReadOnlyList<UploadSession>> ListExpiredOpenAsync(DateTimeOffset now, CancellationToken ct = default) =>
-            Task.FromResult<IReadOnlyList<UploadSession>>(Array.Empty<UploadSession>());
-        public Task DeleteAsync(Guid id, CancellationToken ct = default) => throw Down();
-        public Task<int> PurgeExpiredBeforeAsync(DateTimeOffset cutoff, CancellationToken ct = default) => Task.FromResult(0);
     }
 }

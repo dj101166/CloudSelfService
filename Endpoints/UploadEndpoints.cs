@@ -4,6 +4,8 @@ using CloudSelfService.Services.Identity;
 using CloudSelfService.Services.Transfers;
 using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Http.Features;
+using Microsoft.AspNetCore.Server.Kestrel.Core;
+using Microsoft.AspNetCore.Server.Kestrel.Core.Features;
 
 namespace CloudSelfService.Endpoints;
 
@@ -17,6 +19,11 @@ public static class UploadEndpoints
     public const string AntiforgeryMessage = "The request is missing a valid antiforgery token. Reload the page and try again.";
     public const string BadBodyMessage = "The request body is not a valid upload request.";
     public const string TooLargeMessage = "An upload piece is larger than the 4 MiB piece size.";
+    public const string ControlBodyTooLargeMessage = "The request body is too large.";
+    public const string JsonRequiredMessage = "Send this request as application/json.";
+    /// <summary>Begin's JSON is a few hundred bytes; every non-chunk upload route gets this body cap.</summary>
+    public const long ControlBodyLimit = 16 * 1024;
+    public const int DefaultMinChunkBytesPerSecond = 64 * 1024;
 
     public static void MapUploadEndpoints(this WebApplication app)
     {
@@ -28,17 +35,37 @@ public static class UploadEndpoints
         uploads.MapDelete("/{id:guid}", AbortAsync).RequireRateLimiting(RateLimits.Transfers);
     }
 
-    // Runs before the handler reads any body: same-origin fetch, body limit, antiforgery, then a user id.
+    // Runs before the handler reads any body: same-origin fetch, body limits, content type, antiforgery, then a user id.
     private static async ValueTask<object?> GuardAsync(EndpointFilterInvocationContext invocation, EndpointFilterDelegate next)
     {
         var ctx = invocation.HttpContext;
         ctx.Response.Headers.CacheControl = "no-store";
-        // The chunk PUT is the group's only PUT. Its limit is set before antiforgery, which may read a form body.
-        if (HttpMethods.IsPut(ctx.Request.Method)
-            && ctx.Features.Get<IHttpMaxRequestBodySizeFeature>() is { IsReadOnly: false } limit)
-            limit.MaxRequestBodySize = ChunkMath.ChunkSize;
+        var isChunk = HttpMethods.IsPut(ctx.Request.Method);
+        // Limits are set before antiforgery, which may read a form body. The chunk PUT is the group's only PUT.
+        if (ctx.Features.Get<IHttpMaxRequestBodySizeFeature>() is { IsReadOnly: false } limit)
+            limit.MaxRequestBodySize = isChunk ? ChunkMath.ChunkSize : ControlBodyLimit;
+        if (isChunk && ctx.Features.Get<IHttpMinRequestBodyDataRateFeature>() is { } rate)
+        {
+            // A client trickling a piece in would otherwise hold a buffer and a concurrency slot indefinitely.
+            var minRate = Math.Max(1, ctx.RequestServices.GetRequiredService<IConfiguration>()
+                .GetValue<int?>("Transfers:MinChunkBytesPerSecond") ?? DefaultMinChunkBytesPerSecond);
+            rate.MinDataRate = new MinDataRate(minRate, TimeSpan.FromSeconds(5));
+        }
         if (ctx.Request.Headers["Sec-Fetch-Site"].ToString() is "cross-site" or "same-site")
             return Error(StatusCodes.Status403Forbidden, CrossSiteMessage, UploadErrorCodes.Denied);
+        if (ctx.Request.ContentLength > (isChunk ? ChunkMath.ChunkSize : ControlBodyLimit))
+            return isChunk
+                ? Error(StatusCodes.Status413PayloadTooLarge, TooLargeMessage, UploadErrorCodes.TooLarge)
+                : Error(StatusCodes.Status413PayloadTooLarge, ControlBodyTooLargeMessage, UploadErrorCodes.TooLarge);
+        // Begin and Complete are the POSTs. Begin must be JSON; Complete may also have no body at all. Any other media
+        // type (a form or text POST, which a plain cross-site form can send without a preflight) is refused.
+        if (HttpMethods.IsPost(ctx.Request.Method) && !ctx.Request.HasJsonContentType())
+        {
+            var isComplete = ctx.Request.Path.Value?.EndsWith("/complete", StringComparison.OrdinalIgnoreCase) == true;
+            var emptyBody = string.IsNullOrEmpty(ctx.Request.ContentType) && ctx.Request.ContentLength is null or 0;
+            if (!(isComplete && emptyBody))
+                return Error(StatusCodes.Status415UnsupportedMediaType, JsonRequiredMessage, UploadErrorCodes.Invalid);
+        }
         // ValidateRequestAsync, not IsRequestValidAsync: the latter waves GET through, and the status route is a GET.
         try
         {
@@ -58,10 +85,19 @@ public static class UploadEndpoints
         {
             if (!ctx.Request.HasJsonContentType())
                 return Error(StatusCodes.Status400BadRequest, BadBodyMessage, UploadErrorCodes.Invalid);
+            // Read through our own cap: a chunked body has no Content-Length for the guard to check, and the server's
+            // MaxRequestBodySize is not enforced by every host.
+            var body = new byte[ControlBodyLimit + 1];
+            var read = 0;
+            int n;
+            while (read < body.Length && (n = await ctx.Request.Body.ReadAsync(body.AsMemory(read), ct)) > 0)
+                read += n;
+            if (read > ControlBodyLimit)
+                return Error(StatusCodes.Status413PayloadTooLarge, ControlBodyTooLargeMessage, UploadErrorCodes.TooLarge);
             BeginUploadRequest? request;
             try
             {
-                request = await ctx.Request.ReadFromJsonAsync<BeginUploadRequest>(JsonSerializerOptions.Web, ct);
+                request = JsonSerializer.Deserialize<BeginUploadRequest>(body.AsSpan(0, read), JsonSerializerOptions.Web);
             }
             catch (JsonException)
             {
@@ -86,11 +122,8 @@ public static class UploadEndpoints
     private static Task<IResult> PutChunkAsync(Guid id, int index, HttpContext ctx, UploadSessionService uploads, ILoggerFactory loggers) =>
         RunAsync(ctx, loggers, "chunk", async (userId, audit, ct) =>
         {
-            // A declared length over the piece size is refused before reading. A body with no declared length can't
-            // pass the service's exact-length check, so Kestrel's body limit is a backstop rather than a reachable path.
-            if (ctx.Request.ContentLength > ChunkMath.ChunkSize)
-                return Error(StatusCodes.Status413PayloadTooLarge, TooLargeMessage, UploadErrorCodes.TooLarge);
-
+            // Format checks (length, MD5 header) run inside the service before any database call. A declared length
+            // over the piece size was refused by the guard; Kestrel's body limit is the backstop.
             var result = await uploads.PutChunkAsync(userId, id, index, ctx.Request.Body, ctx.Request.ContentLength,
                 ctx.Request.Headers["Content-MD5"].ToString(), audit, ct);
             return result.Outcome == AccessOutcome.Ok ? Results.NoContent() : ErrorFor(result.Outcome, result.Message, result.Code);
@@ -140,8 +173,20 @@ public static class UploadEndpoints
         AccessOutcome.Invalid => Error(StatusCodes.Status400BadRequest, message, code ?? UploadErrorCodes.Invalid),
         AccessOutcome.AlreadyExists => Error(StatusCodes.Status409Conflict, message, UploadErrorCodes.Exists),
         AccessOutcome.Conflict => Error(StatusCodes.Status409Conflict, message, code ?? UploadErrorCodes.Restart),
+        AccessOutcome.Busy => Busy(message),
         _ => Error(StatusCodes.Status503ServiceUnavailable, message ?? DownloadEndpoints.UnavailableMessage, UploadErrorCodes.Unavailable),
     };
+
+    private static IResult Busy(string? message) => new BusyResult(message ?? RateLimits.RejectedMessage);
+
+    private sealed class BusyResult(string message) : IResult
+    {
+        public Task ExecuteAsync(HttpContext httpContext)
+        {
+            httpContext.Response.Headers.RetryAfter = "5";
+            return Error(StatusCodes.Status429TooManyRequests, message, UploadErrorCodes.Busy).ExecuteAsync(httpContext);
+        }
+    }
 
     internal static IResult Error(int status, string? message, string code) =>
         Results.Json(new { error = message ?? "", code }, statusCode: status);

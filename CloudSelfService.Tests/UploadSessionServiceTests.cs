@@ -1,5 +1,5 @@
 using System.Security.Cryptography;
-using CloudSelfService.Endpoints;
+using CloudSelfService.Tests.Infrastructure;
 using CloudSelfService.Models;
 using CloudSelfService.Services;
 using CloudSelfService.Services.Access;
@@ -65,10 +65,11 @@ public class UploadSessionServiceTests
         public override DateTimeOffset GetUtcNow() => Now;
     }
 
-    private UploadSessionService Service(long? maxBytes = null, IUploadSessionStore? sessions = null)
+    private UploadSessionService Service(long? maxBytes = null, IUploadSessionStore? sessions = null, int? maxOpen = null)
     {
         var settings = new Dictionary<string, string?> { ["Transfers:ParallelChunks"] = "6" };
         if (maxBytes is not null) settings["Transfers:MaxUploadBytes"] = maxBytes.ToString();
+        if (maxOpen is not null) settings["Transfers:MaxOpenSessionsPerUser"] = maxOpen.ToString();
         var config = new ConfigurationBuilder().AddInMemoryCollection(settings).Build();
         var audit = new AuditService(_audit, NullLogger<AuditService>.Instance);
         var access = new StorageAccessService(_users, _customers, _targets, _grants, _fake, audit, new OwnerConfig(""),
@@ -77,12 +78,17 @@ public class UploadSessionServiceTests
             NullLogger<UploadSessionService>.Instance);
     }
 
-    private UploadCleanupService Cleanup(int? completingTimeoutMinutes = null) =>
+    private UploadCleanupService Cleanup(int? completingTimeoutMinutes = null, int? idleMinutes = null) =>
         new(_sessions, _targets, _users, _fake, new AuditService(_audit, NullLogger<AuditService>.Instance), _time,
             new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
             {
                 ["Transfers:CompletingTimeoutMinutes"] = completingTimeoutMinutes?.ToString(),
+                ["Transfers:IdleSessionMinutes"] = idleMinutes?.ToString(),
             }).Build(), NullLogger<UploadCleanupService>.Instance);
+
+    // Every audit row except the UploadBegin rows Begin writes.
+    private async Task<IReadOnlyList<AuditEvent>> NonBeginAudits() =>
+        (await _audit.QueryAsync(new AuditQuery())).Where(e => e.Operation != UploadSessionService.BeginOperation).ToList();
 
     private static byte[] Bytes(int n, int seed = 7) =>
         Enumerable.Range(0, n).Select(i => (byte)((i * 31 + seed) % 251)).ToArray();
@@ -109,12 +115,10 @@ public class UploadSessionServiceTests
         return result.Value!;
     }
 
-    private async Task SeedFile(StorageTarget t, string path, byte[] data)
+    private Task SeedFile(StorageTarget t, string path, byte[] data)
     {
-        var staging = path + ".seed";
-        await _fake.BeginUploadAsync(t, staging, data.Length, default);
-        await _fake.WriteChunkAsync(t, staging, path, "s0", 0, new MemoryStream(data), data.Length, MD5.HashData(data), default);
-        await _fake.CompleteUploadAsync(t, staging, path, new[] { "s0" }, true, default);
+        _fake.SeedFile(t.Id, path, data);
+        return Task.CompletedTask;
     }
 
     private async Task<byte[]> ReadFile(StorageTarget t, string path)
@@ -137,7 +141,7 @@ public class UploadSessionServiceTests
         Assert.Equal(AccessOutcome.Denied, result.Outcome);
         Assert.Null(result.Value);
         Assert.DoesNotContain(_fake.Calls, c => c.StartsWith("BeginUpload"));
-        Assert.Empty(await _sessions.ListExpiredOpenAsync(DateTimeOffset.MaxValue));
+        Assert.Empty(await _sessions.ListSweepableOpenAsync(DateTimeOffset.MaxValue, DateTimeOffset.MaxValue));
         Assert.Equal(AuditResult.Denied, Assert.Single(await UploadAudits()).Result);
     }
 
@@ -182,8 +186,8 @@ public class UploadSessionServiceTests
 
         Assert.Equal(AccessOutcome.AlreadyExists, result.Outcome);
         Assert.Equal(StorageErrorMapper.AlreadyExistsMessage, result.Message);
-        Assert.Equal(1, _fake.Calls.Count(c => c.StartsWith("BeginUpload")));
-        Assert.Empty(await _sessions.ListExpiredOpenAsync(DateTimeOffset.MaxValue));
+        Assert.DoesNotContain(_fake.Calls, c => c.StartsWith("BeginUpload"));
+        Assert.Empty(await _sessions.ListSweepableOpenAsync(DateTimeOffset.MaxValue, DateTimeOffset.MaxValue));
     }
 
     [Fact]
@@ -365,7 +369,7 @@ public class UploadSessionServiceTests
 
         Assert.Equal(AccessOutcome.Unavailable, result.Outcome);
         Assert.Null(await _sessions.FindResumableAsync(_contrib.Id, _share.Id, "a.bin", 3, Start));
-        Assert.Empty(await _sessions.ListExpiredOpenAsync(DateTimeOffset.MaxValue));
+        Assert.Empty(await _sessions.ListSweepableOpenAsync(DateTimeOffset.MaxValue, DateTimeOffset.MaxValue));
         _fake.FailOnCall = null;
         Assert.Equal(AccessOutcome.Ok, (await Service().BeginAsync(_contrib.Id,
             new BeginUploadRequest(_share.Id, "", "a.bin", 3, false), Ctx)).Outcome);
@@ -505,7 +509,7 @@ public class UploadSessionServiceTests
         var result = await svc.PutChunkAsync(_contrib.Id, begin.SessionId, 0, new NonSeekableStream(data[..6]), data.Length, Md5(data), Ctx);
 
         Assert.Equal(AccessOutcome.Invalid, result.Outcome);
-        Assert.Equal(StorageErrorMapper.ShortChunkMessage, result.Message);
+        Assert.Equal(UploadSessionService.ShortChunkMessage, result.Message);
         Assert.DoesNotContain(_fake.Calls, c => c.StartsWith("WriteChunk"));
     }
 
@@ -552,7 +556,7 @@ public class UploadSessionServiceTests
         Assert.Equal(AccessOutcome.NotFound, result.Outcome);
         Assert.Equal(AccessOutcome.NotFound, unknown.Outcome);
         Assert.DoesNotContain(_fake.Calls, c => c.StartsWith("WriteChunk"));
-        Assert.Empty(await _audit.QueryAsync(new AuditQuery()));
+        Assert.Empty(await NonBeginAudits());
     }
 
     [Fact]
@@ -626,7 +630,7 @@ public class UploadSessionServiceTests
         await Put(svc, _contrib.Id, begin.SessionId, file, 1);
 
         Assert.Contains($"WriteChunk:a.bin:{ChunkMath.BlockId(begin.SessionId, 1)}", _fake.Calls);
-        Assert.Empty(await _audit.QueryAsync(new AuditQuery()));
+        Assert.Empty(await NonBeginAudits());
     }
 
     // ---- Status ----
@@ -720,7 +724,7 @@ public class UploadSessionServiceTests
 
         await svc.CompleteAsync(_contrib.Id, begin.SessionId, Ctx);
 
-        var row = Assert.Single(await _audit.QueryAsync(new AuditQuery()));
+        var row = Assert.Single(await NonBeginAudits());
         Assert.Equal("Upload", row.Operation);
         Assert.Equal(AuditResult.Success, row.Result);
         Assert.Equal(file.Length, row.Bytes);
@@ -922,25 +926,48 @@ public class UploadSessionServiceTests
         Assert.NotEqual(first.SessionId, second.SessionId);
     }
 
-    [Fact]
-    public async Task Complete_BlobBlocksDiscardedByOtherSession_ConflictAndAborted()
+    // R32 d: the same file at a different size replaces the user's older session for it.
+    [Theory]
+    [InlineData(StorageKind.FileShare)]
+    [InlineData(StorageKind.BlobContainer)]
+    public async Task Begin_SameFileDifferentSize_ReplacesOlderSession(StorageKind kind)
     {
+        var target = kind == StorageKind.FileShare ? _share : _blob;
         var svc = Service();
         var a = Bytes(10, seed: 1);
         var b = Bytes(12, seed: 2);
-        var first = await BeginOk(svc, _contrib, _blob, "", "a.bin", a.Length);
-        var second = await BeginOk(svc, _contrib, _blob, "", "a.bin", b.Length);
+        var first = await BeginOk(svc, _contrib, target, "", "a.bin", a.Length);
         await Put(svc, _contrib.Id, first.SessionId, a, 0);
+        var firstStaging = (await _sessions.GetAsync(first.SessionId))!.StagingPath;
+
+        var second = await BeginOk(svc, _contrib, target, "", "a.bin", b.Length);
+
+        var old = (await _sessions.GetAsync(first.SessionId))!;
+        Assert.Equal(UploadStatus.Aborted, old.Status);
+        Assert.True(old.StagingRemoved);
+        if (kind == StorageKind.FileShare)
+        {
+            Assert.Contains($"AbortUpload:{firstStaging}", _fake.Calls);
+            Assert.Null(_fake.StagingLength(_share.Id, firstStaging));
+        }
+        var row = Assert.Single(await UploadAudits());
+        Assert.Equal(AuditResult.Failed, row.Result);
+        Assert.Equal(UploadSessionService.ReplacedMessage, row.Error);
+        Assert.Equal(AccessOutcome.NotFound, (await Put(svc, _contrib.Id, first.SessionId, a, 0)).Outcome);
         await Put(svc, _contrib.Id, second.SessionId, b, 0);
         Assert.Equal(AccessOutcome.Ok, (await svc.CompleteAsync(_contrib.Id, second.SessionId, Ctx)).Outcome);
+        Assert.Equal(b, await ReadFile(target, "a.bin"));
+    }
 
-        var result = await svc.CompleteAsync(_contrib.Id, first.SessionId, Ctx);
+    [Fact]
+    public async Task Begin_SameFileOtherUserDifferentSize_DoesNotReplace()
+    {
+        var svc = Service();
+        var first = await BeginOk(svc, _contrib, _share, "", "a.bin", 10);
 
-        Assert.Equal(AccessOutcome.Conflict, result.Outcome);
-        Assert.Equal(UploadStatus.Aborted, (await _sessions.GetAsync(first.SessionId))!.Status);
-        Assert.Equal(b, await ReadFile(_blob, "a.bin"));
-        Assert.Contains(await UploadAudits(), r => r.Result == AuditResult.Failed);
-        Assert.Equal(AccessOutcome.NotFound, (await svc.CompleteAsync(_contrib.Id, first.SessionId, Ctx)).Outcome);
+        await BeginOk(svc, _colleague, _share, "", "a.bin", 12);
+
+        Assert.Equal(UploadStatus.Open, (await _sessions.GetAsync(first.SessionId))!.Status);
     }
 
     [Fact]
@@ -955,8 +982,11 @@ public class UploadSessionServiceTests
 
         Assert.Equal(AccessOutcome.Conflict, result.Outcome);
         Assert.Equal(StorageErrorMapper.UploadInterruptedMessage, result.Message);
-        Assert.Equal(UploadStatus.Aborted, (await _sessions.GetAsync(begin.SessionId))!.Status);
-        Assert.Contains(_fake.Calls, c => c.StartsWith("AbortUpload"));
+        var session = (await _sessions.GetAsync(begin.SessionId))!;
+        Assert.Equal(UploadStatus.Aborted, session.Status);
+        // Uncommitted blob blocks need no cleanup, so nothing is deleted and nothing is left for the sweep.
+        Assert.DoesNotContain(_fake.Calls, c => c.StartsWith("AbortUpload"));
+        Assert.True(session.StagingRemoved);
     }
 
     [Fact]
@@ -1119,7 +1149,7 @@ public class UploadSessionServiceTests
         Assert.Equal(AccessOutcome.Ok, result.Outcome);
         Assert.Contains($"AbortUpload:{staging}", _fake.Calls);
         Assert.Equal(UploadStatus.Aborted, (await _sessions.GetAsync(begin.SessionId))!.Status);
-        var row = Assert.Single(await _audit.QueryAsync(new AuditQuery()));
+        var row = Assert.Single(await NonBeginAudits());
         Assert.Equal("Upload", row.Operation);
         Assert.Equal(AuditResult.Failed, row.Result);
         Assert.Equal("Cancelled by user", row.Error);
@@ -1179,6 +1209,424 @@ public class UploadSessionServiceTests
         Assert.Empty(await UploadAudits());
     }
 
+    // ---- Round 3: R32 quota, caps, idle, replacement ----
+
+    [Fact]
+    public async Task Begin_FileShare_StagingCreatedEmpty_NotAtDeclaredSize()
+    {
+        var begin = await BeginOk(Service(), _contrib, _share, "", "huge.iso", 40L * 1024 * 1024 * 1024);
+
+        var staging = (await _sessions.GetAsync(begin.SessionId))!.StagingPath;
+        Assert.Equal(0, _fake.StagingLength(_share.Id, staging));
+        Assert.Equal(0, _fake.TotalStagingBytes);
+    }
+
+    [Fact]
+    public async Task PutChunk_FileShare_GrowsStagingOnlyToHighestWrittenEnd()
+    {
+        var svc = Service();
+        var file = Bytes(9 * Mi + 1);
+        var begin = await BeginOk(svc, _contrib, _share, "", "a.bin", file.Length);
+        var staging = (await _sessions.GetAsync(begin.SessionId))!.StagingPath;
+
+        await Put(svc, _contrib.Id, begin.SessionId, file, 1);
+        Assert.Equal(8L * Mi, _fake.StagingLength(_share.Id, staging));
+        await Put(svc, _contrib.Id, begin.SessionId, file, 0);
+        Assert.Equal(8L * Mi, _fake.StagingLength(_share.Id, staging));
+        Assert.Equal(1, _fake.Calls.Count(c => c.StartsWith("GrowStaging")));
+        await Put(svc, _contrib.Id, begin.SessionId, file, 2);
+        Assert.Equal(file.Length, _fake.StagingLength(_share.Id, staging));
+        Assert.Equal(file.Length, (await _sessions.GetAsync(begin.SessionId))!.StagingSize);
+
+        Assert.Equal(AccessOutcome.Ok, (await svc.CompleteAsync(_contrib.Id, begin.SessionId, Ctx)).Outcome);
+        Assert.Equal(file, await ReadFile(_share, "a.bin"));
+    }
+
+    [Fact]
+    public async Task PutChunk_FileShare_ParallelPiecesNeverShrinkStaging()
+    {
+        var svc = Service();
+        var file = Bytes(16 * Mi);
+        var begin = await BeginOk(svc, _contrib, _share, "", "a.bin", file.Length);
+
+        await Task.WhenAll(new[] { 3, 0, 2, 1 }.Select(i => Task.Run(() => Put(svc, _contrib.Id, begin.SessionId, file, i))));
+
+        var staging = (await _sessions.GetAsync(begin.SessionId))!.StagingPath;
+        Assert.Equal(file.Length, _fake.StagingLength(_share.Id, staging));
+        Assert.Equal(AccessOutcome.Ok, (await svc.CompleteAsync(_contrib.Id, begin.SessionId, Ctx)).Outcome);
+        Assert.Equal(SHA256.HashData(file), SHA256.HashData(await ReadFile(_share, "a.bin")));
+    }
+
+    [Fact]
+    public async Task PutChunk_Blob_NeverGrowsStaging()
+    {
+        var svc = Service();
+        var file = Bytes(10);
+        var begin = await BeginOk(svc, _contrib, _blob, "", "a.bin", file.Length);
+
+        await Put(svc, _contrib.Id, begin.SessionId, file, 0);
+
+        Assert.DoesNotContain(_fake.Calls, c => c.StartsWith("GrowStaging"));
+    }
+
+    [Fact]
+    public async Task Begin_TooManyOpenSessions_Busy()
+    {
+        var svc = Service(maxOpen: 2);
+        await BeginOk(svc, _contrib, _share, "", "a.bin", 1);
+        await BeginOk(svc, _contrib, _share, "", "b.bin", 1);
+
+        var third = await svc.BeginAsync(_contrib.Id, new BeginUploadRequest(_share.Id, "", "c.bin", 1, false), Ctx);
+        var colleague = await svc.BeginAsync(_colleague.Id, new BeginUploadRequest(_share.Id, "", "c.bin", 1, false), Ctx);
+        var resume = await svc.BeginAsync(_contrib.Id, new BeginUploadRequest(_share.Id, "", "a.bin", 1, false), Ctx);
+
+        Assert.Equal(AccessOutcome.Busy, third.Outcome);
+        Assert.Equal(UploadSessionService.TooManyUploadsMessage, third.Message);
+        Assert.Equal(UploadErrorCodes.Busy, third.Code);
+        Assert.Equal(AccessOutcome.Ok, colleague.Outcome);
+        Assert.Equal(AccessOutcome.Ok, resume.Outcome);
+        Assert.Equal(3, _fake.Calls.Count(c => c.StartsWith("BeginUpload")));
+    }
+
+    [Fact]
+    public async Task Begin_ReservedBytesOverLimit_Busy_BeforeAnyStorageCall()
+    {
+        var svc = Service(maxBytes: 100);
+        await BeginOk(svc, _contrib, _share, "", "a.bin", 60);
+        var calls = _fake.Calls.Count;
+
+        var over = await svc.BeginAsync(_contrib.Id, new BeginUploadRequest(_share.Id, "", "b.bin", 41, false), Ctx);
+
+        Assert.Equal(AccessOutcome.Busy, over.Outcome);
+        Assert.Equal(calls, _fake.Calls.Count);
+        Assert.Equal(AccessOutcome.Ok, (await svc.BeginAsync(_contrib.Id, new BeginUploadRequest(_share.Id, "", "c.bin", 40, false), Ctx)).Outcome);
+    }
+
+    [Fact]
+    public async Task Begin_SettledSessionsFreeTheirReservation()
+    {
+        var svc = Service(maxBytes: 100, maxOpen: 1);
+        var first = await BeginOk(svc, _contrib, _share, "", "a.bin", 0);
+        await svc.CompleteAsync(_contrib.Id, first.SessionId, Ctx);
+        var second = await BeginOk(svc, _contrib, _share, "", "b.bin", 100);
+        await svc.AbortAsync(_contrib.Id, second.SessionId, Ctx);
+
+        Assert.Equal(AccessOutcome.Ok, (await svc.BeginAsync(_contrib.Id, new BeginUploadRequest(_share.Id, "", "c.bin", 100, false), Ctx)).Outcome);
+    }
+
+    [Fact]
+    public async Task Begin_ReplacingOlderSessionOfSameFile_DoesNotCountAgainstCaps()
+    {
+        var svc = Service(maxBytes: 100, maxOpen: 1);
+        await BeginOk(svc, _contrib, _share, "", "a.bin", 90);
+
+        var replaced = await svc.BeginAsync(_contrib.Id, new BeginUploadRequest(_share.Id, "", "a.bin", 95, false), Ctx);
+
+        Assert.Equal(AccessOutcome.Ok, replaced.Outcome);
+    }
+
+    [Fact]
+    public async Task Sweep_IdleOpenSession_AbortedBeforeExpiry()
+    {
+        var svc = Service();
+        var file = Bytes(5 * Mi);
+        var idle = await BeginOk(svc, _contrib, _share, "", "idle.bin", file.Length);
+        var active = await BeginOk(svc, _contrib, _share, "", "active.bin", file.Length);
+        _time.Now = Start.AddMinutes(100);
+        await Put(svc, _contrib.Id, active.SessionId, file, 0);
+
+        await Cleanup().SweepAsync(Start.AddMinutes(121), default);
+
+        Assert.Equal(UploadStatus.Aborted, (await _sessions.GetAsync(idle.SessionId))!.Status);
+        Assert.Equal(UploadStatus.Open, (await _sessions.GetAsync(active.SessionId))!.Status);
+        var row = Assert.Single(await UploadAudits());
+        Assert.Equal(UploadCleanupService.ExpiredMessage, row.Error);
+        Assert.Equal("idle.bin", row.Path);
+    }
+
+    [Fact]
+    public async Task Sweep_IdleSessionMinutesFromConfig()
+    {
+        var begin = await BeginOk(Service(), _contrib, _share, "", "a.bin", 3);
+
+        await Cleanup(idleMinutes: 300).SweepAsync(Start.AddMinutes(200), default);
+        Assert.Equal(UploadStatus.Open, (await _sessions.GetAsync(begin.SessionId))!.Status);
+
+        await Cleanup(idleMinutes: 300).SweepAsync(Start.AddMinutes(301), default);
+        Assert.Equal(UploadStatus.Aborted, (await _sessions.GetAsync(begin.SessionId))!.Status);
+    }
+
+    // ---- Round 3: M1 staging cleanup is retried until confirmed ----
+
+    [Fact]
+    public async Task Sweep_AbortFailed_RetriedNextSweep_ThenRowPurgeable()
+    {
+        var begin = await BeginOk(Service(), _contrib, _share, "", "a.bin", 3);
+        var staging = (await _sessions.GetAsync(begin.SessionId))!.StagingPath;
+        _fake.FailOnCall = c => c.StartsWith("AbortUpload") ? new StorageFailureException(StorageFailureKind.Unreachable, "x") : null;
+
+        await Cleanup().SweepAsync(Start.AddHours(25), default);
+        var afterFirst = (await _sessions.GetAsync(begin.SessionId))!;
+        Assert.Equal(UploadStatus.Aborted, afterFirst.Status);
+        Assert.False(afterFirst.StagingRemoved);
+
+        // Past the 7-day retention but staging still unconfirmed: the row is kept.
+        await Cleanup().SweepAsync(Start.AddDays(9), default);
+        Assert.NotNull(await _sessions.GetAsync(begin.SessionId));
+
+        _fake.FailOnCall = null;
+        await Cleanup().SweepAsync(Start.AddDays(9).AddMinutes(30), default);
+        Assert.Null(_fake.StagingLength(_share.Id, staging));
+        Assert.Null(await _sessions.GetAsync(begin.SessionId));
+    }
+
+    [Fact]
+    public async Task Sweep_StagingNeverRemovable_RowDroppedAfter30Days()
+    {
+        var begin = await BeginOk(Service(), _contrib, _share, "", "a.bin", 3);
+        _fake.FailOnCall = c => c.StartsWith("AbortUpload") ? new StorageFailureException(StorageFailureKind.Unreachable, "x") : null;
+        await Cleanup().SweepAsync(Start.AddHours(25), default);
+
+        await Cleanup().SweepAsync(Start.AddDays(30), default);
+        Assert.NotNull(await _sessions.GetAsync(begin.SessionId));
+
+        await Cleanup().SweepAsync(Start.AddDays(31).AddHours(1), default);
+        Assert.Null(await _sessions.GetAsync(begin.SessionId));
+    }
+
+    [Fact]
+    public async Task Begin_BeginUploadFails_StagingRemovedAndConfirmed()
+    {
+        var svc = Service();
+        _fake.FailOnCall = call => call.StartsWith("BeginUpload")
+            ? new StorageFailureException(StorageFailureKind.Unreachable, StorageErrorMapper.UnreachableMessage) : null;
+
+        var result = await svc.BeginAsync(_contrib.Id, new BeginUploadRequest(_share.Id, "", "a.bin", 3, false), Ctx);
+
+        Assert.Equal(AccessOutcome.Unavailable, result.Outcome);
+        Assert.Contains(_fake.Calls, c => c.StartsWith("AbortUpload"));
+        Assert.Empty(await _sessions.ListAbortedWithStagingAsync());
+        Assert.Empty(await _audit.QueryAsync(new AuditQuery(Operation: UploadSessionService.BeginOperation)));
+    }
+
+    [Fact]
+    public async Task Begin_BeginUploadFails_AbortAlsoFails_SweepRetries()
+    {
+        _fake.FailOnCall = call => call.StartsWith("BeginUpload") || call.StartsWith("AbortUpload")
+            ? new StorageFailureException(StorageFailureKind.Unreachable, StorageErrorMapper.UnreachableMessage) : null;
+
+        await Service().BeginAsync(_contrib.Id, new BeginUploadRequest(_share.Id, "", "a.bin", 3, false), Ctx);
+        var pending = Assert.Single(await _sessions.ListAbortedWithStagingAsync());
+
+        _fake.FailOnCall = null;
+        await Cleanup().SweepAsync(Start.AddMinutes(30), default);
+
+        Assert.True((await _sessions.GetAsync(pending.Id))!.StagingRemoved);
+        Assert.Empty(await _sessions.ListAbortedWithStagingAsync());
+    }
+
+    [Fact]
+    public async Task Complete_Lost_AbortFails_SweepRetries()
+    {
+        var svc = Service();
+        var begin = await BeginOk(svc, _contrib, _share, "", "a.bin", 0);
+        _fake.FailOnCall = call =>
+            call.StartsWith("CompleteUpload") ? new StorageFailureException(StorageFailureKind.NotFound, StorageErrorMapper.NotFoundMessage)
+            : call.StartsWith("AbortUpload") ? new StorageFailureException(StorageFailureKind.Unreachable, "x") : null;
+
+        Assert.Equal(AccessOutcome.Conflict, (await svc.CompleteAsync(_contrib.Id, begin.SessionId, Ctx)).Outcome);
+        Assert.False((await _sessions.GetAsync(begin.SessionId))!.StagingRemoved);
+
+        _fake.FailOnCall = null;
+        await Cleanup().SweepAsync(Start.AddMinutes(30), default);
+        Assert.True((await _sessions.GetAsync(begin.SessionId))!.StagingRemoved);
+    }
+
+    // ---- Round 3: L2 audit ----
+
+    [Fact]
+    public async Task Begin_WritesUploadBeginAuditRow()
+    {
+        var svc = Service();
+        await SeedFile(_share, "Docs/b.bin", Bytes(3));
+
+        await BeginOk(svc, _contrib, _share, "Docs", "a.bin", 1234);
+        await BeginOk(svc, _contrib, _share, "Docs", "b.bin", 7, overwrite: true);
+        await BeginOk(svc, _contrib, _share, "Docs", "a.bin", 1234);
+
+        var rows = (await _audit.QueryAsync(new AuditQuery(Operation: UploadSessionService.BeginOperation))).OrderBy(r => r.Path).ToList();
+        Assert.Equal(2, rows.Count);
+        Assert.Equal(("Docs/a.bin", 1234L, ""), (rows[0].Path, rows[0].Bytes!.Value, rows[0].Error));
+        Assert.Equal(("Docs/b.bin", 7L, "overwrite"), (rows[1].Path, rows[1].Bytes!.Value, rows[1].Error));
+        Assert.All(rows, r => Assert.Equal(AuditResult.Success, r.Result));
+        Assert.All(rows, r => Assert.Equal(_contrib.Upn, r.UserDisplay));
+    }
+
+    [Fact]
+    public async Task Complete_OverwriteOfExistingFile_AuditedAsOverwrite()
+    {
+        var svc = Service();
+        await SeedFile(_share, "a.bin", Bytes(3));
+        var overwrite = await BeginOk(svc, _contrib, _share, "", "a.bin", 0, overwrite: true);
+        var fresh = await BeginOk(svc, _contrib, _share, "", "b.bin", 0, overwrite: true);
+
+        await svc.CompleteAsync(_contrib.Id, overwrite.SessionId, Ctx);
+        await svc.CompleteAsync(_contrib.Id, fresh.SessionId, Ctx);
+
+        Assert.Equal("a.bin", Assert.Single(await _audit.QueryAsync(new AuditQuery(Operation: "Overwrite"))).Path);
+        Assert.Equal("b.bin", Assert.Single(await UploadAudits()).Path);
+    }
+
+    // ---- Round 3: L3 staging-name and target-kind guards ----
+
+    [Fact]
+    public async Task Sweep_TamperedStagingPath_NotDeleted()
+    {
+        await SeedFile(_share, "keep.txt", Bytes(4));
+        var begin = await BeginOk(Service(), _contrib, _share, "", "a.bin", 3);
+        var session = (await _sessions.GetAsync(begin.SessionId))!;
+        await _sessions.DeleteAsync(session.Id);
+        await _sessions.CreateAsync(session with { StagingPath = "keep.txt" });
+
+        await Cleanup().SweepAsync(Start.AddHours(25), default);
+
+        Assert.DoesNotContain(_fake.Calls, c => c == "AbortUpload:keep.txt");
+        Assert.Equal(Bytes(4), await ReadFile(_share, "keep.txt"));
+        Assert.False((await _sessions.GetAsync(session.Id))!.StagingRemoved);
+    }
+
+    [Fact]
+    public async Task Sweep_OtherSessionsStagingName_NotDeleted()
+    {
+        var svc = Service();
+        var mine = await BeginOk(svc, _contrib, _share, "", "a.bin", 3);
+        var other = await BeginOk(svc, _contrib, _share, "", "b.bin", 3);
+        var session = (await _sessions.GetAsync(mine.SessionId))!;
+        var otherStaging = (await _sessions.GetAsync(other.SessionId))!.StagingPath;
+        await _sessions.DeleteAsync(session.Id);
+        await _sessions.CreateAsync(session with { StagingPath = otherStaging, ExpiresAt = Start.AddMinutes(1) });
+
+        await Cleanup().SweepAsync(Start.AddMinutes(2), default);
+
+        Assert.Equal(0, _fake.StagingLength(_share.Id, otherStaging));
+        Assert.DoesNotContain(_fake.Calls, c => c == $"AbortUpload:{otherStaging}");
+    }
+
+    [Fact]
+    public async Task Sweep_TargetChangedKind_SkipsStorageCleanup()
+    {
+        var begin = await BeginOk(Service(), _contrib, _share, "", "a.bin", 3);
+        await _targets.UpsertAsync(_share with { Kind = StorageKind.BlobContainer });
+
+        await Cleanup().SweepAsync(Start.AddHours(25), default);
+
+        var session = (await _sessions.GetAsync(begin.SessionId))!;
+        Assert.Equal(UploadStatus.Aborted, session.Status);
+        Assert.False(session.StagingRemoved);
+        Assert.DoesNotContain(_fake.Calls, c => c.StartsWith("AbortUpload"));
+    }
+
+    [Fact]
+    public void StagingIsOwnedBy_OnlyTheDerivedName()
+    {
+        var id = Guid.NewGuid();
+        var s = new UploadSession(id, Guid.NewGuid(), Guid.NewGuid(), "Docs/a.bin", UploadSessionService.StagingPathFor("Docs/a.bin", id),
+            1, ChunkMath.ChunkSize, false, Start, Start, UploadStatus.Open);
+
+        Assert.True(UploadSessionService.StagingIsOwnedBy(s));
+        Assert.False(UploadSessionService.StagingIsOwnedBy(s with { StagingPath = "Docs/a.bin" }));
+        Assert.False(UploadSessionService.StagingIsOwnedBy(s with { StagingPath = UploadSessionService.StagingPathFor("Docs/a.bin", Guid.NewGuid()) }));
+        Assert.False(UploadSessionService.StagingIsOwnedBy(s with { StagingPath = UploadSessionService.StagingPathFor("Other/a.bin", id) }));
+        Assert.True(UploadSessionService.StagingIsOwnedBy(s with { TargetKind = StorageKind.BlobContainer, StagingPath = "Docs/a.bin" }));
+        Assert.False(UploadSessionService.StagingIsOwnedBy(s with { TargetKind = StorageKind.BlobContainer }));
+    }
+
+    // ---- Round 3: carried minors ----
+
+    [Fact]
+    public async Task Complete_FilesStagingGoneAndSomeoneElsesFinalPresent_RestartNotSuccess()
+    {
+        var svc = Service();
+        var data = Bytes(10);
+        await SeedFile(_share, "a.bin", Bytes(4));
+        var begin = await BeginOk(svc, _contrib, _share, "", "a.bin", data.Length, overwrite: true);
+        await Put(svc, _contrib.Id, begin.SessionId, data, 0);
+        await _fake.AbortUploadAsync(_share, (await _sessions.GetAsync(begin.SessionId))!.StagingPath, default);
+
+        var result = await svc.CompleteAsync(_contrib.Id, begin.SessionId, Ctx);
+
+        Assert.Equal(AccessOutcome.Conflict, result.Outcome);
+        Assert.Equal(UploadErrorCodes.Restart, result.Code);
+        Assert.Equal(Bytes(4), await ReadFile(_share, "a.bin"));
+    }
+
+    [Fact]
+    public async Task PutChunk_StagingGone_ConflictRestart()
+    {
+        var svc = Service();
+        var data = Bytes(10);
+        var begin = await BeginOk(svc, _contrib, _share, "", "a.bin", data.Length);
+        await _fake.AbortUploadAsync(_share, (await _sessions.GetAsync(begin.SessionId))!.StagingPath, default);
+
+        var result = await Put(svc, _contrib.Id, begin.SessionId, data, 0);
+
+        Assert.Equal(AccessOutcome.Conflict, result.Outcome);
+        Assert.Equal(UploadErrorCodes.Restart, result.Code);
+    }
+
+    // ---- Round 3: M2 format checks before the database ----
+
+    [Theory]
+    [InlineData(-1, 10L, "AAAAAAAAAAAAAAAAAAAAAA==")]
+    [InlineData(0, null, "AAAAAAAAAAAAAAAAAAAAAA==")]
+    [InlineData(0, 4L * 1024 * 1024 + 1, "AAAAAAAAAAAAAAAAAAAAAA==")]
+    [InlineData(0, 10L, null)]
+    [InlineData(0, 10L, "short")]
+    public async Task PutChunk_MalformedRequest_InvalidWithoutTouchingTheStore(int index, long? length, string? md5)
+    {
+        var svc = Service(sessions: new ThrowingSessionStore());
+
+        var result = await svc.PutChunkAsync(_contrib.Id, Guid.NewGuid(), index, new MemoryStream(), length, md5, Ctx);
+
+        Assert.Equal(AccessOutcome.Invalid, result.Outcome);
+    }
+
+    // ---- Round 3: L1 piece read timeout ----
+
+    [Fact]
+    public async Task PutChunk_StalledBody_TimesOutAsRetry()
+    {
+        var svc = Service();
+        svc.PieceReadTimeout = TimeSpan.FromMilliseconds(200);
+        var data = Bytes(10);
+        var begin = await BeginOk(svc, _contrib, _share, "", "a.bin", data.Length);
+
+        var result = await svc.PutChunkAsync(_contrib.Id, begin.SessionId, 0, new StallingStream(), data.Length, Md5(data), Ctx);
+
+        Assert.Equal(AccessOutcome.Invalid, result.Outcome);
+        Assert.Equal(UploadErrorCodes.Retry, result.Code);
+        Assert.DoesNotContain(_fake.Calls, c => c.StartsWith("WriteChunk"));
+    }
+
+    private sealed class StallingStream : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct = default)
+        {
+            await Task.Delay(Timeout.Infinite, ct);
+            return 0;
+        }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
     // ---- Cleanup ----
 
     [Fact]
@@ -1191,10 +1639,15 @@ public class UploadSessionServiceTests
         var expiredStaging = (await _sessions.GetAsync(expired.SessionId))!.StagingPath;
         var freshStaging = (await _sessions.GetAsync(fresh.SessionId))!.StagingPath;
 
-        await Cleanup().SweepAsync(Start.AddHours(24), default);
+        await Cleanup(idleMinutes: 48 * 60).SweepAsync(Start.AddHours(24), default);
 
         Assert.Equal(UploadStatus.Aborted, (await _sessions.GetAsync(expired.SessionId))!.Status);
         Assert.Equal(UploadStatus.Open, (await _sessions.GetAsync(fresh.SessionId))!.Status);
+        var row = Assert.Single(await UploadAudits());
+        Assert.Equal(AuditResult.Failed, row.Result);
+        Assert.Equal(UploadCleanupService.ExpiredMessage, row.Error);
+        Assert.Equal("old.bin", row.Path);
+        Assert.True((await _sessions.GetAsync(expired.SessionId))!.StagingRemoved);
         Assert.Contains($"AbortUpload:{expiredStaging}", _fake.Calls);
         Assert.DoesNotContain($"AbortUpload:{freshStaging}", _fake.Calls);
     }
@@ -1218,8 +1671,9 @@ public class UploadSessionServiceTests
         var file = Bytes(10);
         var begin = await BeginOk(Service(), _contrib, _share, "Docs", "a.bin", file.Length);
         var session = (await _sessions.GetAsync(begin.SessionId))!;
+        await _fake.GrowStagingAsync(_share, session.StagingPath, file.Length, default);
         await _fake.WriteChunkAsync(_share, session.StagingPath, session.FinalPath, "b0", 0, new MemoryStream(file), file.Length, MD5.HashData(file), default);
-        await _fake.CompleteUploadAsync(_share, session.StagingPath, session.FinalPath, new[] { "b0" }, false, default);
+        await _fake.CompleteUploadAsync(_share, session.StagingPath, session.FinalPath, new[] { "b0" }, false, default, session.Id);
         Assert.True(await _sessions.TrySetStatusAsync(begin.SessionId, UploadStatus.Open, UploadStatus.Completing, Start.AddMinutes(1)));
 
         await Cleanup().SweepAsync(Start.AddMinutes(32), default);
@@ -1391,27 +1845,5 @@ public class UploadSessionServiceTests
         public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
         public override void SetLength(long value) => throw new NotSupportedException();
         public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
-    }
-
-    private sealed class ThrowingSessionStore : IUploadSessionStore
-    {
-        private static Exception Down() => new InvalidOperationException("db down");
-        public Task CreateAsync(UploadSession s, CancellationToken ct = default) => throw Down();
-        public Task<UploadSession?> GetAsync(Guid id, CancellationToken ct = default) => throw Down();
-        public Task<UploadSession?> FindResumableAsync(Guid userId, Guid targetId, string finalPath, long size, DateTimeOffset now,
-            CancellationToken ct = default) => throw Down();
-        public Task MarkChunkAsync(Guid id, int index, DateTimeOffset at, CancellationToken ct = default) => throw Down();
-        public Task<IReadOnlyList<int>> ReceivedChunksAsync(Guid id, CancellationToken ct = default) => throw Down();
-        public Task SetStatusAsync(Guid id, string status, CancellationToken ct = default) => throw Down();
-        public Task<bool> TrySetStatusAsync(Guid id, string expected, string next, DateTimeOffset? claimedAt = null,
-            CancellationToken ct = default, bool requireClaim = false, DateTimeOffset? expectedClaim = null) => throw Down();
-        public Task<IReadOnlyList<UploadSession>> ListActiveForPathAsync(Guid targetId, string finalPath, DateTimeOffset now,
-            CancellationToken ct = default) => throw Down();
-        public Task<IReadOnlyList<UploadSession>> ListStuckCompletingAsync(DateTimeOffset claimedBefore, CancellationToken ct = default) =>
-            Task.FromResult<IReadOnlyList<UploadSession>>(Array.Empty<UploadSession>());
-        public Task SetOverwriteAsync(Guid id, bool overwrite, CancellationToken ct = default) => throw Down();
-        public Task<IReadOnlyList<UploadSession>> ListExpiredOpenAsync(DateTimeOffset now, CancellationToken ct = default) => throw Down();
-        public Task DeleteAsync(Guid id, CancellationToken ct = default) => throw Down();
-        public Task<int> PurgeExpiredBeforeAsync(DateTimeOffset cutoff, CancellationToken ct = default) => throw Down();
     }
 }
