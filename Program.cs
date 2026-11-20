@@ -3,6 +3,7 @@ using CloudSelfService.Authorization;
 using CloudSelfService.Endpoints;
 using CloudSelfService.Models;
 using CloudSelfService.Services;
+using CloudSelfService.Services.Access;
 using CloudSelfService.Services.Data;
 using CloudSelfService.Services.Identity;
 using CloudSelfService.Services.Storage;
@@ -53,6 +54,7 @@ else
     builder.Services.AddSingleton<BlobBackend>();
     builder.Services.AddSingleton<IStorageBackendResolver, StorageBackendResolver>();
 }
+builder.Services.AddScoped<StorageAccessService>();
 builder.Services.AddHsts(options => { options.MaxAge = TimeSpan.FromDays(365); });
 
 builder.Services.AddSingleton(TimeProvider.System);

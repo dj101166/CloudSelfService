@@ -154,6 +154,11 @@ public class AccessPolicyTests
             AccessPolicy.EffectiveLevel(CustomerUser(CustA), Cust(CustA), Target(TargetA, CustA), null));
 
     [Fact]
+    public void EffectiveLevel_CustomerUserWithStaffRoleOwner_NoGrant_None() =>
+        Assert.Equal(AccessLevel.None,
+            AccessPolicy.EffectiveLevel(CustomerUser(CustA) with { StaffRole = StaffRole.Owner }, Cust(CustA), Target(TargetA, CustA), null));
+
+    [Fact]
     public void EffectiveLevel_CustomerUserWithoutCustomerId_None() =>
         Assert.Equal(AccessLevel.None,
             AccessPolicy.EffectiveLevel(CustomerUser(null), Cust(CustA), Target(TargetA, CustA), GrantFor(CustA, TargetA, AccessLevel.Full)));
