@@ -129,4 +129,23 @@ public class StoragePathTests
 
     [Fact]
     public void Combine_Folder_JoinsWithSlash() => Assert.Equal("a/b/x.txt", StoragePath.Combine("a/b", "x.txt"));
+
+    [Fact]
+    public void TryNormalizePath_TotalExactly1024_Accepted()
+    {
+        var raw = string.Join('/', Enumerable.Repeat(new string('a', 204), 5));
+        Assert.Equal(1024, raw.Length);
+
+        Assert.True(StoragePath.TryNormalizePath(raw, out var n, out var error));
+        Assert.Equal(raw, n);
+        Assert.Null(error);
+        Assert.False(StoragePath.TryNormalizePath(raw + "b", out _, out _));
+    }
+
+    [Fact]
+    public void TryNormalizePath_Failure_LeavesNormalizedEmpty()
+    {
+        Assert.False(StoragePath.TryNormalizePath("a/..", out var n, out _));
+        Assert.Equal("", n);
+    }
 }

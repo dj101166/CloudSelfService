@@ -66,9 +66,10 @@ public class StorageAccessServiceTests
         _svc = Service();
     }
 
-    private StorageAccessService Service(IGrantStore? grants = null, IStorageBackendResolver? backends = null) =>
-        new(_users, _customers, _targets, grants ?? _grants, backends ?? _fake,
-            new AuditService(_audit, NullLogger<AuditService>.Instance), new OwnerConfig(OwnerUpn),
+    private StorageAccessService Service(IGrantStore? grants = null, IStorageBackendResolver? backends = null,
+        IAuditStore? audit = null, ITargetStore? targets = null) =>
+        new(_users, _customers, targets ?? _targets, grants ?? _grants, backends ?? _fake,
+            new AuditService(audit ?? _audit, NullLogger<AuditService>.Instance), new OwnerConfig(OwnerUpn),
             new AppRoleHandlerTests.FixedTime(Now), _log);
 
     private static StorageTarget Target(Guid? customerId, string name, StorageKind kind, string container, bool active = true) =>
@@ -658,6 +659,7 @@ public class StorageAccessServiceTests
 
         Assert.Equal(AccessOutcome.Invalid, result.Outcome);
         Assert.Equal(before, _fake.Calls.Count);
+        Assert.Empty(await Audits());
     }
 
     [Fact]
@@ -700,7 +702,9 @@ public class StorageAccessServiceTests
 
         Assert.Equal(AccessOutcome.Denied, result.Outcome);
         Assert.Equal(before, _fake.Calls.Count);
-        Assert.Equal(AuditResult.Denied, Assert.Single(await Audits()).Result);
+        var row = Assert.Single(await Audits());
+        Assert.Equal(AuditResult.Denied, row.Result);
+        Assert.Equal("Docs -> Docs2", row.Path);
     }
 
     [Fact]
@@ -858,6 +862,296 @@ public class StorageAccessServiceTests
     [Fact]
     public async Task Authorize_ListRoot_Ok() =>
         Assert.Equal(AccessOutcome.Ok, (await _svc.AuthorizeAsync(_userB.Id, _tb.Id, StorageOperation.List, "", Ctx)).Outcome);
+
+    // ---- Task 7 gap tests ----
+
+    private const string Hex = "0123456789abcdef0123456789abcdef";
+    private const string UpperHex = "0123456789ABCDEF0123456789ABCDEF";
+
+    public static TheoryData<StorageOperation, string> AuthorizeOps => new()
+    {
+        { StorageOperation.Upload, "x.bin" },
+        { StorageOperation.Overwrite, "x.bin" },
+        { StorageOperation.List, "" },
+    };
+
+    [Theory]
+    [MemberData(nameof(AuthorizeOps))]
+    public async Task Authorize_ForeignOrMissingTarget_DeniedNullValueIdentical_AuditedOnce(StorageOperation op, string path)
+    {
+        var foreign = await _svc.AuthorizeAsync(_fullUserA.Id, _tb.Id, op, path, Ctx);
+        var missing = await _svc.AuthorizeAsync(_fullUserA.Id, Guid.NewGuid(), op, path, Ctx);
+        var empty = await _svc.AuthorizeAsync(_fullUserA.Id, Guid.Empty, op, path, Ctx);
+
+        Assert.Equal(foreign, missing);
+        Assert.Equal(foreign, empty);
+        Assert.Equal(AccessOutcome.Denied, foreign.Outcome);
+        Assert.Null(foreign.Value);
+        Assert.Equal(3, (await Audits()).Count(a => a.Result == AuditResult.Denied));
+        Assert.Empty(_fake.Calls);
+    }
+
+    [Fact]
+    public async Task AuthorizeDownload_ForeignTarget_IndistinguishableFromMissingAndEmptyId()
+    {
+        await PutFile(_tb, "secret.txt", "classified");
+        var before = _fake.Calls.Count;
+
+        var foreign = await _svc.AuthorizeDownloadAsync(_fullUserA.Id, _tb.Id, "secret.txt", Ctx);
+        var missing = await _svc.AuthorizeDownloadAsync(_fullUserA.Id, Guid.NewGuid(), "secret.txt", Ctx);
+        var empty = await _svc.AuthorizeDownloadAsync(_fullUserA.Id, Guid.Empty, "secret.txt", Ctx);
+
+        Assert.Equal(foreign, missing);
+        Assert.Equal(foreign, empty);
+        Assert.Equal(AccessOutcome.Denied, foreign.Outcome);
+        Assert.Null(foreign.Value.Target);
+        Assert.Null(foreign.Value.Item);
+        Assert.Equal(before, _fake.Calls.Count);
+        Assert.Equal(3, (await Audits()).Count(a => a.Result == AuditResult.Denied));
+    }
+
+    [Theory]
+    [InlineData("create")]
+    [InlineData("move")]
+    [InlineData("delete")]
+    public async Task Mutations_ForeignTarget_DeniedAuditedOnce_BackendUntouched(string kind)
+    {
+        await Seed(_tb, "Docs");
+        var before = _fake.Calls.Count;
+
+        var result = kind switch
+        {
+            "create" => await _svc.CreateFolderAsync(_fullUserA.Id, _tb.Id, "", "New", Ctx),
+            "move" => await _svc.MoveAsync(_fullUserA.Id, _tb.Id, "Docs", "Docs2", Ctx),
+            _ => await _svc.DeleteAsync(_fullUserA.Id, _tb.Id, "Docs", Ctx),
+        };
+
+        Assert.Equal(AccessOutcome.Denied, result.Outcome);
+        Assert.Equal(StorageAccessService.DeniedMessage, result.Message);
+        Assert.Equal(before, _fake.Calls.Count);
+        Assert.NotNull(await _fake.GetItemAsync(_tb, "Docs", default));
+        var row = Assert.Single(await Audits());
+        Assert.Equal(AuditResult.Denied, row.Result);
+        Assert.Equal(_custA.Id, row.CustomerId);
+        Assert.Equal(_tb.Id, row.TargetId);
+        if (kind == "move") Assert.Equal("Docs -> Docs2", row.Path);
+    }
+
+    [Fact]
+    public async Task Move_FileShareCaseSubtreeOnForeignTarget_DeniedNotInvalid()
+    {
+        var tbShare = Target(_custB.Id, "Bravo Share", StorageKind.FileShare, "tbshare");
+        await _targets.UpsertAsync(tbShare);
+        await Seed(tbShare, "Docs");
+
+        var foreign = await _svc.MoveAsync(_fullUserA.Id, tbShare.Id, "Docs", "docs/Docs", Ctx);
+        var missing = await _svc.MoveAsync(_fullUserA.Id, Guid.NewGuid(), "Docs", "docs/Docs", Ctx);
+
+        Assert.Equal(foreign, missing);
+        Assert.Equal(AccessOutcome.Denied, foreign.Outcome);
+        Assert.Equal(2, (await Audits()).Count(a => a.Result == AuditResult.Denied));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Authorize_GrantDowngradedOrRevokedBetweenChunks_SecondCallDenied(bool downgrade)
+    {
+        Assert.Equal(AccessOutcome.Ok, (await _svc.AuthorizeAsync(_fullUserA.Id, _ta.Id, StorageOperation.Upload, "big.bin", Ctx)).Outcome);
+
+        if (downgrade) await GrantA(AccessLevel.Read);
+        else await _grants.RemoveAsync(_custA.Id, _ta.Id);
+        var second = await _svc.AuthorizeAsync(_fullUserA.Id, _ta.Id, StorageOperation.Upload, "big.bin", Ctx);
+
+        Assert.Equal(AccessOutcome.Denied, second.Outcome);
+        Assert.Null(second.Value);
+        var row = Assert.Single(await Audits());
+        Assert.Equal(("Upload", AuditResult.Denied), (row.Operation, row.Result));
+    }
+
+    [Fact]
+    public async Task List_UserReassignedToOtherCustomerBetweenCalls_SecondCallDenied()
+    {
+        Assert.Equal(AccessOutcome.Ok, (await _svc.ListAsync(_fullUserA.Id, _ta.Id, "", null, Ctx)).Outcome);
+
+        await _users.UpsertAsync(_fullUserA with { CustomerId = _custB.Id });
+
+        Assert.Equal(AccessOutcome.Denied, (await _svc.ListAsync(_fullUserA.Id, _ta.Id, "", null, Ctx)).Outcome);
+        var reachable = Assert.Single(await _svc.ListReachableTargetsAsync(_fullUserA.Id));
+        Assert.Equal((_tb.Id, AccessLevel.Read), (reachable.Target.Id, reachable.Level));
+        Assert.Equal(_custB.Id, Assert.Single(await Audits()).CustomerId);
+    }
+
+    [Theory]
+    [InlineData(".folder")]
+    [InlineData("Docs/.folder")]
+    [InlineData(".a.txt.cssupload-" + Hex)]
+    [InlineData(".A.TXT.CSSUPLOAD-" + UpperHex)]
+    public async Task Delete_HiddenName_Invalid_NoBackend_NoAudit(string path)
+    {
+        var result = await _svc.DeleteAsync(_fullUserA.Id, _ta.Id, path, Ctx);
+
+        Assert.Equal(AccessOutcome.Invalid, result.Outcome);
+        Assert.Equal(StorageAccessService.ReservedNameMessage, result.Message);
+        Assert.Empty(_fake.Calls);
+        Assert.Empty(await Audits());
+    }
+
+    [Theory]
+    [InlineData("Docs/.folder")]
+    [InlineData(".a.txt.cssupload-" + Hex)]
+    public async Task Move_HiddenNameAsSource_Invalid_NoBackend_NoAudit(string source)
+    {
+        var result = await _svc.MoveAsync(_fullUserA.Id, _ta.Id, source, "x", Ctx);
+
+        Assert.Equal(AccessOutcome.Invalid, result.Outcome);
+        Assert.Equal(StorageAccessService.ReservedNameMessage, result.Message);
+        Assert.Empty(_fake.Calls);
+        Assert.Empty(await Audits());
+    }
+
+    [Theory]
+    [InlineData("a/.folder/b")]
+    [InlineData("a/.x.cssupload-" + Hex + "/b")]
+    public async Task List_HiddenNameInMiddleSegment_Invalid(string folder)
+    {
+        var result = await _svc.ListAsync(_fullUserA.Id, _ta.Id, folder, null, Ctx);
+
+        Assert.Equal(AccessOutcome.Invalid, result.Outcome);
+        Assert.Empty(await Audits());
+        Assert.Empty(_fake.Calls);
+    }
+
+    [Fact]
+    public async Task ListReachable_TargetStoreIgnoresCustomerFilter_StillOnlyOwnGrantedTargets()
+    {
+        var grants = new FixedGrantStore(
+            new Grant(_custA.Id, _ta.Id, AccessLevel.Full, "admin", Now),
+            new Grant(_custA.Id, _tb.Id, AccessLevel.Full, "admin", Now),
+            new Grant(_custA.Id, _internal.Id, AccessLevel.Full, "admin", Now));
+        var svc = Service(grants: grants, targets: new LeakyTargetStore(_targets));
+
+        var result = await svc.ListReachableTargetsAsync(_fullUserA.Id);
+
+        Assert.Equal(_ta.Id, Assert.Single(result).Target.Id);
+    }
+
+    [Fact]
+    public async Task ListReachableAndList_GrantLevelNone_ExcludedAndDenied()
+    {
+        await GrantA(AccessLevel.None);
+
+        Assert.Empty(await _svc.ListReachableTargetsAsync(_fullUserA.Id));
+        var result = await _svc.ListAsync(_fullUserA.Id, _ta.Id, "", null, Ctx);
+
+        Assert.Equal(AccessOutcome.Denied, result.Outcome);
+        Assert.Empty(_fake.Calls);
+    }
+
+    [Fact]
+    public async Task Delete_Cancelled_AuditsFailedCancelled_UsesNonCancellableToken_Rethrows()
+    {
+        var spy = new SpyAuditStore();
+        var svc = Service(backends: new ThrowingBackend(new OperationCanceledException()), audit: spy);
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => svc.DeleteAsync(_fullUserA.Id, _ta.Id, "a.txt", Ctx, cts.Token));
+
+        var row = Assert.Single(spy.Rows);
+        Assert.Equal((AuditResult.Failed, StorageAccessService.CancelledMessage, "a.txt"), (row.Result, row.Error, row.Path));
+        Assert.False(Assert.Single(spy.Tokens).CanBeCanceled);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ListReachable_InactiveUser_Empty(bool customer)
+    {
+        var user = customer ? _fullUserA : _staffAdmin;
+        await _users.UpsertAsync(user with { Active = false });
+
+        Assert.Empty(await _svc.ListReachableTargetsAsync(user.Id));
+    }
+
+    [Fact]
+    public async Task CustomerUserWithNullCustomerId_ListReachableEmpty_ListDenied()
+    {
+        var odd = User(UserKind.Customer, null, "odd@alpha.example", StaffRole.StaffAdmin);
+        await _users.UpsertAsync(odd);
+
+        Assert.Empty(await _svc.ListReachableTargetsAsync(odd.Id));
+        Assert.Equal(AccessOutcome.Denied, (await _svc.ListAsync(odd.Id, _internal.Id, "", null, Ctx)).Outcome);
+        Assert.Equal(AccessOutcome.Denied, (await _svc.ListAsync(odd.Id, _ta.Id, "", null, Ctx)).Outcome);
+        Assert.Equal(2, (await Audits()).Count(a => a.Result == AuditResult.Denied));
+        Assert.Empty(_fake.Calls);
+    }
+
+    [Fact]
+    public async Task List_StoreThrows_PropagatesAndBackendNotCalled()
+    {
+        var svc = Service(grants: new ThrowingGrantStore());
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => svc.ListAsync(_fullUserA.Id, _ta.Id, "", null, Ctx));
+
+        Assert.Empty(_fake.Calls);
+    }
+
+    [Fact]
+    public async Task Denied_ForeignVsMissingTarget_AuditReasonsPinned()
+    {
+        await _svc.ListAsync(_fullUserA.Id, _tb.Id, "", null, Ctx);
+        await _svc.ListAsync(_fullUserA.Id, Guid.NewGuid(), "", null, Ctx);
+
+        var rows = await Audits();
+        Assert.Equal(2, rows.Count);
+        Assert.Equal("access level None; List needs Read", rows.Single(r => r.TargetId == _tb.Id).Error);
+        Assert.Equal("target not found; List needs Read", rows.Single(r => r.TargetId != _tb.Id).Error);
+    }
+
+    public static TheoryData<string, string> BadCreateFolderInputs => new()
+    {
+        { "..", "x" },
+        { ".folder", "x" },
+        { string.Join('/', Enumerable.Repeat(new string('p', 200), 5)), new string('z', 30) },
+    };
+
+    [Theory]
+    [MemberData(nameof(BadCreateFolderInputs))]
+    public async Task CreateFolder_InvalidParentOrOverlongCombined_Invalid_NoAudit_NoBackend(string parent, string name)
+    {
+        var result = await _svc.CreateFolderAsync(_fullUserA.Id, _ta.Id, parent, name, Ctx);
+
+        Assert.Equal(AccessOutcome.Invalid, result.Outcome);
+        Assert.Empty(await Audits());
+        Assert.Empty(_fake.Calls);
+    }
+
+    private sealed class FixedGrantStore(params Grant[] grants) : IGrantStore
+    {
+        public Task<Grant?> GetAsync(Guid customerId, Guid targetId, CancellationToken ct = default) =>
+            Task.FromResult(grants.FirstOrDefault(g => g.CustomerId == customerId && g.TargetId == targetId));
+        public Task<IReadOnlyList<Grant>> ListForCustomerAsync(Guid customerId, CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlyList<Grant>>(grants.Where(g => g.CustomerId == customerId).ToList());
+        public Task SetAsync(Grant g, CancellationToken ct = default) => throw new NotSupportedException();
+        public Task RemoveAsync(Guid customerId, Guid targetId, CancellationToken ct = default) => throw new NotSupportedException();
+    }
+
+    private sealed class LeakyTargetStore(ITargetStore inner) : ITargetStore
+    {
+        public Task<StorageTarget?> GetAsync(Guid id, CancellationToken ct = default) => inner.GetAsync(id, ct);
+        public Task<IReadOnlyList<StorageTarget>> ListAsync(Guid? customerId = null, CancellationToken ct = default) => inner.ListAsync(null, ct);
+        public Task UpsertAsync(StorageTarget t, CancellationToken ct = default) => inner.UpsertAsync(t, ct);
+    }
+
+    private sealed class SpyAuditStore : IAuditStore
+    {
+        public readonly List<AuditEvent> Rows = new();
+        public readonly List<CancellationToken> Tokens = new();
+        public Task AppendAsync(AuditEvent e, CancellationToken ct = default) { Rows.Add(e); Tokens.Add(ct); return Task.CompletedTask; }
+        public Task<IReadOnlyList<AuditEvent>> QueryAsync(AuditQuery q, CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlyList<AuditEvent>>(Rows);
+    }
 
     private sealed class ListLogger : ILogger<StorageAccessService>
     {

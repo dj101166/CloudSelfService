@@ -81,6 +81,18 @@ public class AccessPolicyTests
         Assert.Equal(expected, AccessPolicy.Allows(level, op));
 
     [Fact]
+    public void Required_UnknownOperation_IsFull()
+    {
+        Assert.Equal(AccessLevel.Full, AccessPolicy.Required((StorageOperation)99));
+        Assert.False(AccessPolicy.Allows(AccessLevel.Contribute, (StorageOperation)99));
+    }
+
+    [Fact]
+    public void EffectiveLevel_UnknownStaffRole_None() =>
+        Assert.Equal(AccessLevel.None,
+            AccessPolicy.EffectiveLevel(Staff((StaffRole)99), null, Target(TargetA, null), null));
+
+    [Fact]
     public void Required_Delete_IsFull() =>
         Assert.Equal(AccessLevel.Full, AccessPolicy.Required(StorageOperation.Delete));
 
