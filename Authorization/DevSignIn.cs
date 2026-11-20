@@ -2,6 +2,7 @@ using CloudSelfService.Endpoints;
 using CloudSelfService.Models;
 using CloudSelfService.Services.Data;
 using CloudSelfService.Services.Identity;
+using CloudSelfService.Services.Storage;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Mvc;
@@ -46,6 +47,9 @@ public static class DevSignIn
     public static bool IsEnabled(IHostEnvironment env, IConfiguration config) =>
         IsDevProvider(config) && env.IsDevelopment();
 
+    public static bool UseFakeStorage(IConfiguration config) =>
+        string.Equals(config["Storage:UseFake"], "true", StringComparison.OrdinalIgnoreCase);
+
     public static string UpnFor(string personaKey, IConfiguration config)
     {
         var p = All.First(x => x.Key == personaKey);
@@ -70,6 +74,8 @@ public static class DevSignIn
     {
         if (IsDevProvider(config) && !env.IsDevelopment())
             throw new InvalidOperationException("Dev sign-in cannot run outside Development");
+        if (UseFakeStorage(config) && !env.IsDevelopment())
+            throw new InvalidOperationException("Fake storage cannot run outside Development");
     }
 
     public static void Map(WebApplication app)
@@ -78,7 +84,7 @@ public static class DevSignIn
 
         app.MapGet("/dev/signin", async ([FromQuery(Name = "as")] string? persona, HttpContext ctx,
             IdentityResolver resolver, IConfiguration config, IUserStore users, ICustomerStore customers,
-            ITargetStore targets, IGrantStore grants) =>
+            ITargetStore targets, IGrantStore grants, IServiceProvider services) =>
         {
             var p = All.FirstOrDefault(x => string.Equals(x.Key, persona, StringComparison.OrdinalIgnoreCase));
             if (p is null)
@@ -90,7 +96,7 @@ public static class DevSignIn
             if (p.Kind == PersonaKind.Staff && p.Role != StaffRole.None)
                 await EnsureStaffAsync(users, upn, p, ctx.RequestAborted);
             else if (p.Kind == PersonaKind.Customer)
-                await EnsureCustomerAsync(users, customers, targets, grants, upn, p, ctx.RequestAborted);
+                await EnsureCustomerAsync(users, customers, targets, grants, services.GetService<FakeStorageBackend>(), upn, p, ctx.RequestAborted);
 
             var identity = new EntraIdentity(oid, "dev-tenant", upn, p.Label, IsGuest: p.Kind != PersonaKind.Staff);
             var admission = await resolver.AdmitAsync(identity, AuthEndpoints.AuditContextFor(ctx), ctx.RequestAborted);
@@ -118,7 +124,7 @@ public static class DevSignIn
     // Each customer persona gets its own customer, target and grant: a grant is per customer, so
     // personas sharing one customer could not hold different levels.
     private static async Task EnsureCustomerAsync(IUserStore users, ICustomerStore customers, ITargetStore targets,
-        IGrantStore grants, string upn, Persona p, CancellationToken ct)
+        IGrantStore grants, FakeStorageBackend? fake, string upn, Persona p, CancellationToken ct)
     {
         var levelName = p.Level.ToString();
         var customerName = $"Demo Customer ({levelName})";
@@ -139,6 +145,8 @@ public static class DevSignIn
                 StorageKind.FileShare, share, "core.windows.net", true);
             await targets.UpsertAsync(target, ct);
         }
+
+        fake?.Seed(target.Id);
 
         if (await grants.GetAsync(customer.Id, target.Id, ct) is null)
             await grants.SetAsync(new Grant(customer.Id, target.Id, p.Level, "dev-signin", DateTimeOffset.UtcNow), ct);

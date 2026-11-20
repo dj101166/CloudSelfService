@@ -5,6 +5,7 @@ using CloudSelfService.Models;
 using CloudSelfService.Services;
 using CloudSelfService.Services.Data;
 using CloudSelfService.Services.Identity;
+using CloudSelfService.Services.Storage;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authentication.OpenIdConnect;
 using Microsoft.AspNetCore.Authorization;
@@ -40,6 +41,18 @@ else
     builder.Services.AddSingleton<IAuditStore, InMemoryAuditStore>();
 }
 builder.Services.AddSingleton<AuditService>();
+if (DevSignIn.UseFakeStorage(builder.Configuration) && builder.Environment.IsDevelopment())
+{
+    builder.Services.AddSingleton<FakeStorageBackend>();
+    builder.Services.AddSingleton<IStorageBackendResolver>(sp => sp.GetRequiredService<FakeStorageBackend>());
+}
+else
+{
+    builder.Services.AddSingleton<StorageClientFactory>();
+    builder.Services.AddSingleton<FileShareBackend>();
+    builder.Services.AddSingleton<BlobBackend>();
+    builder.Services.AddSingleton<IStorageBackendResolver, StorageBackendResolver>();
+}
 builder.Services.AddHsts(options => { options.MaxAge = TimeSpan.FromDays(365); });
 
 builder.Services.AddSingleton(TimeProvider.System);

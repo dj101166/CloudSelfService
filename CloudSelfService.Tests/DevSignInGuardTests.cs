@@ -41,6 +41,33 @@ public class DevSignInGuardTests
     }
 
     [Fact]
+    public void AssertSafe_UseFakeStorageInProduction_Throws()
+    {
+        var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Auth:Provider"] = "Entra",
+            ["Storage:UseFake"] = "true",
+        }).Build();
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => DevSignIn.AssertSafe(new Env(Environments.Production), config));
+
+        Assert.Equal("Fake storage cannot run outside Development", ex.Message);
+    }
+
+    [Fact]
+    public void AssertSafe_UseFakeStorageInDevelopment_DoesNotThrow()
+    {
+        var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Auth:Provider"] = "Entra",
+            ["Storage:UseFake"] = "true",
+        }).Build();
+
+        DevSignIn.AssertSafe(new Env(Environments.Development), config);
+    }
+
+    [Fact]
     public void AssertSafe_EntraInProduction_DoesNotThrow()
     {
         DevSignIn.AssertSafe(new Env(Environments.Production), Config("Entra"));
