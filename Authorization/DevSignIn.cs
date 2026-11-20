@@ -84,7 +84,7 @@ public static class DevSignIn
             }
 
             await ctx.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme,
-                AppClaims.PrincipalFor(admission.User, CookieAuthenticationDefaults.AuthenticationScheme));
+                AppClaims.PrincipalFor(admission.User, CookieAuthenticationDefaults.AuthenticationScheme, DateTimeOffset.UtcNow));
             return Results.Redirect("/");
         }).AllowAnonymous();
     }

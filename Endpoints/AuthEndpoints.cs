@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using CloudSelfService.Authorization;
 using CloudSelfService.Models;
+using CloudSelfService.Services.Data;
 using CloudSelfService.Services.Identity;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
@@ -51,7 +52,26 @@ public static class AuthEndpoints
             return;
         }
 
-        ctx.Principal = AppClaims.PrincipalFor(admission.User, CookieAuthenticationDefaults.AuthenticationScheme);
+        ctx.Principal = AppClaims.PrincipalFor(admission.User, CookieAuthenticationDefaults.AuthenticationScheme, DateTimeOffset.UtcNow);
+    }
+
+    /// <summary>
+    /// Re-checks the session against the store on every cookie-authenticated request. Sliding
+    /// expiry and /keepalive would otherwise keep a deactivated or deleted user signed in
+    /// indefinitely.
+    /// </summary>
+    public static async Task OnValidatePrincipalAsync(CookieValidatePrincipalContext ctx)
+    {
+        var sp = ctx.HttpContext.RequestServices;
+        var result = await SessionValidator.ValidateAsync(ctx.Principal, sp.GetRequiredService<IUserStore>(),
+            sp.GetRequiredService<ICustomerStore>(), sp.GetRequiredService<TimeProvider>().GetUtcNow(),
+            SessionLifetime.FromConfiguration(sp.GetRequiredService<IConfiguration>()), ctx.HttpContext.RequestAborted);
+        if (result.Valid) return;
+
+        sp.GetRequiredService<ILoggerFactory>().CreateLogger(typeof(AuthEndpoints))
+            .LogInformation("Session rejected: {Reason}.", result.Reason);
+        ctx.RejectPrincipal();
+        await ctx.HttpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
     }
 
     public static void Map(WebApplication app)

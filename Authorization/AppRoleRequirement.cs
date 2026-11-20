@@ -21,7 +21,13 @@ public sealed class AppRoleRequirement : IAuthorizationRequirement
 public sealed class AppRoleHandler : AuthorizationHandler<AppRoleRequirement>
 {
     private readonly IUserStore _users;
-    public AppRoleHandler(IUserStore users) => _users = users;
+    private readonly IConfiguration _config;
+
+    public AppRoleHandler(IUserStore users, IConfiguration config)
+    {
+        _users = users;
+        _config = config;
+    }
 
     protected override async Task HandleRequirementAsync(AuthorizationHandlerContext context, AppRoleRequirement requirement)
     {
@@ -33,7 +39,8 @@ public sealed class AppRoleHandler : AuthorizationHandler<AppRoleRequirement>
         if (AppClaims.UserIdOf(context.User) is not { } userId) return;
 
         var user = await _users.GetAsync(userId);
-        if (user is { Active: true, Kind: UserKind.Staff } && user.StaffRole >= requirement.MinimumRole)
+        if (user is { Active: true, Kind: UserKind.Staff }
+            && OwnerConfig.EffectiveRole(user, _config) >= requirement.MinimumRole)
             context.Succeed(requirement);
     }
 }

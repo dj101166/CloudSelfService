@@ -84,6 +84,16 @@ public class EntraIdentityTests
     }
 
     [Fact]
+    public void Read_OnlyEmailClaim_FlaggedAsUnverified()
+    {
+        var id = EntraIdentityReader.Read(Principal(("oid", "o-1"), ("iss", OurIssuer), ("acct", "1"), ("email", "pat@customer.example")));
+
+        Assert.Equal("pat@customer.example", id!.Upn);
+        Assert.True(id.UpnFromEmail);
+        Assert.False(EntraIdentityReader.Read(Principal(("oid", "o-1"), ("preferred_username", "pat@customer.example")))!.UpnFromEmail);
+    }
+
+    [Fact]
     public void Read_MissingOid_Null()
     {
         Assert.Null(EntraIdentityReader.Read(Principal(("preferred_username", "sam@advancedutility.com"))));

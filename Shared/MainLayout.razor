@@ -46,7 +46,15 @@
 
         <main class="app__main">
             <div class="app__main-inner">
-                @if (this._pendingRole)
+                @if (this._sessionEnded)
+                {
+                    @* Deliberately not a RedirectToLogin: this renders after an await, where a
+                       navigation during static rendering recurses and kills the host (see
+                       NotAuthorizedRouting). The link goes through /logout to drop the cookie. *@
+                    <h1 class="page-title-main" data-testid="session-ended">Session ended</h1>
+                    <p class="u-muted">Your session is no longer valid. <a href="/logout">Sign in again</a>.</p>
+                }
+                else if (this._pendingRole)
                 {
                     <PendingAccess />
                 }
@@ -70,6 +78,12 @@
     /// <summary>A staff user with no role sees the pending panel instead of any page.</summary>
     private bool _pendingRole;
 
+    /// <summary>
+    /// A signed-in principal whose record no longer validates (deactivated, deleted, re-bound,
+    /// past its absolute lifetime) - seen inside a live circuit, which the cookie check cannot reach.
+    /// </summary>
+    private bool _sessionEnded;
+
     /// <summary>Body is withheld until the role is known, so a pending user never sees a page flash.</summary>
     private bool _resolved;
 
@@ -83,6 +97,7 @@
             || (this.AuthState.IsCompletedSuccessfully && AppClaims.UserIdOf(this.AuthState.Result.User) is null))
         {
             this._pendingRole = false;
+            this._sessionEnded = false;
             this._resolved = true;
             return Task.CompletedTask;
         }
@@ -93,7 +108,8 @@
     private async Task ResolveRoleAsync()
     {
         var user = await this.CurrentUser.GetAsync();
-        this._pendingRole = user is { Kind: UserKind.Staff, Active: true, StaffRole: StaffRole.None };
+        this._sessionEnded = user is null;
+        this._pendingRole = user is { Kind: UserKind.Staff, StaffRole: StaffRole.None };
         this._resolved = true;
     }
 

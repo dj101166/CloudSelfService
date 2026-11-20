@@ -4,6 +4,7 @@ using CloudSelfService.Models;
 using CloudSelfService.Services.Data;
 using CloudSelfService.Services.Identity;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.Extensions.Configuration;
 using Xunit;
 
 namespace CloudSelfService.Tests;
@@ -11,6 +12,12 @@ namespace CloudSelfService.Tests;
 public class AppRoleHandlerTests
 {
     private readonly InMemoryUserStore _users = new();
+
+    internal static IConfiguration Owners(string owners = "") =>
+        new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Authorization:Owners"] = owners,
+        }).Build();
 
     internal static AuthorizationHandlerContext ContextFor(ClaimsPrincipal principal, StaffRole minimum) =>
         new(new[] { new AppRoleRequirement(minimum) }, principal, resource: null);
@@ -22,18 +29,18 @@ public class AppRoleHandlerTests
             new Claim(AppClaims.UserId, userId.ToString()),
         }, "test"));
 
-    private async Task<AppUser> Add(UserKind kind, StaffRole role, bool active = true)
+    private async Task<AppUser> Add(UserKind kind, StaffRole role, bool active = true, string? upn = null)
     {
         var u = new AppUser(Guid.NewGuid(), kind, kind == UserKind.Customer ? Guid.NewGuid() : null,
-            $"{Guid.NewGuid():N}@example.com", "Name", null, role, active, DateTimeOffset.UtcNow, null);
+            upn ?? $"{Guid.NewGuid():N}@example.com", "Name", null, role, active, DateTimeOffset.UtcNow, null);
         await _users.UpsertAsync(u);
         return u;
     }
 
-    private async Task<bool> Evaluate(ClaimsPrincipal principal, StaffRole minimum)
+    private async Task<bool> Evaluate(ClaimsPrincipal principal, StaffRole minimum, string owners = "")
     {
         var context = ContextFor(principal, minimum);
-        await new AppRoleHandler(_users).HandleAsync(context);
+        await new AppRoleHandler(_users, Owners(owners)).HandleAsync(context);
         return context.HasSucceeded;
     }
 
@@ -77,6 +84,23 @@ public class AppRoleHandlerTests
         var user = await Add(UserKind.Staff, StaffRole.Owner, active: false);
 
         Assert.False(await Evaluate(SignedInAs(user.Id), StaffRole.Staff));
+    }
+
+    [Fact]
+    public async Task Handle_PersistedOwnerNotInConfig_FailsOwnerPolicy_PassesStaffAdmin()
+    {
+        var user = await Add(UserKind.Staff, StaffRole.Owner, upn: "boss@advancedutility.com");
+
+        Assert.False(await Evaluate(SignedInAs(user.Id), StaffRole.Owner, owners: "other@advancedutility.com"));
+        Assert.True(await Evaluate(SignedInAs(user.Id), StaffRole.StaffAdmin, owners: "other@advancedutility.com"));
+    }
+
+    [Fact]
+    public async Task Handle_PersistedOwnerInConfig_PassesOwnerPolicy()
+    {
+        var user = await Add(UserKind.Staff, StaffRole.Owner, upn: "boss@advancedutility.com");
+
+        Assert.True(await Evaluate(SignedInAs(user.Id), StaffRole.Owner, owners: "BOSS@advancedutility.com"));
     }
 
     [Fact]

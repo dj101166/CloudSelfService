@@ -73,6 +73,18 @@ public class IdentityResolverTests
     }
 
     [Fact]
+    public async Task Admit_OwnerRemovedFromConfig_DemotedToStaffAdmin()
+    {
+        await _users.UpsertAsync(new AppUser(Guid.NewGuid(), UserKind.Staff, null, "boss@advancedutility.com", "Boss",
+            "oid-boss", StaffRole.Owner, true, DateTimeOffset.UtcNow, null));
+
+        var result = await Resolver(owners: "someone@advancedutility.com").AdmitAsync(Staff("boss@advancedutility.com", "oid-boss"));
+
+        Assert.Equal(AdmissionOutcome.Admitted, result.Outcome);
+        Assert.Equal(StaffRole.StaffAdmin, (await _users.FindByObjectIdAsync("oid-boss"))!.StaffRole);
+    }
+
+    [Fact]
     public async Task Admit_NewStaffListedAsOwner_CreatedAsOwner()
     {
         var result = await Resolver(owners: "sam@advancedutility.com").AdmitAsync(Staff());
@@ -160,6 +172,28 @@ public class IdentityResolverTests
         Assert.NotNull(stored.LastSignInAt);
         Assert.Equal(UserKind.Customer, stored.Kind);
         Assert.Equal(StaffRole.None, stored.StaffRole);
+    }
+
+    [Fact]
+    public async Task Admit_OnlyEmailClaim_DoesNotBind()
+    {
+        var customer = await AddCustomer();
+        var user = await AddCustomerUser(customer.Id, upn: "pat@customer.example");
+        var emailOnly = Guest("pat@customer.example", "oid-attacker") with { UpnFromEmail = true };
+
+        var result = await Resolver().AdmitAsync(emailOnly);
+
+        Assert.Equal(AdmissionOutcome.UnknownCustomer, result.Outcome);
+        Assert.Null((await _users.GetAsync(user.Id))!.EntraObjectId);
+    }
+
+    [Fact]
+    public async Task Admit_EmailOnlyMemberWithStaffDomain_NotCreatedAsStaff()
+    {
+        var result = await Resolver().AdmitAsync(Staff() with { UpnFromEmail = true });
+
+        Assert.Equal(AdmissionOutcome.UnknownCustomer, result.Outcome);
+        Assert.Empty(await _users.ListAsync());
     }
 
     [Fact]

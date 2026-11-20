@@ -41,6 +41,7 @@ else
 builder.Services.AddSingleton<AuditService>();
 builder.Services.AddHsts(options => { options.MaxAge = TimeSpan.FromDays(365); });
 
+builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddScoped<CurrentUser>();
 builder.Services.AddSingleton<IdentityResolver>();
 builder.Services.AddSingleton<IAuthorizationHandler, AppRoleHandler>();
@@ -75,6 +76,7 @@ var authBuilder = builder.Services
         options.ExpireTimeSpan = TimeSpan.FromMinutes(
             builder.Configuration.GetValue<int?>("Auth:IdleTimeoutMinutes") ?? 60);
         options.SlidingExpiration = true;
+        options.Events = new CookieAuthenticationEvents { OnValidatePrincipal = AuthEndpoints.OnValidatePrincipalAsync };
     });
 
 if (entraEnabled)
@@ -102,6 +104,9 @@ if (entraEnabled)
             OnTokenValidated = AuthEndpoints.OnTokenValidatedAsync,
             OnRemoteFailure = ctx =>
             {
+                // Message only: the exception can carry the protocol message, never log that.
+                ctx.HttpContext.RequestServices.GetRequiredService<ILoggerFactory>().CreateLogger("CloudSelfService.Auth")
+                    .LogWarning("Entra sign-in failed: {Message}", ctx.Failure?.Message ?? "unknown");
                 ctx.Response.Redirect("/login?error=signin_failed");
                 ctx.HandleResponse();
                 return Task.CompletedTask;

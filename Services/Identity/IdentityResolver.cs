@@ -11,19 +11,25 @@ public sealed record Admission(AdmissionOutcome Outcome, AppUser? User);
 public static class AppClaims
 {
     public const string UserId = "urn:cssp:user_id";
+    public const string ObjectId = "urn:cssp:oid";
+    public const string IssuedAt = "urn:cssp:iat";
     public const string DisplayName = "name";
 
     /// <summary>
     /// The cookie principal. It carries identity only - never a role, a customer or a grant - so
     /// every authorization decision has to re-read the store and a revocation takes effect on the
-    /// next request.
+    /// next request. The oid and issue time exist for <see cref="SessionValidator"/>: a record
+    /// re-bound to another oid, or a session past its absolute lifetime, is refused even though
+    /// sliding expiry would otherwise keep it alive.
     /// </summary>
-    public static ClaimsPrincipal PrincipalFor(AppUser user, string authenticationType) =>
+    public static ClaimsPrincipal PrincipalFor(AppUser user, string authenticationType, DateTimeOffset issuedAt) =>
         new(new ClaimsIdentity(new[]
         {
             new Claim(ClaimTypes.Name, user.Upn),
             new Claim(DisplayName, string.IsNullOrWhiteSpace(user.DisplayName) ? user.Upn : user.DisplayName),
             new Claim(UserId, user.Id.ToString()),
+            new Claim(ObjectId, user.EntraObjectId ?? ""),
+            new Claim(IssuedAt, issuedAt.ToUnixTimeSeconds().ToString(System.Globalization.CultureInfo.InvariantCulture)),
         }, authenticationType, ClaimTypes.Name, ClaimTypes.Role));
 
     public static Guid? UserIdOf(ClaimsPrincipal? principal) =>
@@ -90,14 +96,18 @@ public sealed class IdentityResolver
             return (Denied(AdmissionOutcome.Deactivated, user), "staff record is inactive");
 
         var now = DateTimeOffset.UtcNow;
-        var role = IsConfiguredOwner(id.Upn) ? StaffRole.Owner : user?.StaffRole ?? StaffRole.None;
+        var role = OwnerConfig.IsOwner(id.Upn, _config) ? StaffRole.Owner
+            : user is null ? StaffRole.None
+            : OwnerConfig.EffectiveRole(user, _config);
         user = user is null
             ? new AppUser(Guid.NewGuid(), UserKind.Staff, null, id.Upn, id.DisplayName, id.ObjectId, role, true, now, now)
             : user with { EntraObjectId = id.ObjectId, StaffRole = role, LastSignInAt = now };
-        await _users.UpsertAsync(user, ct);
 
-        var outcome = role == StaffRole.None ? AdmissionOutcome.AdmittedPendingRole : AdmissionOutcome.Admitted;
-        return (new Admission(outcome, user), "");
+        if (await BindAsync(user, id, ct) is not { } bound)
+            return (Denied(AdmissionOutcome.UnknownCustomer, null), "object id bind lost a race");
+
+        var outcome = bound.StaffRole == StaffRole.None ? AdmissionOutcome.AdmittedPendingRole : AdmissionOutcome.Admitted;
+        return (new Admission(outcome, bound), "");
     }
 
     private async Task<(Admission, string)> AdmitCustomerAsync(EntraIdentity id, CancellationToken ct)
@@ -105,6 +115,11 @@ public sealed class IdentityResolver
         var user = await _users.FindByObjectIdAsync(id.ObjectId, ct);
         if (user is null && id.Upn.Length > 0)
         {
+            // Only a tenant-verified name may stand in for the oid; `email` is settable by the
+            // guest's home tenant, so matching on it would let anyone claim a pre-registered record.
+            if (id.UpnFromEmail)
+                return (Denied(AdmissionOutcome.UnknownCustomer, null), "no verified UPN to bind on");
+
             user = await _users.FindByUpnAsync(id.Upn, ct);
             // A UPN match only stands in for an oid on the record's first sign-in. Once bound,
             // the oid is authoritative, so a reused or re-issued email address cannot take over.
@@ -125,16 +140,33 @@ public sealed class IdentityResolver
         if (!user.Active || !customer.Active)
             return (Denied(AdmissionOutcome.Deactivated, user), user.Active ? "customer is inactive" : "user is inactive");
 
-        user = user with { EntraObjectId = id.ObjectId, LastSignInAt = DateTimeOffset.UtcNow };
-        await _users.UpsertAsync(user, ct);
-        return (new Admission(AdmissionOutcome.Admitted, user), "");
+        if (await BindAsync(user with { EntraObjectId = id.ObjectId, LastSignInAt = DateTimeOffset.UtcNow }, id, ct) is not { } bound)
+            return (Denied(AdmissionOutcome.UnknownCustomer, null), "object id bind lost a race");
+
+        return (new Admission(AdmissionOutcome.Admitted, bound), "");
     }
 
-    private bool IsConfiguredOwner(string upn) =>
-        upn.Length > 0
-        && (_config["Authorization:Owners"] ?? "")
-            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Contains(upn, StringComparer.OrdinalIgnoreCase);
+    /// <summary>
+    /// Writes the record and re-reads it. Two first sign-ins for one pre-registered UPN can both
+    /// pass the "oid is null" check; the store's last write wins, so only the caller whose oid is
+    /// actually stored afterwards is admitted.
+    /// </summary>
+    private async Task<AppUser?> BindAsync(AppUser user, EntraIdentity id, CancellationToken ct)
+    {
+        try
+        {
+            await _users.UpsertAsync(user, ct);
+        }
+        catch (InvalidOperationException)
+        {
+            return null;
+        }
+
+        var stored = await _users.GetAsync(user.Id, ct);
+        return stored is not null && string.Equals(stored.EntraObjectId, id.ObjectId, StringComparison.Ordinal)
+            ? stored
+            : null;
+    }
 
     private static Admission Denied(AdmissionOutcome outcome, AppUser? user) => new(outcome, user);
 }
