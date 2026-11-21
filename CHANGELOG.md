@@ -1,6 +1,6 @@
 # Changelog - Advanced Cloud Self Service
 
-## [1.0.0] - TBD
+## [1.0.0] - November 21, 2026
 
 First release. Advanced Cloud Self Service is now a private storage access portal: customers and Advanced staff sign in with Microsoft and browse, upload and download files held in Advanced-hosted Azure storage, without ever being given a storage key, a SAS link or a direct storage address.
 
