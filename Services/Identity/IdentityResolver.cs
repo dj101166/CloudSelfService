@@ -42,7 +42,7 @@ public static class AppClaims
 /// </summary>
 public sealed class IdentityResolver
 {
-    private const string SignInOperation = "SignIn";
+    public const string SignInOperation = "SignIn";
 
     private readonly IUserStore _users;
     private readonly ICustomerStore _customers;

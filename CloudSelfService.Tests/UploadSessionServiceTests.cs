@@ -2474,15 +2474,16 @@ public class UploadSessionServiceTests
     }
 
     [Fact]
-    public async Task Begin_ConfiguredMaxAboveBlobBlockLimit_ClampedAndWarned()
+    public async Task Begin_ConfiguredMaxAboveBlobBlockLimit_ClampedWithoutPerScopeWarning()
     {
+        // The over-ceiling warning is logged once at startup (Program); a scoped service must not repeat it.
         var log = new WarningLogger();
         var svc = Service(maxBytes: 1L << 40, logger: log);
 
         var atCeiling = await svc.BeginAsync(_contrib.Id, new BeginUploadRequest(_share.Id, "", "a.bin", ChunkMath.MaxUploadBytes, false), Ctx);
         var overCeiling = await svc.BeginAsync(_contrib.Id, new BeginUploadRequest(_share.Id, "", "b.bin", ChunkMath.MaxUploadBytes + 1, false), Ctx);
 
-        Assert.Equal(1, log.Warnings);
+        Assert.Equal(0, log.Warnings);
         Assert.Equal(AccessOutcome.Ok, atCeiling.Outcome);
         Assert.Equal(AccessOutcome.Invalid, overCeiling.Outcome);
         Assert.Equal(UploadSessionService.TooLargeMessage(ChunkMath.MaxUploadBytes), overCeiling.Message);

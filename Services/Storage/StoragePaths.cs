@@ -1,5 +1,6 @@
 using System.Text.RegularExpressions;
 using CloudSelfService.Models;
+using CloudSelfService.Services.Access;
 
 namespace CloudSelfService.Services.Storage;
 
@@ -10,13 +11,9 @@ public static class StoragePaths
 
     public static string Join(string folder, string name) => folder.Length == 0 ? name : $"{folder}/{name}";
 
-    public static string Parent(string path)
-    {
-        var i = path.LastIndexOf('/');
-        return i < 0 ? "" : path[..i];
-    }
+    public static string Parent(string path) => StoragePath.Parent(path);
 
-    public static string Leaf(string path) => path[(path.LastIndexOf('/') + 1)..];
+    public static string Leaf(string path) => StoragePath.Leaf(path);
 
     /// <summary>Blob listing prefix for a folder: null for the root, otherwise "folder/".</summary>
     public static string? BlobPrefix(string folder) => folder.Length == 0 ? null : folder + "/";

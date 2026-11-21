@@ -364,11 +364,21 @@ public sealed class StorageAccessService
         return new(AccessOutcome.Ok);
     }
 
-    // The user only sees the mapped message, so the underlying SDK exception is kept here for support.
-    private void LogFailure(StorageFailureException failure, StorageOperation op, Guid targetId, string path, AuditContext ctx) =>
-        _logger.LogWarning(failure.InnerException ?? failure,
-            "Storage {Operation} failed on target {TargetId} at {Path}: {Kind} (correlation {CorrelationId}).",
-            op, targetId, path, failure.Kind, ctx.CorrelationId);
+    // The user only sees the mapped message, so the underlying SDK exception is kept here for support. A missing or
+    // already-existing item is a routine user outcome, logged without the exception so it does not read as a fault.
+    private void LogFailure(StorageFailureException failure, StorageOperation op, Guid targetId, string path, AuditContext ctx)
+    {
+        if (IsRoutine(failure.Kind))
+            _logger.LogInformation("Storage {Operation} on target {TargetId} at {Path}: {Kind} (correlation {CorrelationId}).",
+                op, targetId, path, failure.Kind, ctx.CorrelationId);
+        else
+            _logger.LogWarning(failure.InnerException ?? failure,
+                "Storage {Operation} failed on target {TargetId} at {Path}: {Kind} (correlation {CorrelationId}).",
+                op, targetId, path, failure.Kind, ctx.CorrelationId);
+    }
+
+    internal static bool IsRoutine(StorageFailureKind kind) =>
+        kind is StorageFailureKind.NotFound or StorageFailureKind.AlreadyExists;
 
     // Not tied to the request token: a client that disconnects mid-operation must not erase the audit row.
     private Task RecordAsync(Resolution r, Guid targetId, StorageOperation op, string path, AuditResult result, string error,

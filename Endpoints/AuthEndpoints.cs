@@ -1,6 +1,8 @@
 using System.Diagnostics;
+using System.Security.Claims;
 using CloudSelfService.Authorization;
 using CloudSelfService.Models;
+using CloudSelfService.Services;
 using CloudSelfService.Services.Data;
 using CloudSelfService.Services.Identity;
 using Microsoft.AspNetCore.Antiforgery;
@@ -28,6 +30,24 @@ public static class AuthEndpoints
         new(ctx.Connection.RemoteIpAddress?.ToString() ?? "",
             Activity.Current?.TraceId.ToString() ?? ctx.TraceIdentifier);
 
+    public const string MissingOidReason = "Token has no object id (oid)";
+    public const string WrongTenantReason = "Token was issued by another tenant";
+
+    /// <summary>
+    /// The Denied SignIn row for a token refused before admission. Labelled with whatever name the token carries,
+    /// since there is no user record to point at.
+    /// </summary>
+    public static AuditEvent RefusedTokenEvent(ClaimsPrincipal? principal, string reason, AuditContext context, DateTimeOffset at)
+    {
+        var name = new[] { "preferred_username", "email", "upn" }
+            .Select(t => principal?.FindFirst(t)?.Value)
+            .FirstOrDefault(v => !string.IsNullOrWhiteSpace(v))?.Trim() ?? "";
+        var tid = principal?.FindFirst("tid")?.Value;
+        var error = string.IsNullOrWhiteSpace(tid) ? reason : $"{reason} (tenant {tid})";
+        return new AuditEvent(Guid.NewGuid(), at, null, name, null, null, IdentityResolver.SignInOperation, "", null,
+            AuditResult.Denied, error, context.SourceIp, context.CorrelationId);
+    }
+
     /// <summary>
     /// Runs after Entra has authenticated the caller and before any cookie is issued, so a
     /// refused identity leaves with no session at all.
@@ -40,6 +60,10 @@ public static class AuthEndpoints
         // since they authenticate through our tenant. Anything else is not a token we asked for.
         if (id is null || !AuthPolicy.IsOurTenant(id.TenantId, tenant))
         {
+            var reason = id is null ? MissingOidReason : WrongTenantReason;
+            await ctx.HttpContext.RequestServices.GetRequiredService<AuditService>().RecordAsync(
+                RefusedTokenEvent(ctx.Principal, reason, AuditContextFor(ctx.HttpContext), DateTimeOffset.UtcNow),
+                ctx.HttpContext.RequestAborted);
             ctx.Response.Redirect(DeniedRedirect(AdmissionOutcome.UnknownCustomer)!);
             ctx.HandleResponse();
             return;

@@ -70,6 +70,15 @@ public class UploaderScriptTests
     }
 
     [Fact]
+    public void SessionGuard_Keepalive_TreatsRedirectOr401AsSessionEnded()
+    {
+        var guard = File.ReadAllText(Path.Combine(Root(), "wwwroot", "js", "session-guard.js"));
+        Assert.Contains("fetch(\"/keepalive\", { method: \"GET\", credentials: \"same-origin\", redirect: \"manual\" })", guard);
+        Assert.Contains("r.type === \"opaqueredirect\" || r.status === 401", guard);
+        Assert.Contains("function sessionEnded() { window.location.href = \"/logout\"; }", guard);
+    }
+
+    [Fact]
     public void Uploader_RefreshesAStaleAntiforgeryTokenOnce()
     {
         var js = Script();

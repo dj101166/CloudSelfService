@@ -78,15 +78,18 @@ public sealed class UploadSessionService
         _audit = audit;
         _time = time;
         _logger = logger;
-        var configuredMax = Math.Max(0, config.GetValue<long?>("Transfers:MaxUploadBytes") ?? DefaultMaxUploadBytes);
-        _maxBytes = Math.Min(configuredMax, ChunkMath.MaxUploadBytes);
-        if (configuredMax > _maxBytes)
-            _logger.LogWarning("Transfers:MaxUploadBytes {Configured} exceeds the {Limit}-byte ceiling set by Azure's 50,000 blocks per blob; using the ceiling.",
-                configuredMax, ChunkMath.MaxUploadBytes);
+        _maxBytes = MaxUploadBytesFrom(config).Effective;
         _parallel = Math.Clamp(config.GetValue<int?>("Transfers:ParallelChunks") ?? DefaultParallelChunks, 1, 16);
         _lifetime = TimeSpan.FromHours(Math.Max(1, config.GetValue<int?>("Transfers:SessionHours") ?? DefaultSessionHours));
         _blobLock = TimeSpan.FromMinutes(Math.Max(1, config.GetValue<int?>("Transfers:BlobLockMinutes") ?? DefaultBlobLockMinutes));
         _maxOpenSessions = Math.Max(1, config.GetValue<int?>("Transfers:MaxOpenSessionsPerUser") ?? DefaultMaxOpenSessionsPerUser);
+    }
+
+    /// <summary>The configured upload limit and the one in force, clamped to Azure's block ceiling. Program warns once at startup when they differ.</summary>
+    public static (long Effective, long Configured) MaxUploadBytesFrom(IConfiguration config)
+    {
+        var configured = Math.Max(0, config.GetValue<long?>("Transfers:MaxUploadBytes") ?? DefaultMaxUploadBytes);
+        return (Math.Min(configured, ChunkMath.MaxUploadBytes), configured);
     }
 
     public static string TooLargeMessage(long maxBytes) =>

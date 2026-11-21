@@ -360,6 +360,37 @@ public class StorageAccessServiceTests
         Assert.Contains("Unreachable", entry.Message);
     }
 
+    [Theory]
+    [InlineData(StorageFailureKind.NotFound)]
+    [InlineData(StorageFailureKind.AlreadyExists)]
+    public async Task List_RoutineStorageOutcome_LogsInformationWithoutException(StorageFailureKind kind)
+    {
+        var svc = Service(backends: new ThrowingBackend(new StorageFailureException(kind, "routine")));
+
+        await svc.ListAsync(_fullUserA.Id, _ta.Id, "Docs", null, Ctx);
+
+        var entry = Assert.Single(_log.Entries);
+        Assert.Equal(LogLevel.Information, entry.Level);
+        Assert.Null(entry.Exception);
+        Assert.Contains(kind.ToString(), entry.Message);
+    }
+
+    [Theory]
+    [InlineData(StorageFailureKind.NotAuthorised)]
+    [InlineData(StorageFailureKind.Unreachable)]
+    [InlineData(StorageFailureKind.Conflict)]
+    [InlineData(StorageFailureKind.Other)]
+    public async Task List_FaultStorageOutcome_LogsWarningWithException(StorageFailureKind kind)
+    {
+        var svc = Service(backends: new ThrowingBackend(new StorageFailureException(kind, "fault")));
+
+        await svc.ListAsync(_fullUserA.Id, _ta.Id, "Docs", null, Ctx);
+
+        var entry = Assert.Single(_log.Entries);
+        Assert.Equal(LogLevel.Warning, entry.Level);
+        Assert.NotNull(entry.Exception);
+    }
+
     [Fact]
     public async Task AuthorizeDownload_BackendFailure_LogsWarning()
     {

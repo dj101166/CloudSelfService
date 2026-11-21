@@ -6,3 +6,4 @@ appsettings.Development.json
 CLAUDE.local.md
 /Data/
 *.msg
+.superpowers/

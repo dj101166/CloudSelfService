@@ -52,7 +52,7 @@ builder.Services.AddRazorComponents().AddInteractiveServerComponents()
     .RegisterPersistentService<CloudSelfService.Services.Files.PageAuditContext>(RenderMode.InteractiveServer);
 builder.Services.AddSingleton<AppVersionService>();
 builder.Services.AddSingleton<PgsqlContext>();
-if (!string.IsNullOrWhiteSpace(builder.Configuration.GetConnectionString("Default")))
+if (StartupChecks.UsePostgres(builder.Environment.IsDevelopment(), builder.Configuration.GetConnectionString("Default")))
 {
     builder.Services.AddSingleton<IUserStore, PgUserStore>();
     builder.Services.AddSingleton<ICustomerStore, PgCustomerStore>();
@@ -189,6 +189,12 @@ var app = builder.Build();
 
 if (AdminService.ParseAllowedSubscriptions(builder.Configuration).Count == 0)
     app.Logger.LogWarning("Storage:AllowedSubscriptions is empty — any subscription the managed identity can reach may be registered");
+if (StartupChecks.OwnersWarning(app.Environment.IsDevelopment(), app.Services.GetRequiredService<OwnerConfig>()) is { } ownersWarning)
+    app.Logger.LogWarning("{Warning}", ownersWarning);
+var (maxUploadBytes, configuredMaxUploadBytes) = UploadSessionService.MaxUploadBytesFrom(builder.Configuration);
+if (configuredMaxUploadBytes > maxUploadBytes)
+    app.Logger.LogWarning("Transfers:MaxUploadBytes {Configured} exceeds the {Limit}-byte ceiling set by Azure's 50,000 blocks per blob; using the ceiling.",
+        configuredMaxUploadBytes, maxUploadBytes);
 
 var pg = app.Services.GetRequiredService<PgsqlContext>();
 // An unreachable database fails the start on purpose.

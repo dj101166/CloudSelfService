@@ -129,11 +129,19 @@
     const now = Date.now();
     if (now - lastPing > 300000) { // slide the server cookie at most every 5 min
       lastPing = now;
-      fetch("/keepalive", { method: "GET", credentials: "same-origin" }).catch(function () {});
+      // redirect: "manual" so an ended session (the cookie handler answers with a redirect to
+      // /login, or a 401) is seen here instead of being followed silently; the user is sent out
+      // rather than left working in a page whose next request will fail.
+      fetch("/keepalive", { method: "GET", credentials: "same-origin", redirect: "manual" })
+        .then(function (r) { if (r && (r.type === "opaqueredirect" || r.status === 401)) sessionEnded(); })
+        .catch(function () {});
     }
   }
 
   function signOut() { window.location.href = "/logout?reason=inactivity"; }
+
+  // The server no longer recognises the session: clear the cookie and land on the signed-out page.
+  function sessionEnded() { window.location.href = "/logout"; }
 
   function ensureModal() {
     let m = document.getElementById("idle-warning-modal");
