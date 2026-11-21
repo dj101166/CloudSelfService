@@ -30,6 +30,7 @@ public static class DevSignIn
     private static readonly Persona[] All =
     {
         new("staff-owner", "Staff (Owner)", PersonaKind.Staff, StaffRole.Owner),
+        new("staff-admin", "Staff (Admin)", PersonaKind.Staff, StaffRole.StaffAdmin),
         new("staff", "Staff", PersonaKind.Staff, StaffRole.Staff),
         new("staff-none", "Staff (no role yet)", PersonaKind.Staff, StaffRole.None),
         new("customer-read", "Customer (Read)", PersonaKind.Customer, Level: AccessLevel.Read),

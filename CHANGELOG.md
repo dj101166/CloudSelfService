@@ -21,3 +21,4 @@ Initial (unreleased) scaffold. This app has never been published, so all work to
 
 ### 🛡️ Security
 - Hardened HTTP security headers: added Permissions-Policy and CSP form-action 'self'; HSTS max-age set to 1 year.
+- Customer-user UPNs and new file names containing an unpaired UTF-16 surrogate or private-use character are now rejected; an audit-export filter dated 9999-12-31 no longer fails.

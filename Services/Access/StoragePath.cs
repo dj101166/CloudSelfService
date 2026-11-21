@@ -120,6 +120,11 @@ public static class StoragePath
             error = InvisibleCharactersMessage;
             return false;
         }
+        if (strict && HasLoneSurrogate(segment))
+        {
+            error = InvisibleCharactersMessage;
+            return false;
+        }
         foreach (var c in segment)
         {
             if (c < 0x20 || c == 0x7F)
@@ -134,5 +139,16 @@ public static class StoragePath
             }
         }
         return true;
+    }
+
+    /// <summary>EnumerateRunes maps a lone surrogate to U+FFFD, which no category check catches, so pairing is checked directly.</summary>
+    private static bool HasLoneSurrogate(string s)
+    {
+        for (var i = 0; i < s.Length; i++)
+        {
+            if (char.IsHighSurrogate(s[i]) && i + 1 < s.Length && char.IsLowSurrogate(s[i + 1])) i++;
+            else if (char.IsSurrogate(s[i])) return true;
+        }
+        return false;
     }
 }

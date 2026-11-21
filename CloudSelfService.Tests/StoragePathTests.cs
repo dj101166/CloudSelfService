@@ -148,4 +148,19 @@ public class StoragePathTests
         Assert.False(StoragePath.TryNormalizePath("a/..", out var n, out _));
         Assert.Equal("", n);
     }
+
+    [Fact]
+    public void TryValidateName_LoneSurrogate_RejectedButLenientPathAllows()
+    {
+        foreach (var name in new[] { "a" + (char)0xD800 + "b", "a" + (char)0xDC00, "a" + (char)0xD800 })
+        {
+            Assert.False(StoragePath.TryValidateName(name, out var error));
+            Assert.Equal(StoragePath.InvisibleCharactersMessage, error);
+            Assert.True(StoragePath.TryNormalizePath("dir/" + name, out _, out _));
+        }
+    }
+
+    [Fact]
+    public void TryValidateName_PairedSurrogate_Accepted() =>
+        Assert.True(StoragePath.TryValidateName("a\U0001F600b", out _));
 }

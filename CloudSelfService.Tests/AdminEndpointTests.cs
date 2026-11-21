@@ -115,4 +115,57 @@ public sealed class AdminEndpointTests : IDisposable
     [Fact]
     public void FileNameFor_UsesUtcMinutePrecision() =>
         Assert.Equal("audit-20261120-0905.csv", AdminEndpoints.FileNameFor(new DateTimeOffset(2026, 11, 20, 9, 5, 59, TimeSpan.Zero)));
+
+    [Fact]
+    public async Task AuditCsv_StaffAdmin_200()
+    {
+        var client = await _factory.CreateClientAs("staff-admin");
+
+        var response = await client.GetAsync("/api/admin/audit.csv");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task AuditCsv_BeyondTransfersLimit_429()
+    {
+        using var factory = new TestAppFactory(("Transfers:RequestsPerMinute", "1"));
+        var client = await factory.CreateClientAs("staff-owner");
+
+        var first = await client.GetAsync("/api/admin/audit.csv");
+        var second = await client.GetAsync("/api/admin/audit.csv");
+
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        Assert.Equal(HttpStatusCode.TooManyRequests, second.StatusCode);
+        var rows = await factory.Services.GetRequiredService<IAuditStore>().QueryAsync(new AuditQuery(Operation: "Admin.ExportAudit"));
+        Assert.Single(rows);
+    }
+
+    [Fact]
+    public void FilterSummary_NoFilters()
+    {
+        Assert.Equal("(no filters)", AdminEndpoints.FilterSummary(null, null, null, null, null, null, null));
+        Assert.Equal("(no filters)", AdminEndpoints.FilterSummary(null, null, null, "  ", "", " ", null));
+    }
+
+    [Fact]
+    public void FilterSummary_TrimsAndOrdersFields()
+    {
+        var u = Guid.NewGuid();
+        var c = Guid.NewGuid();
+        var t = Guid.NewGuid();
+
+        var text = AdminEndpoints.FilterSummary(u, c, t, " Download ", " Denied ", " 2026-11-01 ", " 2026-11-02 ");
+
+        Assert.Equal($"user={u} customer={c} target={t} operation=Download result=Denied from=2026-11-01 to=2026-11-02", text);
+    }
+
+    [Fact]
+    public void FilterSummary_CappedAt500()
+    {
+        var text = AdminEndpoints.FilterSummary(null, null, null, new string('o', 900), null, null, null);
+
+        Assert.Equal(500, text.Length);
+        Assert.StartsWith("operation=ooo", text);
+    }
 }

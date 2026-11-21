@@ -126,9 +126,11 @@ public sealed partial class AdminService
         if (at < 1 || at == name.Length - 1 || name.Length > 320 || name.IndexOf('@', at + 1) >= 0) return false;
         foreach (var rune in name.EnumerateRunes())
         {
-            if (Rune.IsWhiteSpace(rune) || Rune.IsControl(rune)
+            // EnumerateRunes maps a lone surrogate to U+FFFD, so the replacement character is how one is caught.
+            if (rune == Rune.ReplacementChar || Rune.IsWhiteSpace(rune) || Rune.IsControl(rune)
                 || Rune.GetUnicodeCategory(rune) is UnicodeCategory.Format or UnicodeCategory.LineSeparator
-                    or UnicodeCategory.ParagraphSeparator or UnicodeCategory.OtherNotAssigned or UnicodeCategory.Surrogate)
+                    or UnicodeCategory.ParagraphSeparator or UnicodeCategory.OtherNotAssigned or UnicodeCategory.Surrogate
+                    or UnicodeCategory.PrivateUse)
                 return false;
         }
         return !(name[0] is '=' or '+' or '-' or '@') && !(name[at + 1] is '=' or '+' or '-' or '@');
@@ -385,6 +387,9 @@ public static class AuditFilters
         return true;
     }
 
+    private static DateTimeOffset? EndOfDay(DateTimeOffset? day) =>
+        day is not { } d ? null : d.UtcDateTime.Date == DateTime.MaxValue.Date ? DateTimeOffset.MaxValue : d.AddDays(1).AddTicks(-1);
+
     /// <summary>Null when a filter value is malformed. Dates are UTC days; <c>to</c> includes the whole day.</summary>
     public static AuditQuery? ToQuery(Guid? userId, Guid? customerId, Guid? targetId, string? operation, string? result,
         string? from, string? to, int limit)
@@ -397,7 +402,7 @@ public static class AuditFilters
         }
         if (!TryParseDate(from, out var f) || !TryParseDate(to, out var t)) return null;
         return new AuditQuery(userId, customerId, targetId, string.IsNullOrWhiteSpace(operation) ? null : operation.Trim(),
-            parsedResult, f, t?.AddDays(1).AddTicks(-1), limit);
+            parsedResult, f, EndOfDay(t), limit);
     }
 }
 

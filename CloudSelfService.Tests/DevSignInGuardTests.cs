@@ -86,4 +86,8 @@ public class DevSignInGuardTests
         Assert.True(DevSignIn.IsEnabled(new Env(Environments.Development), Config("Dev")));
         Assert.False(DevSignIn.IsEnabled(new Env(Environments.Development), Config("Entra")));
     }
+
+    [Fact]
+    public void Personas_IncludeStaffAdmin() =>
+        Assert.Contains(DevSignIn.Personas, p => p.Key == "staff-admin");
 }

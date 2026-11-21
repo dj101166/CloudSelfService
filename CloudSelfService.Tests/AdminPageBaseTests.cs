@@ -46,6 +46,7 @@ public class AdminPageBaseTests
         public AdminAlert? CurrentAlert => Alert;
         public Task Load(Func<Task> f) => LoadGuardedAsync(f);
         public Task Act(Func<Guid, AuditContext, Task<AdminAlert>> a, Func<Task> r) => ActAsync(a, r);
+        public bool IsBusy => Busy;
         public Task<bool> Run(Func<Task> f) => RunGuardedAsync(f);
     }
 
@@ -60,10 +61,16 @@ public class AdminPageBaseTests
         Wire(_admin);
     }
 
-    private void Wire(AppUser signedInAs)
+    private sealed class ThrowingAuth : AuthenticationStateProvider
+    {
+        public override Task<AuthenticationState> GetAuthenticationStateAsync() => throw new InvalidOperationException("store down");
+    }
+
+    private void Wire(AppUser signedInAs, bool throwingAuth = false)
     {
         var owners = new OwnerConfig("");
-        var cu = new CurrentUser(new FixedAuth(AppClaims.PrincipalFor(signedInAs, "test", Now)), _users, _customers,
+        AuthenticationStateProvider auth = throwingAuth ? new ThrowingAuth() : new FixedAuth(AppClaims.PrincipalFor(signedInAs, "test", Now));
+        var cu = new CurrentUser(auth, _users, _customers,
             new SessionLifetime(TimeSpan.FromHours(12)), new AppRoleHandlerTests.FixedTime(Now));
         var targets = new InMemoryTargetStore();
         var svc = new AdminService(_users, _customers, targets, new InMemoryGrantStore(targets), new CloudSelfService.Services.Storage.FakeStorageBackend(),
@@ -175,5 +182,81 @@ public class AdminPageBaseTests
 
         Assert.Equal(AdminAlert.StoreDownMessage, _page.CurrentAlert!.Text);
         Assert.False(_page.IsLoaded);
+    }
+
+    [Fact]
+    public async Task Act_WhileBusy_SecondCallIgnored()
+    {
+        var inner = 0;
+        var innerReloads = 0;
+
+        await _page.Act(async (_, _) =>
+        {
+            await _page.Act((_, _) => { inner++; return Task.FromResult(AdminAlert.Success("inner")); },
+                () => { innerReloads++; return Task.CompletedTask; });
+            return AdminAlert.Success("outer");
+        }, () => Task.CompletedTask);
+
+        Assert.Equal(0, inner);
+        Assert.Equal(0, innerReloads);
+        Assert.Equal("outer", _page.CurrentAlert!.Text);
+        Assert.False(_page.IsBusy);
+    }
+
+    [Fact]
+    public async Task Load_SessionGone_SessionEndedNotDenied_DataCleared()
+    {
+        await _page.Load(() => Task.CompletedTask);
+        await _users.UpsertAsync(_admin with { Active = false });
+        var queries = 0;
+
+        await _page.Load(() => { queries++; return Task.CompletedTask; });
+
+        Assert.Equal(0, queries);
+        Assert.True(_page.IsSessionEnded);
+        Assert.False(_page.IsDenied);
+        Assert.False(_page.IsLoaded);
+        Assert.Equal(1, _page.Cleared);
+    }
+
+    [Fact]
+    public async Task Page_RequiringOwner_PersistedOwnerNotInConfig_Denied()
+    {
+        var persistedOwner = _admin with { StaffRole = StaffRole.Owner };
+        await _users.UpsertAsync(persistedOwner);
+        Wire(persistedOwner);
+        _page.Required = StaffRole.Owner;
+
+        await _page.Load(() => Task.CompletedTask);
+
+        Assert.True(_page.IsDenied);
+        Assert.False(_page.IsLoaded);
+    }
+
+    [Fact]
+    public async Task Act_ActionThrows_StoreDown_NoReload_BusyReset()
+    {
+        var reloads = 0;
+
+        await _page.Act((_, _) => throw new InvalidOperationException("db down"), () => { reloads++; return Task.CompletedTask; });
+
+        Assert.Equal(AdminAlert.StoreDownMessage, _page.CurrentAlert!.Text);
+        Assert.Equal(0, reloads);
+        Assert.False(_page.IsBusy);
+        Assert.False(_page.IsDenied);
+    }
+
+    [Fact]
+    public async Task Act_UserReadThrows_StoreDown_ActionNotInvoked()
+    {
+        Wire(_admin, throwingAuth: true);
+        var invoked = 0;
+
+        await _page.Act((_, _) => { invoked++; return Task.FromResult(AdminAlert.Success("x")); }, () => Task.CompletedTask);
+
+        Assert.Equal(0, invoked);
+        Assert.Equal(AdminAlert.StoreDownMessage, _page.CurrentAlert!.Text);
+        Assert.False(_page.IsBusy);
+        Assert.False(_page.IsSessionEnded);
     }
 }

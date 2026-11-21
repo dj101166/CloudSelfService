@@ -617,4 +617,353 @@ public class AdminServiceTests
         Assert.Equal("\"'=a\r\nb\"", CsvCell.Escape("=a\r\nb"));
         Assert.Equal("\"'@x\nsecond\"", CsvCell.Escape("@x\nsecond"));
     }
+
+    // ---- Task 11 gap tests ----
+
+    private static string Upn(int total)
+    {
+        const string domain = "@x.example";
+        return new string('a', total - domain.Length) + domain;
+    }
+
+    [Fact]
+    public void IsValidUpn_LoneSurrogate_False()
+    {
+        Assert.False(AdminService.IsValidUpn("a" + (char)0xD800 + "b@x.example", out _));
+        Assert.False(AdminService.IsValidUpn("a" + (char)0xDC00 + "b@x.example", out _));
+        Assert.False(AdminService.IsValidUpn("ab" + (char)0xD800 + "@x.example", out _));
+    }
+
+    [Theory]
+    [InlineData("a�b@x.example", false)]
+    [InlineData("ab@x.example", false)]
+    [InlineData("-a@x.example", false)]
+    [InlineData("a\U0001F600b@x.example", true)]
+    [InlineData("ok@x.example", true)]
+    public void IsValidUpn_SurrogatesPrivateUseAndFormulaStart(string upn, bool expected) =>
+        Assert.Equal(expected, AdminService.IsValidUpn(upn, out _));
+
+    [Fact]
+    public void IsValidUpn_LengthLimitIs320Characters()
+    {
+        Assert.True(AdminService.IsValidUpn(Upn(320), out _));
+        Assert.False(AdminService.IsValidUpn(Upn(321), out _));
+    }
+
+    [Theory]
+    [InlineData("lone")]
+    [InlineData("-a@x.example")]
+    public async Task AddCustomerUser_LoneSurrogateOrFormulaStart_Invalid_NothingStored(string kind)
+    {
+        var upn = kind == "lone" ? "a" + (char)0xD800 + "b@x.example" : kind;
+        var before = (await _users.ListAsync()).Count;
+
+        var result = await _svc.AddCustomerUserAsync(_admin.Id, _alpha.Id, upn, "", Ctx);
+
+        Assert.Equal(AccessOutcome.Invalid, result.Outcome);
+        Assert.Equal(before, (await _users.ListAsync()).Count);
+        Assert.Empty(await AuditAsync(AdminService.AddCustomerUserOp));
+    }
+
+    [Fact]
+    public async Task AddCustomerUser_MissingCustomer_NotFound()
+    {
+        var result = await _svc.AddCustomerUserAsync(_admin.Id, Guid.NewGuid(), "x@y.example", "", Ctx);
+
+        Assert.Equal(AccessOutcome.NotFound, result.Outcome);
+        Assert.Null(await _users.FindByUpnAsync("x@y.example"));
+    }
+
+    [Fact]
+    public async Task AddCustomerUser_DisplayNameLimit_200Ok_201Invalid()
+    {
+        var ok = await _svc.AddCustomerUserAsync(_admin.Id, _alpha.Id, "d200@y.example", new string('n', 200), Ctx);
+        var bad = await _svc.AddCustomerUserAsync(_admin.Id, _alpha.Id, "d201@y.example", new string('n', 201), Ctx);
+
+        Assert.Equal(AccessOutcome.Ok, ok.Outcome);
+        Assert.Equal(AccessOutcome.Invalid, bad.Outcome);
+        Assert.Null(await _users.FindByUpnAsync("d201@y.example"));
+    }
+
+    [Theory]
+    [InlineData(4)]
+    [InlineData(-1)]
+    public async Task SetStaffRole_UndefinedRole_Invalid_RoleUnchanged(int role)
+    {
+        var result = await _svc.SetStaffRoleAsync(_owner.Id, _staff.Id, (StaffRole)role, Ctx);
+
+        Assert.Equal(AccessOutcome.Invalid, result.Outcome);
+        Assert.Equal(StaffRole.Staff, (await _users.GetAsync(_staff.Id))!.StaffRole);
+        Assert.Empty(await AuditAsync(AdminService.SetStaffRoleOp));
+    }
+
+    [Theory]
+    [InlineData(99)]
+    [InlineData(-1)]
+    public async Task SetGrant_UndefinedLevel_Invalid_NoGrantStored(int level)
+    {
+        var result = await _svc.SetGrantAsync(_admin.Id, _alpha.Id, _alphaTarget.Id, (AccessLevel)level, Ctx);
+
+        Assert.Equal(AccessOutcome.Invalid, result.Outcome);
+        Assert.Null(await _grants.GetAsync(_alpha.Id, _alphaTarget.Id));
+        Assert.Empty(await AuditAsync(AdminService.SetGrantOp));
+    }
+
+    [Fact]
+    public async Task SaveTarget_MoveToInternalWithGrants_Invalid()
+    {
+        await _grants.SetAsync(new Grant(_alpha.Id, _alphaTarget.Id, AccessLevel.Read, "x", Now));
+
+        var result = await _svc.SaveTargetAsync(_admin.Id, _alphaTarget with { CustomerId = null }, Ctx);
+
+        Assert.Equal(AccessOutcome.Invalid, result.Outcome);
+        Assert.Equal(_alpha.Id, (await _targets.GetAsync(_alphaTarget.Id))!.CustomerId);
+        Assert.NotNull(await _grants.GetAsync(_alpha.Id, _alphaTarget.Id));
+    }
+
+    [Fact]
+    public async Task SetUserActive_StaffTargetByOwnerNotInConfig_Denied_SingleDeniedRow()
+    {
+        var gone = Staff("gone@advancedutility.com", StaffRole.Owner);
+        await _users.UpsertAsync(gone);
+
+        var result = await _svc.SetUserActiveAsync(gone.Id, _staff.Id, false, Ctx);
+
+        Assert.Equal(AccessOutcome.Denied, result.Outcome);
+        Assert.True((await _users.GetAsync(_staff.Id))!.Active);
+        var row = Assert.Single(await AuditAsync(AdminService.SetUserActiveOp));
+        Assert.Equal(AuditResult.Denied, row.Result);
+    }
+
+    private async Task<AccessOutcome> InvokeAsync(string op, Guid actor)
+    {
+        static async Task<AccessOutcome> O(Task<AccessResult> t) => (await t).Outcome;
+        static async Task<AccessOutcome> OT<T>(Task<AccessResult<T>> t) => (await t).Outcome;
+        return op switch
+        {
+            AdminService.SaveCustomerOp => await OT(_svc.SaveCustomerAsync(actor,
+                new Customer(Guid.Empty, "Zed", true, "", null, CustomerCloud.Commercial, CrossTenantStatus.NotRequired), Ctx)),
+            AdminService.AddCustomerUserOp => await OT(_svc.AddCustomerUserAsync(actor, _alpha.Id, "new@alpha.example", "", Ctx)),
+            AdminService.SetUserActiveOp => await O(_svc.SetUserActiveAsync(actor, _custUser.Id, false, Ctx)),
+            AdminService.SaveTargetOp => await OT(_svc.SaveTargetAsync(actor, Target(_alpha.Id, "New", "newstore", "new-one"), Ctx)),
+            AdminService.TestTargetOp => await OT(_svc.TestTargetAsync(actor, _alphaTarget.Id, Ctx)),
+            AdminService.SetGrantOp => await O(_svc.SetGrantAsync(actor, _alpha.Id, _alphaTarget.Id, AccessLevel.Read, Ctx)),
+            AdminService.SetStaffRoleOp => await O(_svc.SetStaffRoleAsync(actor, _staff.Id, StaffRole.StaffAdmin, Ctx)),
+            _ => throw new ArgumentOutOfRangeException(nameof(op)),
+        };
+    }
+
+    private async Task<string> SnapshotAsync()
+    {
+        var users = (await _users.ListAsync()).OrderBy(u => u.Id).Select(u => u.ToString());
+        var customers = (await _customers.ListAsync()).OrderBy(c => c.Id).Select(c => c.ToString());
+        var targets = (await _targets.ListAsync()).OrderBy(t => t.Id).Select(t => t.ToString());
+        var grants = (await _grants.ListForCustomerAsync(_alpha.Id)).Concat(await _grants.ListForCustomerAsync(_bravo.Id)).Select(g => g.ToString());
+        return string.Join("\n", users.Concat(customers).Concat(targets).Concat(grants));
+    }
+
+    [Theory]
+    [InlineData(AdminService.SaveCustomerOp, false)]
+    [InlineData(AdminService.AddCustomerUserOp, false)]
+    [InlineData(AdminService.SetUserActiveOp, false)]
+    [InlineData(AdminService.SaveTargetOp, false)]
+    [InlineData(AdminService.TestTargetOp, false)]
+    [InlineData(AdminService.SetGrantOp, false)]
+    [InlineData(AdminService.SetStaffRoleOp, false)]
+    [InlineData(AdminService.SaveCustomerOp, true)]
+    [InlineData(AdminService.AddCustomerUserOp, true)]
+    [InlineData(AdminService.SetUserActiveOp, true)]
+    [InlineData(AdminService.SaveTargetOp, true)]
+    [InlineData(AdminService.TestTargetOp, true)]
+    [InlineData(AdminService.SetGrantOp, true)]
+    [InlineData(AdminService.SetStaffRoleOp, true)]
+    public async Task Mutation_ByStaffRoleOrUnknownActor_DeniedWithExactlyOneDeniedRow(string op, bool unknownActor)
+    {
+        var actor = unknownActor ? Guid.NewGuid() : _staff.Id;
+        var before = await SnapshotAsync();
+
+        var outcome = await InvokeAsync(op, actor);
+
+        Assert.Equal(AccessOutcome.Denied, outcome);
+        Assert.Equal(before, await SnapshotAsync());
+        var row = Assert.Single(await AuditAsync());
+        Assert.Equal(op, row.Operation);
+        Assert.Equal(AuditResult.Denied, row.Result);
+        Assert.Equal(unknownActor ? "" : _staff.Upn, row.UserDisplay);
+        Assert.Equal("10.0.0.9", row.SourceIp);
+        Assert.Equal("corr-admin", row.CorrelationId);
+        Assert.DoesNotContain(_fake.Calls, c => c.StartsWith("Probe"));
+    }
+
+    [Fact]
+    public async Task SaveTarget_Boundaries_And_Normalisation()
+    {
+        async Task<AccessOutcome> Save(Func<StorageTarget, StorageTarget> edit, string container)
+        {
+            var t = edit(Target(_alpha.Id, "T", "acct" + Guid.NewGuid().ToString("N")[..8], container));
+            return (await _svc.SaveTargetAsync(_admin.Id, t, Ctx)).Outcome;
+        }
+
+        Assert.Equal(AccessOutcome.Ok, (await _svc.SaveTargetAsync(_admin.Id, Target(_alpha.Id, "T", "abc", "abc"), Ctx)).Outcome);
+        Assert.Equal(AccessOutcome.Ok, (await _svc.SaveTargetAsync(_admin.Id, Target(_alpha.Id, "T", new string('a', 24), "abc"), Ctx)).Outcome);
+        Assert.Equal(AccessOutcome.Ok, await Save(t => t, new string('c', 63)));
+        Assert.Equal(AccessOutcome.Invalid, await Save(t => t, new string('c', 64)));
+        Assert.Equal(AccessOutcome.Ok, await Save(t => t with { DisplayName = new string('d', 100) }, "disp-ok"));
+        Assert.Equal(AccessOutcome.Invalid, await Save(t => t with { DisplayName = new string('d', 101) }, "disp-bad"));
+        Assert.Equal(AccessOutcome.Invalid, await Save(t => t with { ResourceGroup = "" }, "rg-empty"));
+        Assert.Equal(AccessOutcome.Invalid, await Save(t => t with { ResourceGroup = "rg/x" }, "rg-slash"));
+        Assert.Equal(AccessOutcome.Ok, await Save(t => t with { ResourceGroup = new string('r', 90) }, "rg-90"));
+        Assert.Equal(AccessOutcome.Invalid, await Save(t => t with { ResourceGroup = new string('r', 91) }, "rg-91"));
+        Assert.Equal(AccessOutcome.Invalid, await Save(t => t with { Kind = (StorageKind)9 }, "kind-bad"));
+    }
+
+    [Fact]
+    public async Task SaveTarget_DeletedCustomer_Invalid()
+    {
+        var result = await _svc.SaveTargetAsync(_admin.Id, Target(Guid.NewGuid(), "T", "ghoststore", "ghost-one"), Ctx);
+
+        Assert.Equal(AccessOutcome.Invalid, result.Outcome);
+        Assert.Equal("That customer no longer exists.", result.Message);
+    }
+
+    [Fact]
+    public async Task SaveTarget_SuffixIsTrimmedAndLowercased()
+    {
+        var result = await _svc.SaveTargetAsync(_admin.Id,
+            Target(_alpha.Id, "T", "casestore", "case-one") with { EndpointSuffix = " CORE.Windows.NET " }, Ctx);
+
+        Assert.Equal("core.windows.net", result.Value!.EndpointSuffix);
+        Assert.Equal("core.windows.net", (await _targets.GetAsync(result.Value.Id))!.EndpointSuffix);
+    }
+
+    [Fact]
+    public void AllowedEndpointSuffixes_ConfiguredEntriesNormalised()
+    {
+        var svc = Build(new Dictionary<string, string?>
+        {
+            ["Storage:AllowedEndpointSuffixes:0"] = " Foo.Example ",
+            ["Storage:AllowedEndpointSuffixes:1"] = "FOO.example",
+            ["Storage:AllowedEndpointSuffixes:2"] = "  ",
+        });
+
+        Assert.Equal(new[] { "foo.example" }, svc.AllowedEndpointSuffixes);
+    }
+
+    [Fact]
+    public void AllowedEndpointSuffixes_NoUsableEntries_FallsBackToDefaults()
+    {
+        var blank = Build(new Dictionary<string, string?> { ["Storage:AllowedEndpointSuffixes:0"] = " " });
+        var none = Build(new Dictionary<string, string?>());
+
+        var defaults = new[] { AdminService.DefaultEndpointSuffix, AdminService.GovEndpointSuffix };
+        Assert.Equal(defaults, blank.AllowedEndpointSuffixes);
+        Assert.Equal(defaults, none.AllowedEndpointSuffixes);
+    }
+
+    [Fact]
+    public async Task SaveCustomer_Boundaries_And_Enums()
+    {
+        Customer New(string name, string notes = "", CustomerCloud cloud = CustomerCloud.Commercial,
+            CrossTenantStatus status = CrossTenantStatus.NotRequired) => new(Guid.Empty, name, true, notes, null, cloud, status);
+        async Task<AccessOutcome> Save(Customer c) => (await _svc.SaveCustomerAsync(_admin.Id, c, Ctx)).Outcome;
+
+        Assert.Equal(AccessOutcome.Ok, await Save(New(new string('n', 200))));
+        Assert.Equal(AccessOutcome.Invalid, await Save(New(new string('m', 201))));
+        Assert.Equal(AccessOutcome.Ok, await Save(New("Notes ok", new string('x', 2000))));
+        Assert.Equal(AccessOutcome.Invalid, await Save(New("Notes bad", new string('x', 2001))));
+        Assert.Equal(AccessOutcome.Invalid, await Save(New("Cloud bad", cloud: (CustomerCloud)5)));
+        Assert.Equal(AccessOutcome.Invalid, await Save(New("Status bad", status: (CrossTenantStatus)7)));
+        var gov = await _svc.SaveCustomerAsync(_admin.Id, New("Gov done", cloud: CustomerCloud.AzureGov, status: CrossTenantStatus.Complete), Ctx);
+        Assert.Equal(CrossTenantStatus.Complete, gov.Value!.CrossTenantStatus);
+    }
+
+    [Fact]
+    public async Task SaveCustomer_DuplicateName_Invalid_WritesNoRow()
+    {
+        var result = await _svc.SaveCustomerAsync(_admin.Id,
+            new Customer(Guid.Empty, "Alpha", true, "", null, CustomerCloud.Commercial, CrossTenantStatus.NotRequired), Ctx);
+
+        Assert.Equal(AccessOutcome.Invalid, result.Outcome);
+        Assert.Equal(2, (await _customers.ListAsync()).Count);
+        Assert.Empty(await AuditAsync(AdminService.SaveCustomerOp));
+    }
+
+    [Fact]
+    public async Task TestTarget_MissingTarget_NotFound_NoProbe()
+    {
+        var result = await _svc.TestTargetAsync(_admin.Id, Guid.NewGuid(), Ctx);
+
+        Assert.Equal(AccessOutcome.NotFound, result.Outcome);
+        Assert.DoesNotContain(_fake.Calls, c => c.StartsWith("Probe"));
+        Assert.Empty(await AuditAsync(AdminService.TestTargetOp));
+    }
+
+    [Fact]
+    public async Task TestTarget_CallerCancelled_Propagates_NoFailedRow()
+    {
+        using var cts = new CancellationTokenSource();
+        _fake.FailOnCall = c => c.StartsWith("Probe") ? new OperationCanceledException(cts.Token) : null;
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => _svc.TestTargetAsync(_admin.Id, _alphaTarget.Id, Ctx, cts.Token));
+
+        Assert.Empty(await AuditAsync(AdminService.TestTargetOp));
+    }
+
+    [Fact]
+    public async Task TestTarget_TimeoutNotCallerCancel_Unavailable_OneFailedRow()
+    {
+        _fake.FailOnCall = c => c.StartsWith("Probe") ? new OperationCanceledException() : null;
+
+        var result = await _svc.TestTargetAsync(_admin.Id, _alphaTarget.Id, Ctx);
+
+        Assert.Equal(AccessOutcome.Unavailable, result.Outcome);
+        Assert.False(string.IsNullOrEmpty(result.Message));
+        Assert.Equal(AuditResult.Failed, Assert.Single(await AuditAsync(AdminService.TestTargetOp)).Result);
+    }
+
+    [Fact]
+    public void AdminAlert_For_MapsOutcomes()
+    {
+        var ok = AdminAlert.For(AccessOutcome.Ok, null, "Done.");
+        Assert.Equal("Done.", ok.Text);
+        Assert.False(ok.IsError);
+        Assert.Equal("Custom", AdminAlert.For(AccessOutcome.Ok, "Custom").Text);
+        Assert.Equal("Saved.", AdminAlert.For(AccessOutcome.Ok, "").Text);
+
+        foreach (var o in new[] { AccessOutcome.Unavailable, AccessOutcome.Busy, AccessOutcome.Conflict })
+        {
+            Assert.Equal("alert--warning", AdminAlert.For(o, "m").Css);
+            Assert.Equal("m", AdminAlert.For(o, "m").Text);
+            Assert.Equal(AdminAlert.StoreDownMessage, AdminAlert.For(o, null).Text);
+            Assert.True(AdminAlert.For(o, "m").IsError);
+        }
+        foreach (var o in new[] { AccessOutcome.Denied, AccessOutcome.NotFound, AccessOutcome.Invalid, AccessOutcome.AlreadyExists })
+        {
+            Assert.Equal("alert--danger", AdminAlert.For(o, "m").Css);
+            Assert.Equal("That didn't work.", AdminAlert.For(o, null).Text);
+        }
+    }
+
+    [Fact]
+    public void AuditFilters_EdgeInputs()
+    {
+        Assert.NotNull(AuditFilters.ToQuery(null, null, null, "   ", "  ", " 2026-11-01 ", null, 5));
+        Assert.Null(AuditFilters.ToQuery(null, null, null, null, "7", null, null, 5));
+        Assert.Null(AuditFilters.ToQuery(null, null, null, null, null, "2026-02-30", null, 5));
+        Assert.Null(AuditFilters.ToQuery(null, null, null, null, null, null, "2026-11-1", 5));
+        Assert.Equal(AuditResult.Success, AuditFilters.ToQuery(null, null, null, null, " success ", null, null, 5)!.Result);
+        Assert.Null(AuditFilters.ToQuery(null, null, null, "  ", null, null, null, 5)!.Operation);
+        Assert.True(AuditFilters.TryParseDate("  ", out var none) && none is null);
+        Assert.Equal(5, AuditFilters.ToQuery(null, null, null, null, null, null, null, 5)!.Limit);
+    }
+
+    [Fact]
+    public void AuditFilters_MaxDateTo_DoesNotThrow()
+    {
+        var q = AuditFilters.ToQuery(null, null, null, null, null, null, "9999-12-31", 5);
+
+        Assert.NotNull(q);
+        Assert.NotNull(q!.To);
+    }
 }
