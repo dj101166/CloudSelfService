@@ -1,0 +1,149 @@
+@page "/admin/customers"
+@attribute [Authorize(Policy = Policies.StaffAdmin)]
+@inherits AdminPageBase
+@inject ICustomerStore CustomerStore
+@inject IUserStore Users
+@inject ITargetStore TargetStore
+@using CloudSelfService.Models
+@using CloudSelfService.Services
+@using CloudSelfService.Services.Access
+@using CloudSelfService.Services.Data
+
+@*
+    Every customer with their cloud, cross-tenant status and how many users and shares they have, plus the form that
+    adds one. Reads go straight to the stores; the change goes through AdminService, which re-checks the role.
+*@
+
+<PageTitle>Customers — Advanced Cloud Self Service</PageTitle>
+
+<div class="page-head">
+    <div>
+        <h1 class="page-title">Customers</h1>
+        <p class="page-subtitle">The organisations that use the portal. Open one to manage its users and which storage it can reach.</p>
+    </div>
+</div>
+
+<AdminAlertBox Alert="this.Alert" />
+
+@if (!this.Loaded)
+{
+    @if (this.Alert is null)
+    {
+        <div class="loading"><span class="spinner spinner--lg"></span> Loading…</div>
+    }
+}
+else
+{
+    <div class="card" data-testid="admin-customers-table">
+        <div class="table-wrap">
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th scope="col">Name</th>
+                        <th scope="col">Cloud</th>
+                        <th scope="col">Cross-tenant</th>
+                        <th scope="col" class="table__num">Users</th>
+                        <th scope="col" class="table__num">Storage</th>
+                        <th scope="col">Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @if (this._rows.Count == 0)
+                    {
+                        <tr><td colspan="6" class="table__empty" data-testid="admin-customers-empty">No customers yet. Add the first one below.</td></tr>
+                    }
+                    @foreach (var row in this._rows)
+                    {
+                        <tr data-testid="admin-customer-row" data-name="@row.Customer.Name" @key="row.Customer.Id">
+                            <td><a href="admin/customers/@row.Customer.Id" data-testid="admin-customer-link">@StoragePath.DisplayName(row.Customer.Name)</a></td>
+                            <td>@CloudLabel(row.Customer.Cloud)</td>
+                            <td><span class="badge @CrossTenantBadge(row.Customer)">@CrossTenantLabel(row.Customer)</span></td>
+                            <td class="table__num">@row.Users</td>
+                            <td class="table__num">@row.Targets</td>
+                            <td><span class="badge @(row.Customer.Active ? "badge--success" : "badge--muted")">@(row.Customer.Active ? "Active" : "Inactive")</span></td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <section class="card admin__section" aria-labelledby="add-customer-title">
+        <div class="card__head"><h2 class="card__title" id="add-customer-title">Add customer</h2></div>
+        <div class="card__body">
+            <form @onsubmit="this.AddAsync" data-testid="admin-add-customer-form">
+                <div class="field-row">
+                    <div class="field">
+                        <label class="label" for="add-customer-name">Name</label>
+                        <input id="add-customer-name" class="input" data-testid="admin-add-customer-name" autocomplete="off"
+                               maxlength="200" @bind="this._name" @bind:event="oninput" />
+                    </div>
+                    <div class="field">
+                        <label class="label" for="add-customer-cloud">Cloud</label>
+                        <select id="add-customer-cloud" class="select" data-testid="admin-add-customer-cloud" @bind="this._cloud">
+                            <option value="@CustomerCloud.Commercial">Commercial</option>
+                            <option value="@CustomerCloud.AzureGov">Azure Government</option>
+                        </select>
+                        <p class="hint">Azure Government customers need a cross-tenant setup before their users can sign in.</p>
+                    </div>
+                </div>
+                <div class="field">
+                    <label class="label" for="add-customer-notes">Notes</label>
+                    <textarea id="add-customer-notes" class="textarea admin__notes" data-testid="admin-add-customer-notes"
+                              maxlength="2000" @bind="this._notes" @bind:event="oninput"></textarea>
+                </div>
+                <div class="admin__actions">
+                    <button type="submit" class="btn btn--primary" data-testid="admin-add-customer-submit"
+                            disabled="@(this.Busy || string.IsNullOrWhiteSpace(this._name))">
+                        <Icon Name="plus" /> Add customer
+                    </button>
+                </div>
+            </form>
+        </div>
+    </section>
+}
+
+@code {
+    private sealed record Row(Customer Customer, int Users, int Targets);
+
+    private List<Row> _rows = new();
+    private string _name = "";
+    private string _notes = "";
+    private CustomerCloud _cloud = CustomerCloud.Commercial;
+
+    protected override Task OnInitializedAsync() => this.LoadGuardedAsync(this.LoadAsync);
+
+    private async Task LoadAsync()
+    {
+        var customers = await this.CustomerStore.ListAsync();
+        var users = await this.Users.ListAsync(UserKind.Customer);
+        var targets = await this.TargetStore.ListAsync();
+        this._rows = customers
+            .Select(c => new Row(c, users.Count(u => u.CustomerId == c.Id), targets.Count(t => t.CustomerId == c.Id)))
+            .ToList();
+    }
+
+    private async Task AddAsync()
+    {
+        var customer = new Customer(Guid.Empty, this._name, true, this._notes, null, this._cloud, CrossTenantStatus.NotRequired);
+        var added = false;
+        await this.ActAsync(async (actor, ctx) =>
+        {
+            var result = await this.Admin.SaveCustomerAsync(actor, customer, ctx);
+            added = result.Outcome == AccessOutcome.Ok;
+            return AdminAlert.For(result.Outcome, result.Message, $"Added {StoragePath.DisplayName(customer.Name.Trim())}.");
+        }, this.LoadAsync);
+        if (!added) return;
+        this._name = "";
+        this._notes = "";
+        this._cloud = CustomerCloud.Commercial;
+    }
+
+    private static string CloudLabel(CustomerCloud cloud) => cloud == CustomerCloud.AzureGov ? "Azure Government" : "Commercial";
+
+    private static string CrossTenantLabel(Customer c) => c.Cloud == CustomerCloud.Commercial ? "Not needed"
+        : c.CrossTenantStatus == CrossTenantStatus.Complete ? "Complete" : "Pending";
+
+    private static string CrossTenantBadge(Customer c) => c.Cloud == CustomerCloud.Commercial ? "badge--muted"
+        : c.CrossTenantStatus == CrossTenantStatus.Complete ? "badge--success" : "badge--warning";
+}

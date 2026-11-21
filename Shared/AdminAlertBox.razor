@@ -1,0 +1,8 @@
+@if (this.Alert is { } alert)
+{
+    <div class="alert @alert.Css" role="@(alert.IsError ? "alert" : "status")" data-testid="admin-alert">@alert.Text</div>
+}
+
+@code {
+    [Parameter] public AdminAlert? Alert { get; set; }
+}

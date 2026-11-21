@@ -17,6 +17,7 @@ Initial (unreleased) scaffold. This app has never been published, so all work to
 - File browser: breadcrumb, folders then files with size and local modified time, "Load more" for very large folders, and actions by access level - download (Read); upload by button or drag and drop, new folder, rename and move (Contribute); delete, with the folder's name typed to confirm a folder delete (Full).
 - Upload panel with progress, pause, resume and cancel. Replacing an existing file asks first. A dropped connection retries each piece, then pauses; Resume, or selecting the same file again, carries on from where it stopped.
 - Help page: signing in as an invited guest, what Read, Contribute and Full allow, large uploads, and contacting Advanced support.
+- Staff admin: Customers (add, edit, users by UPN, per-share access levels, and the cross-tenant checklist for Azure Government customers), Storage targets (register shares and containers, with a Test access button), Staff (Owner only: assign Staff or Staff Admin; Owners come from configuration) and an Audit log with filters and a CSV export. Every admin change is audited. `docs/gov-cloud-guest-setup.md` is the checklist to send an Azure Government customer's IT.
 
 ### 🛡️ Security
 - Hardened HTTP security headers: added Permissions-Policy and CSP form-action 'self'; HSTS max-age set to 1 year.

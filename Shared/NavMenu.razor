@@ -1,8 +1,16 @@
+@inject CloudSelfService.Services.Identity.CurrentUser CurrentUser
+@inject CloudSelfService.Services.Identity.OwnerConfig Owners
+@inject ILogger<NavMenu> Logger
+@using CloudSelfService.Models
+
 @*
     The sidebar navigation. One link per area; later tasks add their own.
 
     The label is a separate span so the collapsed rail can hide it without hiding the icon; CSS
     does that, keyed off an attribute on <html> that survives a reload.
+
+    The Admin group is only a convenience: it is shown from the role this component reads, and every admin page and
+    every admin action checks the role again itself.
 *@
 <nav class="app__nav" data-testid="app-nav">
     <FilesNavLink class="app__nav-link" ActiveClass="app__nav-link--active" href="">
@@ -13,4 +21,45 @@
         <Icon Name="help" />
         <span class="app__nav-link__label">Help</span>
     </NavLink>
+
+    @if (this._role >= StaffRole.StaffAdmin)
+    {
+        <div class="app__nav-group" data-testid="nav-admin-group">Admin</div>
+        <NavLink class="app__nav-link" ActiveClass="app__nav-link--active" href="admin/customers" data-testid="nav-admin-customers">
+            <Icon Name="users" />
+            <span class="app__nav-link__label">Customers</span>
+        </NavLink>
+        <NavLink class="app__nav-link" ActiveClass="app__nav-link--active" href="admin/targets" data-testid="nav-admin-targets">
+            <Icon Name="database" />
+            <span class="app__nav-link__label">Storage targets</span>
+        </NavLink>
+        @if (this._role >= StaffRole.Owner)
+        {
+            <NavLink class="app__nav-link" ActiveClass="app__nav-link--active" href="admin/staff" data-testid="nav-admin-staff">
+                <Icon Name="shield" />
+                <span class="app__nav-link__label">Staff</span>
+            </NavLink>
+        }
+        <NavLink class="app__nav-link" ActiveClass="app__nav-link--active" href="admin/audit-log" data-testid="nav-admin-audit">
+            <Icon Name="history" />
+            <span class="app__nav-link__label">Audit log</span>
+        </NavLink>
+    }
 </nav>
+
+@code {
+    private StaffRole _role = StaffRole.None;
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            var user = await this.CurrentUser.GetAsync();
+            this._role = user is { Kind: UserKind.Staff } ? this.Owners.EffectiveRole(user) : StaffRole.None;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            this.Logger.LogError(ex, "Reading the signed-in role for the navigation failed.");
+        }
+    }
+}

@@ -1,0 +1,326 @@
+@page "/admin/customers/{Id:guid}"
+@attribute [Authorize(Policy = Policies.StaffAdmin)]
+@inherits AdminPageBase
+@inject ICustomerStore Customers
+@inject IUserStore Users
+@inject ITargetStore Targets
+@inject IGrantStore Grants
+@using CloudSelfService.Models
+@using CloudSelfService.Services
+@using CloudSelfService.Services.Access
+@using CloudSelfService.Services.Data
+@using CloudSelfService.Services.Files
+
+@*
+    One customer: who can sign in for them, which of their storage each level of access applies to, and for Azure
+    Government customers the cross-tenant setup. Only storage the customer owns is offered for a grant; the service and
+    the database both refuse anything else.
+*@
+
+<PageTitle>@(this._customer is null ? "Customer" : StoragePath.DisplayName(this._customer.Name)) — Advanced Cloud Self Service</PageTitle>
+
+@if (this._customer is null)
+{
+    <h1 class="page-title">Customer</h1>
+    <AdminAlertBox Alert="this.Alert" />
+    @if (this.Loaded)
+    {
+        <div class="alert alert--danger" role="alert" data-testid="admin-customer-missing">That customer doesn't exist. <a href="admin/customers">Back to customers</a></div>
+    }
+    else if (this.Alert is null)
+    {
+        <div class="loading"><span class="spinner spinner--lg"></span> Loading…</div>
+    }
+}
+else
+{
+    <div class="page-head">
+        <div>
+            <nav class="admin__crumbs" aria-label="Breadcrumb"><a href="admin/customers">Customers</a></nav>
+            <h1 class="page-title" data-testid="admin-customer-title">@StoragePath.DisplayName(this._customer.Name)</h1>
+            <div class="u-row u-row--wrap admin__badges">
+                <span class="badge badge--muted">@(this._customer.Cloud == CustomerCloud.AzureGov ? "Azure Government" : "Commercial")</span>
+                <span class="badge @(this._customer.Active ? "badge--success" : "badge--muted")">@(this._customer.Active ? "Active" : "Inactive")</span>
+            </div>
+        </div>
+    </div>
+
+    <AdminAlertBox Alert="this.Alert" />
+
+    <section class="card admin__section" aria-labelledby="details-title" data-testid="admin-details">
+        <div class="card__head"><h2 class="card__title" id="details-title">Details</h2></div>
+        <div class="card__body">
+            <form @onsubmit="this.SaveDetailsAsync">
+                <div class="field-row">
+                    <div class="field">
+                        <label class="label" for="customer-name">Name</label>
+                        <input id="customer-name" class="input" data-testid="admin-customer-name" maxlength="200" autocomplete="off"
+                               @bind="this._name" @bind:event="oninput" />
+                    </div>
+                    <div class="field">
+                        <label class="label" for="customer-active">Status</label>
+                        <select id="customer-active" class="select" data-testid="admin-customer-active" @bind="this._active">
+                            <option value="@true">Active</option>
+                            <option value="@false">Inactive</option>
+                        </select>
+                        <p class="hint">An inactive customer's users can't sign in or reach any storage.</p>
+                    </div>
+                </div>
+                <div class="field">
+                    <label class="label" for="customer-notes">Notes</label>
+                    <textarea id="customer-notes" class="textarea" data-testid="admin-customer-notes" maxlength="2000"
+                              @bind="this._notes" @bind:event="oninput"></textarea>
+                </div>
+                <div class="admin__actions">
+                    <button type="submit" class="btn btn--primary" data-testid="admin-customer-save"
+                            disabled="@(this.Busy || string.IsNullOrWhiteSpace(this._name))">Save details</button>
+                </div>
+            </form>
+        </div>
+    </section>
+
+    <section class="card admin__section" aria-labelledby="users-title" data-testid="admin-users">
+        <div class="card__head"><h2 class="card__title" id="users-title">Users</h2></div>
+        <div class="card__body">
+            <div class="table-wrap">
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th scope="col">User</th>
+                            <th scope="col">Last sign-in</th>
+                            <th scope="col">Status</th>
+                            <th scope="col"><span class="u-sr-only">Actions</span></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @if (this._users.Count == 0)
+                        {
+                            <tr><td colspan="4" class="table__empty" data-testid="admin-users-empty">No users yet.</td></tr>
+                        }
+                        @foreach (var user in this._users)
+                        {
+                            <tr data-testid="admin-user-row" data-upn="@user.Upn" @key="user.Id">
+                                <td>
+                                    <div>@StoragePath.DisplayName(user.DisplayName)</div>
+                                    <div class="u-subtle u-small admin__mono">@StoragePath.DisplayName(user.Upn)</div>
+                                </td>
+                                <td class="u-nowrap u-muted">@(user.LastSignInAt is null ? "Never" : FileDisplay.Modified(user.LastSignInAt, null))</td>
+                                <td><span class="badge @(user.Active ? "badge--success" : "badge--muted")">@(user.Active ? "Active" : "Inactive")</span></td>
+                                <td class="table__num">
+                                    <button type="button" class="btn btn--secondary btn--sm" data-testid="admin-user-toggle"
+                                            disabled="@this.Busy" @onclick="() => this.SetActiveAsync(user)">
+                                        @(user.Active ? "Deactivate" : "Activate")
+                                    </button>
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+
+            <form class="admin__subform" @onsubmit="this.AddUserAsync" data-testid="admin-add-user-form">
+                <h3 class="admin__subtitle">Add a user</h3>
+                <div class="field-row">
+                    <div class="field">
+                        <label class="label" for="add-user-upn">UPN</label>
+                        <input id="add-user-upn" class="input" data-testid="admin-add-user-upn" autocomplete="off" spellcheck="false"
+                               placeholder="name@customer.example" maxlength="320" @bind="this._upn" @bind:event="oninput" />
+                    </div>
+                    <div class="field">
+                        <label class="label" for="add-user-name">Display name (optional)</label>
+                        <input id="add-user-name" class="input" data-testid="admin-add-user-name" autocomplete="off" maxlength="200"
+                               @bind="this._displayName" @bind:event="oninput" />
+                    </div>
+                </div>
+                @if (this._customer.Cloud == CustomerCloud.AzureGov)
+                {
+                    <p class="hint" data-testid="admin-gov-upn-note">For an Azure Government customer the Entra invitation must use the user's UPN, not their email address.</p>
+                }
+                <p class="hint">Adding a user lets them sign in once they have redeemed an Entra guest invitation; the portal doesn't send one.</p>
+                <div class="admin__actions">
+                    <button type="submit" class="btn btn--primary" data-testid="admin-add-user-submit"
+                            disabled="@(this.Busy || string.IsNullOrWhiteSpace(this._upn))">
+                        <Icon Name="plus" /> Add user
+                    </button>
+                </div>
+            </form>
+        </div>
+    </section>
+
+    <section class="card admin__section" aria-labelledby="storage-title" data-testid="admin-storage">
+        <div class="card__head"><h2 class="card__title" id="storage-title">Storage</h2></div>
+        <div class="card__body">
+            <div class="table-wrap">
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th scope="col">Share or container</th>
+                            <th scope="col">Kind</th>
+                            <th scope="col">Access</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @if (this._targets.Count == 0)
+                        {
+                            <tr><td colspan="3" class="table__empty" data-testid="admin-storage-empty">This customer has no storage registered. <a href="admin/targets">Register it under Storage targets</a>, owned by this customer.</td></tr>
+                        }
+                        @foreach (var target in this._targets)
+                        {
+                            <tr data-testid="admin-target-row" data-name="@target.DisplayName" @key="target.Id">
+                                <td>
+                                    <div>@StoragePath.DisplayName(target.DisplayName)</div>
+                                    <div class="u-subtle u-small admin__mono">@target.AccountName / @target.ContainerName</div>
+                                </td>
+                                <td>@(target.Kind == StorageKind.FileShare ? "File share" : "Blob container")</td>
+                                <td>
+                                    <label class="u-sr-only" for="level-@target.Id">Access level for @StoragePath.DisplayName(target.DisplayName)</label>
+                                    <select id="level-@target.Id" class="select select--sm admin__level" data-testid="admin-grant-level"
+                                            disabled="@this.Busy" value="@LevelOf(target.Id)"
+                                            @onchange="e => this.SetGrantAsync(target, e.Value?.ToString())">
+                                        @foreach (var level in Levels)
+                                        {
+                                            <option value="@level">@level</option>
+                                        }
+                                    </select>
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+            <p class="hint">None removes access. A level applies to every user of this customer.</p>
+        </div>
+    </section>
+
+    @if (this._customer.Cloud == CustomerCloud.AzureGov)
+    {
+        <section class="card admin__section" aria-labelledby="xt-title" data-testid="admin-cross-tenant">
+            <div class="card__head"><h2 class="card__title" id="xt-title">Cross-tenant setup</h2></div>
+            <div class="card__body">
+                <p>Azure Government users sign in through Advanced's tenant as cross-cloud guests, which needs a setup on both sides. Send the customer's IT the steps in <code>docs/gov-cloud-guest-setup.md</code>.</p>
+                <ol class="admin__checklist" data-testid="admin-xt-checklist">
+                    <li>Customer enables <strong>Microsoft Azure Commercial</strong> in their Microsoft cloud settings.</li>
+                    <li>Customer adds Advanced's tenant ID as an organization (a lookup by domain doesn't work across clouds).</li>
+                    <li>Customer allows outbound B2B collaboration for the people who need the portal.</li>
+                    <li>Customer sends their users' <strong>UPNs</strong>, not email addresses.</li>
+                    <li>Advanced does the mirror image for the customer's tenant ID.</li>
+                    <li>Advanced invites each user by UPN and they redeem the invitation.</li>
+                </ol>
+                <form @onsubmit="this.SaveCrossTenantAsync">
+                    <div class="field-row">
+                        <div class="field">
+                            <label class="label" for="xt-status">Status</label>
+                            <select id="xt-status" class="select" data-testid="admin-xt-status" @bind="this._xtStatus">
+                                <option value="@CrossTenantStatus.Pending">Pending</option>
+                                <option value="@CrossTenantStatus.Complete">Complete</option>
+                            </select>
+                        </div>
+                        <div class="field">
+                            <label class="label" for="xt-tenant">Customer's home tenant ID</label>
+                            <input id="xt-tenant" class="input admin__mono" data-testid="admin-xt-tenant" autocomplete="off" spellcheck="false"
+                                   placeholder="00000000-0000-0000-0000-000000000000" maxlength="36" @bind="this._tenantId" @bind:event="oninput" />
+                        </div>
+                    </div>
+                    <div class="admin__actions">
+                        <button type="submit" class="btn btn--primary" data-testid="admin-xt-save" disabled="@this.Busy">Save cross-tenant status</button>
+                    </div>
+                </form>
+            </div>
+        </section>
+    }
+}
+
+@code {
+    private static readonly AccessLevel[] Levels = { AccessLevel.None, AccessLevel.Read, AccessLevel.Contribute, AccessLevel.Full };
+
+    [Parameter] public Guid Id { get; set; }
+
+    private Customer? _customer;
+    private List<AppUser> _users = new();
+    private List<StorageTarget> _targets = new();
+    private Dictionary<Guid, AccessLevel> _grants = new();
+
+    private string _name = "";
+    private string _notes = "";
+    private bool _active = true;
+    private string _upn = "";
+    private string _displayName = "";
+    private CrossTenantStatus _xtStatus = CrossTenantStatus.Pending;
+    private string _tenantId = "";
+    private Guid _loadedFor;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (this._loadedFor == this.Id) return;
+        this._loadedFor = this.Id;
+        this._customer = null;
+        this.Alert = null;
+        await this.LoadGuardedAsync(this.LoadAsync);
+    }
+
+    private async Task LoadAsync()
+    {
+        var customer = await this.Customers.GetAsync(this.Id);
+        this._customer = customer;
+        if (customer is null) return;
+        this._users = (await this.Users.ListAsync(UserKind.Customer, customer.Id)).ToList();
+        this._targets = (await this.Targets.ListAsync(customer.Id)).ToList();
+        this._grants = (await this.Grants.ListForCustomerAsync(customer.Id)).ToDictionary(g => g.TargetId, g => g.Level);
+        this._name = customer.Name;
+        this._notes = customer.Notes;
+        this._active = customer.Active;
+        this._xtStatus = customer.CrossTenantStatus == CrossTenantStatus.Complete ? CrossTenantStatus.Complete : CrossTenantStatus.Pending;
+        this._tenantId = customer.HomeTenantId ?? "";
+    }
+
+    private AccessLevel LevelOf(Guid targetId) => this._grants.GetValueOrDefault(targetId, AccessLevel.None);
+
+    private Task SaveDetailsAsync() =>
+        this.SaveCustomerAsync(this._customer! with { Name = this._name, Notes = this._notes, Active = this._active }, "Saved.");
+
+    private Task SaveCrossTenantAsync() =>
+        this.SaveCustomerAsync(this._customer! with { CrossTenantStatus = this._xtStatus, HomeTenantId = this._tenantId }, "Cross-tenant status saved.");
+
+    private Task SaveCustomerAsync(Customer changed, string success) =>
+        this.ActAsync(async (actor, ctx) =>
+        {
+            var result = await this.Admin.SaveCustomerAsync(actor, changed, ctx);
+            return AdminAlert.For(result.Outcome, result.Message, success);
+        }, this.LoadAsync);
+
+    private async Task AddUserAsync()
+    {
+        var added = false;
+        var upn = this._upn;
+        await this.ActAsync(async (actor, ctx) =>
+        {
+            var result = await this.Admin.AddCustomerUserAsync(actor, this.Id, upn, this._displayName, ctx);
+            added = result.Outcome == AccessOutcome.Ok;
+            return AdminAlert.For(result.Outcome, result.Message, $"Added {StoragePath.DisplayName(upn.Trim())}.");
+        }, this.LoadAsync);
+        if (!added) return;
+        this._upn = "";
+        this._displayName = "";
+    }
+
+    private Task SetActiveAsync(AppUser user) =>
+        this.ActAsync(async (actor, ctx) =>
+        {
+            var result = await this.Admin.SetUserActiveAsync(actor, user.Id, !user.Active, ctx);
+            return AdminAlert.For(result.Outcome, result.Message,
+                $"{StoragePath.DisplayName(user.Upn)} is now {(user.Active ? "inactive" : "active")}.");
+        }, this.LoadAsync);
+
+    private Task SetGrantAsync(StorageTarget target, string? raw)
+    {
+        if (!Enum.TryParse<AccessLevel>(raw, out var level) || !Enum.IsDefined(level)) return Task.CompletedTask;
+        return this.ActAsync(async (actor, ctx) =>
+        {
+            var result = await this.Admin.SetGrantAsync(actor, this.Id, target.Id, level, ctx);
+            return AdminAlert.For(result.Outcome, result.Message,
+                level == AccessLevel.None
+                    ? $"Removed access to {StoragePath.DisplayName(target.DisplayName)}."
+                    : $"{StoragePath.DisplayName(target.DisplayName)} is now {level}.");
+        }, this.LoadAsync);
+    }
+}

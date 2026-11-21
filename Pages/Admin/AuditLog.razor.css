@@ -1,0 +1,5 @@
+/* Audit log. Every colour reads a token. Shared admin classes live in wwwroot/css/app.css. */
+
+.admin__section--first { margin-top: 0; }
+
+.admin__more { padding: 10px 14px; margin: 0; }

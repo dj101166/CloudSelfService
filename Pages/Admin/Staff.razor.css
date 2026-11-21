@@ -1,0 +1,3 @@
+/* Staff roles. Every colour reads a token. Shared admin classes live in wwwroot/css/app.css. */
+
+.admin__owner-list { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 4px; }

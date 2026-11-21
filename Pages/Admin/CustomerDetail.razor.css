@@ -1,0 +1,3 @@
+/* Customer detail. Every colour reads a token. Shared admin classes live in wwwroot/css/app.css. */
+
+.admin__checklist li { line-height: 1.5; }

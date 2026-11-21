@@ -1,0 +1,250 @@
+@page "/admin/targets"
+@attribute [Authorize(Policy = Policies.StaffAdmin)]
+@inherits AdminPageBase
+@inject ICustomerStore CustomerStore
+@inject ITargetStore TargetStore
+@using CloudSelfService.Models
+@using CloudSelfService.Services
+@using CloudSelfService.Services.Access
+@using CloudSelfService.Services.Data
+
+@*
+    Every registered share and container, with the form that adds or edits one. Test access lists the root through the
+    private route, which proves the network path and the portal's role on that account. A target with no owner is
+    internal: staff can reach it and no customer ever can.
+*@
+
+<PageTitle>Storage targets — Advanced Cloud Self Service</PageTitle>
+
+<div class="page-head">
+    <div>
+        <h1 class="page-title">Storage targets</h1>
+        <p class="page-subtitle">The file shares and blob containers the portal can open. Register one, then grant its owner access.</p>
+    </div>
+</div>
+
+<AdminAlertBox Alert="this.Alert" />
+
+@if (!this.Loaded)
+{
+    @if (this.Alert is null)
+    {
+        <div class="loading"><span class="spinner spinner--lg"></span> Loading…</div>
+    }
+}
+else
+{
+    <div class="card" data-testid="admin-targets-table">
+        <div class="table-wrap">
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th scope="col">Name</th>
+                        <th scope="col">Owner</th>
+                        <th scope="col">Location</th>
+                        <th scope="col">Kind</th>
+                        <th scope="col">Status</th>
+                        <th scope="col"><span class="u-sr-only">Actions</span></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @if (this._targets.Count == 0)
+                    {
+                        <tr><td colspan="6" class="table__empty" data-testid="admin-targets-empty">No storage registered yet. Add the first one below.</td></tr>
+                    }
+                    @foreach (var target in this._targets)
+                    {
+                        <tr data-testid="admin-target-row" data-name="@target.DisplayName" @key="target.Id">
+                            <td>@StoragePath.DisplayName(target.DisplayName)</td>
+                            <td>@OwnerName(target.CustomerId)</td>
+                            <td class="admin__mono u-small">@target.AccountName / @target.ContainerName</td>
+                            <td>@(target.Kind == StorageKind.FileShare ? "File share" : "Blob container")</td>
+                            <td><span class="badge @(target.Active ? "badge--success" : "badge--muted")">@(target.Active ? "Active" : "Inactive")</span></td>
+                            <td>
+                                <span class="u-row u-row--wrap">
+                                    <button type="button" class="btn btn--secondary btn--sm" data-testid="admin-target-test"
+                                            disabled="@this.Busy" @onclick="() => this.TestAsync(target)">Test access</button>
+                                    <button type="button" class="btn btn--secondary btn--sm" data-testid="admin-target-edit"
+                                            disabled="@this.Busy" @onclick="() => this.Edit(target)">
+                                        <Icon Name="pencil" /> Edit
+                                    </button>
+                                </span>
+                                @if (this._testResults.TryGetValue(target.Id, out var test))
+                                {
+                                    <div class="alert @test.Css admin__test" role="status" data-testid="admin-target-test-result">@test.Text</div>
+                                }
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <section class="card admin__section" aria-labelledby="target-form-title" data-testid="admin-target-form">
+        <div class="card__head"><h2 class="card__title" id="target-form-title">@(this._editingId is null ? "Add storage target" : "Edit storage target")</h2></div>
+        <div class="card__body">
+            <form @onsubmit="this.SaveAsync">
+                <div class="field-row">
+                    <div class="field">
+                        <label class="label" for="target-name">Display name</label>
+                        <input id="target-name" class="input" data-testid="admin-target-name" maxlength="100" autocomplete="off"
+                               @bind="this._name" @bind:event="oninput" />
+                    </div>
+                    <div class="field">
+                        <label class="label" for="target-owner">Owning customer</label>
+                        <select id="target-owner" class="select" data-testid="admin-target-owner" @bind="this._ownerId">
+                            <option value="@Guid.Empty">Advanced internal (staff only)</option>
+                            @foreach (var c in this._customers)
+                            {
+                                <option value="@c.Id">@StoragePath.DisplayName(c.Name)</option>
+                            }
+                        </select>
+                        <p class="hint">A target can only be granted to its owner. Remove its grants before moving it.</p>
+                    </div>
+                </div>
+                <div class="field-row">
+                    <div class="field">
+                        <label class="label" for="target-sub">Subscription ID</label>
+                        <input id="target-sub" class="input admin__mono" data-testid="admin-target-subscription" autocomplete="off" spellcheck="false"
+                               maxlength="36" @bind="this._subscription" @bind:event="oninput" />
+                    </div>
+                    <div class="field">
+                        <label class="label" for="target-rg">Resource group</label>
+                        <input id="target-rg" class="input" data-testid="admin-target-rg" autocomplete="off" spellcheck="false"
+                               maxlength="90" @bind="this._resourceGroup" @bind:event="oninput" />
+                    </div>
+                </div>
+                <div class="field-row">
+                    <div class="field">
+                        <label class="label" for="target-account">Storage account name</label>
+                        <input id="target-account" class="input admin__mono" data-testid="admin-target-account" autocomplete="off" spellcheck="false"
+                               maxlength="24" @bind="this._account" @bind:event="oninput" />
+                    </div>
+                    <div class="field">
+                        <label class="label" for="target-kind">Kind</label>
+                        <select id="target-kind" class="select" data-testid="admin-target-kind" @bind="this._kind">
+                            <option value="@StorageKind.FileShare">File share</option>
+                            <option value="@StorageKind.BlobContainer">Blob container</option>
+                        </select>
+                    </div>
+                    <div class="field">
+                        <label class="label" for="target-container">Share or container name</label>
+                        <input id="target-container" class="input admin__mono" data-testid="admin-target-container" autocomplete="off" spellcheck="false"
+                               maxlength="63" @bind="this._container" @bind:event="oninput" />
+                    </div>
+                </div>
+                <div class="field-row">
+                    <div class="field">
+                        <label class="label" for="target-suffix">Endpoint suffix</label>
+                        <select id="target-suffix" class="select" data-testid="admin-target-suffix" @bind="this._suffix">
+                            @foreach (var s in this.SuffixChoices)
+                            {
+                                <option value="@s">@s</option>
+                            }
+                        </select>
+                        <p class="hint">core.usgovcloudapi.net is for Azure Government storage accounts.</p>
+                    </div>
+                    <div class="field">
+                        <label class="label" for="target-active">Status</label>
+                        <select id="target-active" class="select" data-testid="admin-target-active" @bind="this._active">
+                            <option value="@true">Active</option>
+                            <option value="@false">Inactive</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="admin__actions">
+                    <button type="submit" class="btn btn--primary" data-testid="admin-target-save"
+                            disabled="@(this.Busy || string.IsNullOrWhiteSpace(this._name))">@(this._editingId is null ? "Add target" : "Save target")</button>
+                    @if (this._editingId is not null)
+                    {
+                        <button type="button" class="btn btn--secondary" data-testid="admin-target-cancel" disabled="@this.Busy"
+                                @onclick="this.ResetForm">Cancel</button>
+                    }
+                </div>
+            </form>
+        </div>
+    </section>
+}
+
+@code {
+    private List<StorageTarget> _targets = new();
+    private List<Customer> _customers = new();
+    private readonly Dictionary<Guid, AdminAlert> _testResults = new();
+
+    private Guid? _editingId;
+    private string _name = "";
+    private Guid _ownerId;
+    private string _subscription = "";
+    private string _resourceGroup = "";
+    private string _account = "";
+    private StorageKind _kind = StorageKind.FileShare;
+    private string _container = "";
+    private string _suffix = AdminService.DefaultEndpointSuffix;
+    private bool _active = true;
+
+    private IReadOnlyList<string> SuffixChoices => this.Admin.AllowedEndpointSuffixes;
+
+    protected override Task OnInitializedAsync() => this.LoadGuardedAsync(this.LoadAsync);
+
+    private async Task LoadAsync()
+    {
+        this._customers = (await this.CustomerStore.ListAsync()).ToList();
+        this._targets = (await this.TargetStore.ListAsync()).ToList();
+    }
+
+    private string OwnerName(Guid? customerId) =>
+        customerId is { } id ? StoragePath.DisplayName(this._customers.FirstOrDefault(c => c.Id == id)?.Name ?? "Unknown customer") : "Advanced internal";
+
+    private void Edit(StorageTarget t)
+    {
+        this.Alert = null;
+        this._editingId = t.Id;
+        this._name = t.DisplayName;
+        this._ownerId = t.CustomerId ?? Guid.Empty;
+        this._subscription = t.SubscriptionId;
+        this._resourceGroup = t.ResourceGroup;
+        this._account = t.AccountName;
+        this._kind = t.Kind;
+        this._container = t.ContainerName;
+        this._suffix = t.EndpointSuffix;
+        this._active = t.Active;
+    }
+
+    private void ResetForm()
+    {
+        this._editingId = null;
+        this._name = "";
+        this._ownerId = Guid.Empty;
+        this._subscription = "";
+        this._resourceGroup = "";
+        this._account = "";
+        this._kind = StorageKind.FileShare;
+        this._container = "";
+        this._suffix = AdminService.DefaultEndpointSuffix;
+        this._active = true;
+    }
+
+    private async Task SaveAsync()
+    {
+        var target = new StorageTarget(this._editingId ?? Guid.Empty, this._ownerId == Guid.Empty ? null : this._ownerId, this._name,
+            this._subscription, this._resourceGroup, this._account, this._kind, this._container, this._suffix, this._active);
+        var saved = false;
+        await this.ActAsync(async (actor, ctx) =>
+        {
+            var result = await this.Admin.SaveTargetAsync(actor, target, ctx);
+            saved = result.Outcome == AccessOutcome.Ok;
+            return AdminAlert.For(result.Outcome, result.Message, $"Saved {StoragePath.DisplayName(target.DisplayName.Trim())}.");
+        }, this.LoadAsync);
+        if (saved) this.ResetForm();
+    }
+
+    private Task TestAsync(StorageTarget target) =>
+        this.ActAsync(async (actor, ctx) =>
+        {
+            var result = await this.Admin.TestTargetAsync(actor, target.Id, ctx);
+            var alert = AdminAlert.For(result.Outcome, result.Outcome == AccessOutcome.Ok ? result.Value : result.Message);
+            this._testResults[target.Id] = alert;
+            return AdminAlert.Success($"Tested {StoragePath.DisplayName(target.DisplayName)}.") with { Css = alert.Css };
+        }, this.LoadAsync);
+}

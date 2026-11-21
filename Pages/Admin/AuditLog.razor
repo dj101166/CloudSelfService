@@ -1,0 +1,248 @@
+@page "/admin/audit-log"
+@attribute [Authorize(Policy = Policies.StaffAdmin)]
+@inherits AdminPageBase
+@inject IAuditStore Audit
+@inject IUserStore Users
+@inject ICustomerStore Customers
+@inject ITargetStore Targets
+@using CloudSelfService.Models
+@using CloudSelfService.Services
+@using CloudSelfService.Services.Access
+@using CloudSelfService.Services.Data
+
+@*
+    The newest audit rows, filtered. The export link carries the same filters to /api/admin/audit.csv, which asks the
+    store the same question through AuditFilters. Times are UTC.
+*@
+
+<PageTitle>Audit log — Advanced Cloud Self Service</PageTitle>
+
+<div class="page-head">
+    <div>
+        <h1 class="page-title">Audit log</h1>
+        <p class="page-subtitle">Every sign-in, file operation and admin change, newest first. Times are UTC.</p>
+    </div>
+    <div class="page-head__actions">
+        <a class="btn btn--secondary" href="@this.CsvHref" download data-testid="admin-audit-export">
+            <Icon Name="download" /> Export CSV
+        </a>
+    </div>
+</div>
+
+<AdminAlertBox Alert="this.Alert" />
+
+@if (!this.Loaded)
+{
+    @if (this.Alert is null)
+    {
+        <div class="loading"><span class="spinner spinner--lg"></span> Loading…</div>
+    }
+}
+else
+{
+    <section class="card admin__section admin__section--first" aria-label="Filters">
+        <div class="card__body">
+            <form @onsubmit="this.ApplyAsync" data-testid="admin-audit-filters">
+                <div class="admin__filters">
+                    <div class="field">
+                        <label class="label" for="f-user">User</label>
+                        <select id="f-user" class="select" data-testid="admin-audit-user" @bind="this._userId">
+                            <option value="@Guid.Empty">Anyone</option>
+                            @foreach (var u in this._users)
+                            {
+                                <option value="@u.Id">@StoragePath.DisplayName(u.Upn)</option>
+                            }
+                        </select>
+                    </div>
+                    <div class="field">
+                        <label class="label" for="f-customer">Customer</label>
+                        <select id="f-customer" class="select" data-testid="admin-audit-customer" @bind="this._customerId">
+                            <option value="@Guid.Empty">Any customer</option>
+                            @foreach (var c in this._customers)
+                            {
+                                <option value="@c.Id">@StoragePath.DisplayName(c.Name)</option>
+                            }
+                        </select>
+                    </div>
+                    <div class="field">
+                        <label class="label" for="f-target">Target</label>
+                        <select id="f-target" class="select" data-testid="admin-audit-target" @bind="this._targetId">
+                            <option value="@Guid.Empty">Any target</option>
+                            @foreach (var t in this._targets)
+                            {
+                                <option value="@t.Id">@StoragePath.DisplayName(t.DisplayName)</option>
+                            }
+                        </select>
+                    </div>
+                    <div class="field">
+                        <label class="label" for="f-op">Operation</label>
+                        <select id="f-op" class="select" data-testid="admin-audit-operation" @bind="this._operation">
+                            <option value="">Any operation</option>
+                            @foreach (var op in AdminService.AuditOperationNames)
+                            {
+                                <option value="@op">@op</option>
+                            }
+                        </select>
+                    </div>
+                    <div class="field">
+                        <label class="label" for="f-result">Result</label>
+                        <select id="f-result" class="select" data-testid="admin-audit-result" @bind="this._result">
+                            <option value="">Any result</option>
+                            @foreach (var r in Enum.GetNames<AuditResult>())
+                            {
+                                <option value="@r">@r</option>
+                            }
+                        </select>
+                    </div>
+                    <div class="field">
+                        <label class="label" for="f-from">From (UTC date)</label>
+                        <input id="f-from" class="input" type="date" data-testid="admin-audit-from" value="@this._from" @onchange="this.OnFrom" />
+                    </div>
+                    <div class="field">
+                        <label class="label" for="f-to">To (UTC date)</label>
+                        <input id="f-to" class="input" type="date" data-testid="admin-audit-to" value="@this._to" @onchange="this.OnTo" />
+                    </div>
+                    <div class="field">
+                        <button type="submit" class="btn btn--primary" data-testid="admin-audit-apply" disabled="@this.Busy">Apply filters</button>
+                    </div>
+                </div>
+            </form>
+        </div>
+    </section>
+
+    <div class="card admin__section" data-testid="admin-audit-table">
+        <div class="table-wrap">
+            <table class="table table--dense">
+                <thead>
+                    <tr>
+                        <th scope="col">Time (UTC)</th>
+                        <th scope="col">User</th>
+                        <th scope="col">Customer</th>
+                        <th scope="col">Target</th>
+                        <th scope="col">Operation</th>
+                        <th scope="col">Path</th>
+                        <th scope="col">Result</th>
+                        <th scope="col">Detail</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @if (this._events.Count == 0)
+                    {
+                        <tr><td colspan="8" class="table__empty" data-testid="admin-audit-empty">No audit rows match.</td></tr>
+                    }
+                    @foreach (var e in this._events)
+                    {
+                        <tr data-testid="admin-audit-row" data-operation="@e.Operation" data-result="@e.Result" @key="e.Id">
+                            <td class="u-nowrap">@e.At.UtcDateTime.ToString("yyyy-MM-dd HH:mm:ss")</td>
+                            <td>@StoragePath.DisplayName(e.UserDisplay)</td>
+                            <td>@Name(this._customerNames, e.CustomerId)</td>
+                            <td>@Name(this._targetNames, e.TargetId)</td>
+                            <td class="admin__mono">@e.Operation</td>
+                            <td class="admin__mono">@StoragePath.DisplayName(e.Path)</td>
+                            <td><span class="badge @ResultBadge(e.Result)">@e.Result</span></td>
+                            <td class="u-small u-muted">@StoragePath.DisplayName(e.Error)</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+        @if (this._events.Count >= AuditFilters.PageLimit)
+        {
+            <p class="hint admin__more" data-testid="admin-audit-truncated">Showing the newest @AuditFilters.PageLimit rows. Narrow the filters, or export the CSV for more.</p>
+        }
+    </div>
+}
+
+@code {
+    private List<AuditEvent> _events = new();
+    private List<AppUser> _users = new();
+    private List<Customer> _customers = new();
+    private List<StorageTarget> _targets = new();
+    private Dictionary<Guid, string> _customerNames = new();
+    private Dictionary<Guid, string> _targetNames = new();
+
+    private Guid _userId;
+    private Guid _customerId;
+    private Guid _targetId;
+    private string _operation = "";
+    private string _result = "";
+    private string _from = "";
+    private string _to = "";
+
+    private void OnFrom(ChangeEventArgs e) => this._from = e.Value?.ToString() ?? "";
+
+    private void OnTo(ChangeEventArgs e) => this._to = e.Value?.ToString() ?? "";
+
+    private string CsvHref => "api/admin/audit.csv" + this.QueryString();
+
+    protected override Task OnInitializedAsync() => this.LoadGuardedAsync(async () =>
+    {
+        this._users = (await this.Users.ListAsync()).ToList();
+        this._customers = (await this.Customers.ListAsync()).ToList();
+        this._targets = (await this.Targets.ListAsync()).ToList();
+        this._customerNames = this._customers.ToDictionary(c => c.Id, c => c.Name);
+        this._targetNames = this._targets.ToDictionary(t => t.Id, t => t.DisplayName);
+        await this.QueryAsync();
+    });
+
+    private string QueryString()
+    {
+        var parts = new List<string>();
+        void Add(string key, string? value)
+        {
+            if (!string.IsNullOrWhiteSpace(value)) parts.Add($"{key}={Uri.EscapeDataString(value)}");
+        }
+        Add("user", this._userId == Guid.Empty ? null : this._userId.ToString());
+        Add("customer", this._customerId == Guid.Empty ? null : this._customerId.ToString());
+        Add("target", this._targetId == Guid.Empty ? null : this._targetId.ToString());
+        Add("operation", this._operation);
+        Add("result", this._result);
+        Add("from", this._from);
+        Add("to", this._to);
+        return parts.Count == 0 ? "" : "?" + string.Join('&', parts);
+    }
+
+    private async Task QueryAsync()
+    {
+        var query = AuditFilters.ToQuery(OrNull(this._userId), OrNull(this._customerId), OrNull(this._targetId),
+            this._operation, this._result, this._from, this._to, AuditFilters.PageLimit);
+        if (query is null)
+        {
+            this.Alert = new AdminAlert("Check the dates: use a calendar date such as 2026-11-20.", "alert--danger");
+            return;
+        }
+        this._events = (await this.Audit.QueryAsync(query)).ToList();
+    }
+
+    private static Guid? OrNull(Guid id) => id == Guid.Empty ? null : id;
+
+    private async Task ApplyAsync()
+    {
+        if (this.Busy) return;
+        this.Busy = true;
+        this.Alert = null;
+        try
+        {
+            await this.QueryAsync();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            this.Loggers.CreateLogger<AuditLog>().LogError(ex, "Querying the audit log failed.");
+            this.Alert = AdminAlert.StoreDown();
+        }
+        finally
+        {
+            this.Busy = false;
+        }
+    }
+
+    private static string Name(Dictionary<Guid, string> names, Guid? id) =>
+        id is { } key ? StoragePath.DisplayName(names.GetValueOrDefault(key, "(removed)")) : "";
+
+    private static string ResultBadge(AuditResult result) => result switch
+    {
+        AuditResult.Success => "badge--success",
+        AuditResult.Denied => "badge--warning",
+        _ => "badge--danger",
+    };
+}

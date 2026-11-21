@@ -60,6 +60,7 @@ else
     builder.Services.AddSingleton<IStorageBackendResolver, StorageBackendResolver>();
 }
 builder.Services.AddScoped<StorageAccessService>();
+builder.Services.AddScoped<AdminService>();
 builder.Services.AddScoped<UploadSessionService>();
 builder.Services.AddHostedService<UploadCleanupService>();
 builder.Services.AddRateLimiter(o => RateLimits.Configure(o, builder.Configuration));
@@ -216,6 +217,7 @@ app.UseAntiforgery();
 AuthEndpoints.Map(app);
 app.MapDownloadEndpoints();
 app.MapUploadEndpoints();
+app.MapAdminEndpoints();
 app.MapRazorComponents<App>().AddInteractiveServerRenderMode();
 
 app.Run();

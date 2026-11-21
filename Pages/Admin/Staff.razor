@@ -1,0 +1,166 @@
+@page "/admin/staff"
+@attribute [Authorize(Policy = Policies.Owner)]
+@inherits AdminPageBase
+@inject IUserStore Users
+@inject OwnerConfig Owners
+@using CloudSelfService.Models
+@using CloudSelfService.Services
+@using CloudSelfService.Services.Access
+@using CloudSelfService.Services.Data
+@using CloudSelfService.Services.Files
+@using CloudSelfService.Services.Identity
+
+@*
+    Staff roles. Owners come from configuration and are shown read-only here, Owner can't be handed out from this page,
+    and nobody can change their own role. Deactivating a staff user is an Owner action as well.
+*@
+
+<PageTitle>Staff — Advanced Cloud Self Service</PageTitle>
+
+<div class="page-head">
+    <div>
+        <h1 class="page-title">Staff</h1>
+        <p class="page-subtitle">Advanced staff are added on their first sign-in with no role. Give them one to open the files.</p>
+    </div>
+</div>
+
+<AdminAlertBox Alert="this.Alert" />
+
+@if (!this.Loaded)
+{
+    @if (this.Alert is null)
+    {
+        <div class="loading"><span class="spinner spinner--lg"></span> Loading…</div>
+    }
+}
+else
+{
+    <div class="card" data-testid="admin-staff-table">
+        <div class="table-wrap">
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th scope="col">User</th>
+                        <th scope="col">Last sign-in</th>
+                        <th scope="col">Role</th>
+                        <th scope="col">Status</th>
+                        <th scope="col"><span class="u-sr-only">Actions</span></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @if (this._staff.Count == 0)
+                    {
+                        <tr><td colspan="5" class="table__empty" data-testid="admin-staff-empty">No staff have signed in yet.</td></tr>
+                    }
+                    @foreach (var user in this._staff)
+                    {
+                        var isOwner = this.Owners.IsOwner(user.Upn);
+                        var isSelf = user.Id == this._selfId;
+                        <tr data-testid="admin-staff-row" data-upn="@user.Upn" @key="user.Id">
+                            <td>
+                                <div>@StoragePath.DisplayName(user.DisplayName)</div>
+                                <div class="u-subtle u-small admin__mono">@StoragePath.DisplayName(user.Upn)</div>
+                            </td>
+                            <td class="u-nowrap u-muted">@(user.LastSignInAt is null ? "Never" : FileDisplay.Modified(user.LastSignInAt, null))</td>
+                            <td>
+                                @if (isOwner)
+                                {
+                                    <span class="badge badge--accent" data-testid="admin-staff-owner">Owner (configuration)</span>
+                                }
+                                else if (isSelf)
+                                {
+                                    <span class="badge badge--muted" data-testid="admin-staff-self">@RoleLabel(user.StaffRole) (you)</span>
+                                }
+                                else
+                                {
+                                    <label class="u-sr-only" for="role-@user.Id">Role for @StoragePath.DisplayName(user.Upn)</label>
+                                    <select id="role-@user.Id" class="select select--sm admin__level" data-testid="admin-staff-role"
+                                            disabled="@this.Busy" value="@EditableRole(user)"
+                                            @onchange="e => this.SetRoleAsync(user, e.Value?.ToString())">
+                                        @foreach (var role in Roles)
+                                        {
+                                            <option value="@role">@RoleLabel(role)</option>
+                                        }
+                                    </select>
+                                }
+                            </td>
+                            <td><span class="badge @(user.Active ? "badge--success" : "badge--muted")">@(user.Active ? "Active" : "Inactive")</span></td>
+                            <td class="table__num">
+                                @if (!isOwner && !isSelf)
+                                {
+                                    <button type="button" class="btn btn--secondary btn--sm" data-testid="admin-staff-toggle"
+                                            disabled="@this.Busy" @onclick="() => this.SetActiveAsync(user)">
+                                        @(user.Active ? "Deactivate" : "Activate")
+                                    </button>
+                                }
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <section class="card admin__section" aria-labelledby="owners-title" data-testid="admin-owners">
+        <div class="card__head"><h2 class="card__title" id="owners-title">Owners</h2></div>
+        <div class="card__body">
+            <p class="hint">Owners are set in the app's configuration (<code>Authorization:Owners</code>) and can't be changed here.</p>
+            @if (this.Owners.Upns.Count == 0)
+            {
+                <p class="u-muted">No owners are configured.</p>
+            }
+            else
+            {
+                <ul class="admin__owner-list">
+                    @foreach (var upn in this.Owners.Upns.OrderBy(u => u, StringComparer.OrdinalIgnoreCase))
+                    {
+                        <li class="admin__mono" data-testid="admin-owner-upn">@StoragePath.DisplayName(upn)</li>
+                    }
+                </ul>
+            }
+        </div>
+    </section>
+}
+
+@code {
+    private static readonly StaffRole[] Roles = { StaffRole.None, StaffRole.Staff, StaffRole.StaffAdmin };
+
+    private List<AppUser> _staff = new();
+    private Guid _selfId;
+
+    protected override Task OnInitializedAsync() => this.LoadGuardedAsync(this.LoadAsync);
+
+    private async Task LoadAsync()
+    {
+        this._selfId = (await this.CurrentUser.GetAsync())?.Id ?? Guid.Empty;
+        this._staff = (await this.Users.ListAsync(UserKind.Staff)).ToList();
+    }
+
+    private static string RoleLabel(StaffRole role) => role switch
+    {
+        StaffRole.None => "No role",
+        StaffRole.Staff => "Staff",
+        StaffRole.StaffAdmin => "Staff Admin",
+        _ => "Owner",
+    };
+
+    private StaffRole EditableRole(AppUser user) => user.StaffRole == StaffRole.Owner ? StaffRole.StaffAdmin : user.StaffRole;
+
+    private Task SetRoleAsync(AppUser user, string? raw)
+    {
+        if (!Enum.TryParse<StaffRole>(raw, out var role)) return Task.CompletedTask;
+        return this.ActAsync(async (actor, ctx) =>
+        {
+            var result = await this.Admin.SetStaffRoleAsync(actor, user.Id, role, ctx);
+            return AdminAlert.For(result.Outcome, result.Message, $"{StoragePath.DisplayName(user.Upn)} is now {RoleLabel(role)}.");
+        }, this.LoadAsync);
+    }
+
+    private Task SetActiveAsync(AppUser user) =>
+        this.ActAsync(async (actor, ctx) =>
+        {
+            var result = await this.Admin.SetUserActiveAsync(actor, user.Id, !user.Active, ctx);
+            return AdminAlert.For(result.Outcome, result.Message,
+                $"{StoragePath.DisplayName(user.Upn)} is now {(user.Active ? "inactive" : "active")}.");
+        }, this.LoadAsync);
+}

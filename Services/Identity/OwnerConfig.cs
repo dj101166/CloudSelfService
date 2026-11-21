@@ -16,6 +16,8 @@ public sealed class OwnerConfig
             commaSeparatedOwners.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
             StringComparer.OrdinalIgnoreCase);
 
+    public IReadOnlyCollection<string> Upns => _owners;
+
     public bool IsOwner(string upn) => !string.IsNullOrWhiteSpace(upn) && _owners.Contains(upn.Trim());
 
     public StaffRole EffectiveRole(AppUser user) =>
