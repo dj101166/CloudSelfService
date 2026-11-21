@@ -2,6 +2,7 @@
 @inject IJSRuntime JSRuntime
 @inject CloudSelfService.Services.AppVersionService VersionService
 @inject CloudSelfService.Services.Identity.CurrentUser CurrentUser
+@inject CloudSelfService.Services.Identity.OwnerConfig Owners
 @using CloudSelfService.Models
 @using CloudSelfService.Services.Identity
 
@@ -109,7 +110,7 @@
     {
         var user = await this.CurrentUser.GetAsync();
         this._sessionEnded = user is null;
-        this._pendingRole = user is { Kind: UserKind.Staff, StaffRole: StaffRole.None };
+        this._pendingRole = user is not null && StaffAccess.IsPending(user, this.Owners);
         this._resolved = true;
     }
 

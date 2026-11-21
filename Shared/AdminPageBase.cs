@@ -55,7 +55,7 @@ public abstract class AdminPageBase : ComponentBase
             return false;
         }
         this.SessionEnded = false;
-        var ok = user.Kind == UserKind.Staff && this.Owners.EffectiveRole(user) >= this.RequiredRole;
+        var ok = StaffAccess.Reaches(user, this.Owners, this.RequiredRole);
         this.Denied = !ok;
         return ok;
     }

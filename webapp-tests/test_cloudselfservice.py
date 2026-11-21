@@ -84,6 +84,15 @@ def test_staff_none_pending_panel(make_context):
     expect(page.locator("[data-testid=nav-admin-group]")).to_have_count(0)
 
 
+def test_staff_owner_reaches_staff_admin(make_context):
+    # The staff-owner persona is stored with no role, like a production Owner on a fresh database:
+    # Owner comes from configuration alone, so this is the path a real first sign-in takes.
+    page = open_page(make_context("staff-owner"), "/admin/staff", "admin-staff-table")
+    expect(page.locator("[data-testid=pending-access]")).to_have_count(0)
+    expect(page.locator("[data-testid=admin-owners]")).to_be_visible(timeout=15000)
+    expect(page.locator("[data-testid=nav-admin-group]")).to_be_visible(timeout=15000)
+
+
 def test_staff_cannot_open_admin(make_context):
     context = make_context("staff")
     page = open_page(context, "/admin/customers")

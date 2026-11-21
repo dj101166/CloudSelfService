@@ -46,8 +46,7 @@ public sealed class AppRoleHandler : AuthorizationHandler<AppRoleRequirement>
         if (AppClaims.UserIdOf(context.User) is null) return;
 
         var session = await SessionValidator.ValidateAsync(context.User, _users, _customers, _time.GetUtcNow(), _lifetime);
-        if (session is { Valid: true, User: { Kind: UserKind.Staff } user }
-            && _owners.EffectiveRole(user) >= requirement.MinimumRole)
+        if (session is { Valid: true, User: { } user } && StaffAccess.Reaches(user, _owners, requirement.MinimumRole))
             context.Succeed(requirement);
     }
 }

@@ -115,10 +115,20 @@ public static class DevSignIn
         }).AllowAnonymous();
     }
 
+    /// <summary>
+    /// The staff-owner persona is stored with no role, exactly as a production Owner's record is: Owner comes only from
+    /// <see cref="EffectiveOwners"/>, so the persona exercises the same config-derived path a real first sign-in does.
+    /// </summary>
+    internal static StaffRole StoredRole(string personaKey)
+    {
+        var p = All.First(x => x.Key == personaKey);
+        return p.Role == StaffRole.Owner ? StaffRole.None : p.Role;
+    }
+
     private static async Task EnsureStaffAsync(IUserStore users, string upn, Persona p, CancellationToken ct)
     {
         if (await users.FindByUpnAsync(upn, ct) is not null) return;
-        await users.UpsertAsync(new AppUser(Guid.NewGuid(), UserKind.Staff, null, upn, p.Label, null, p.Role, true,
+        await users.UpsertAsync(new AppUser(Guid.NewGuid(), UserKind.Staff, null, upn, p.Label, null, StoredRole(p.Key), true,
             DateTimeOffset.UtcNow, null), ct);
     }
 

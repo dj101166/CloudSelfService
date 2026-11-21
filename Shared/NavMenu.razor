@@ -2,6 +2,7 @@
 @inject CloudSelfService.Services.Identity.OwnerConfig Owners
 @inject ILogger<NavMenu> Logger
 @using CloudSelfService.Models
+@using CloudSelfService.Services.Identity
 
 @*
     The sidebar navigation. One link per area; later tasks add their own.
@@ -55,7 +56,7 @@
         try
         {
             var user = await this.CurrentUser.GetAsync();
-            this._role = user is { Kind: UserKind.Staff } ? this.Owners.EffectiveRole(user) : StaffRole.None;
+            this._role = user is null ? StaffRole.None : StaffAccess.Effective(user, this.Owners);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
