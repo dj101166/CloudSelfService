@@ -22,6 +22,9 @@ RUN dotnet publish CloudSelfService.csproj \
 # ── Runtime stage ─────────────────────────────────────────────────────────────
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS final
 
+ARG APP_VERSION=0.0.0
+ENV APP_VERSION=${APP_VERSION}
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     openssh-server sudo gosu \
     && apt-get clean && rm -rf /var/lib/apt/lists/*

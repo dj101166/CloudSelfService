@@ -35,6 +35,9 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
     public bool ThrowUnreachable { get; set; }
     public bool ThrowNotAuthorised { get; set; }
 
+    /// <summary>When set with <see cref="ThrowNotAuthorised"/>, the 403 the fake throws carries this Azure error code.</summary>
+    public string? NotAuthorisedErrorCode { get; set; }
+
     /// <summary>Test hooks: a non-storage exception (as a raw SDK or backend bug would throw) from GetItem / OpenRead.</summary>
     public Exception? UnexpectedOnGetItem { get; set; }
     public Exception? UnexpectedOnOpenRead { get; set; }
@@ -107,7 +110,11 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
         if (ThrowUnreachable)
             throw new StorageFailureException(StorageFailureKind.Unreachable, StorageErrorMapper.UnreachableMessage);
         if (ThrowNotAuthorised)
+        {
+            if (NotAuthorisedErrorCode is { } code)
+                throw StorageErrorMapper.Map(new Azure.RequestFailedException(403, "forbidden", code, null));
             throw new StorageFailureException(StorageFailureKind.NotAuthorised, StorageErrorMapper.NotAuthorisedMessage);
+        }
     }
 
     private static StorageFailureException Fail(StorageFailureKind kind) => kind switch

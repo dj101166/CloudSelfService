@@ -126,4 +126,36 @@ public class StorageErrorMapperTests
                 CancellationToken.None));
         Assert.Equal(StorageFailureKind.NotFound, ex.Kind);
     }
+
+    [Theory]
+    [InlineData(403, "AuthorizationPermissionMismatch", "no data role")]
+    [InlineData(403, "AuthorizationFailure", "network rules")]
+    [InlineData(401, "InvalidAuthenticationInfo", "401 InvalidAuthenticationInfo")]
+    public void Map_AuthFailures_GiveStaffDiagnostic_AndUnchangedCustomerMessage(int status, string code, string expected)
+    {
+        var mapped = StorageErrorMapper.Map(new RequestFailedException(status, "denied", code, null));
+
+        Assert.Equal(StorageFailureKind.NotAuthorised, mapped.Kind);
+        Assert.Equal(StorageErrorMapper.NotAuthorisedMessage, mapped.Message);
+        Assert.Contains(code, mapped.Diagnostic);
+        Assert.Contains(expected, mapped.Diagnostic);
+    }
+
+    [Fact]
+    public void Map_AuthenticationFailed_DiagnosticSaysNoToken()
+    {
+        var mapped = StorageErrorMapper.Map(new AuthenticationFailedException("no"));
+
+        Assert.Equal(StorageErrorMapper.NoTokenDiagnostic, mapped.Diagnostic);
+        Assert.DoesNotContain("token", mapped.Message);
+    }
+
+    [Fact]
+    public void Map_HttpRequestFailure_UnreachableDiagnosticNamesExceptionType()
+    {
+        var mapped = StorageErrorMapper.Map(new HttpRequestException("dns"));
+
+        Assert.Contains("HttpRequestException", mapped.Diagnostic);
+        Assert.Equal(StorageErrorMapper.UnreachableMessage, mapped.Message);
+    }
 }

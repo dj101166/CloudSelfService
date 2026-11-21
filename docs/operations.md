@@ -93,6 +93,16 @@ For the person deploying or running the app. Settings are App Service applicatio
 - **WAF.** The App Gateway WAF needs a body-inspection exemption for `PUT /api/uploads/{id}/chunks/{index}` (4 MiB bodies).
 - **Port.** In a container the app listens on 8080 (`ASPNETCORE_URLS`); locally on 5300 via `Kestrel:Endpoints:Http:Url`.
 
+## Test access diagnostics
+
+Test access (staff admin) and the application log show why the portal could not reach a storage account. Customers only ever see the general "not authorised" message.
+
+| Diagnostic | Meaning | Fix |
+|---|---|---|
+| `AuthorizationPermissionMismatch` | The managed identity has no data role on the account. | Add the account to `storageAccessTargets` in Pulumi and apply; allow 5-10 minutes for role propagation. |
+| `AuthorizationFailure` | The account's network rules blocked the request. | Give the account a private endpoint the portal can reach (`storageAccessTargets`) and confirm its private DNS resolves. |
+| Could not obtain an Azure token | No managed identity is available, or a local developer is not signed in to Azure. | Enable the App Service managed identity; locally run `az login`. |
+
 ## Customers in Azure Government
 
 See `gov-cloud-guest-setup.md` for the checklist to send the customer's IT administrator.

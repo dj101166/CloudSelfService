@@ -8,8 +8,15 @@ public enum StorageFailureKind { NotFound, AlreadyExists, NotAuthorised, Unreach
 
 public sealed class StorageFailureException : Exception
 {
-    public StorageFailureException(StorageFailureKind kind, string userMessage, Exception? inner = null)
-        : base(userMessage, inner) => Kind = kind;
+    public StorageFailureException(StorageFailureKind kind, string userMessage, Exception? inner = null, string? diagnostic = null)
+        : base(userMessage, inner)
+    {
+        Kind = kind;
+        Diagnostic = diagnostic;
+    }
+
+    /// <summary>Staff-facing explanation of the failure. Never shown to customers.</summary>
+    public string? Diagnostic { get; }
 
     public StorageFailureKind Kind { get; }
 }
@@ -35,13 +42,15 @@ public static class StorageErrorMapper
             case StorageFailureException already:
                 return already;
             case AuthenticationFailedException:
-                return new(StorageFailureKind.NotAuthorised, NotAuthorisedMessage, ex);
+                return new(StorageFailureKind.NotAuthorised, NotAuthorisedMessage, ex, NoTokenDiagnostic);
             case RequestFailedException rfe:
                 return MapRequest(rfe);
             case HttpRequestException or SocketException or TimeoutException:
-                return new(StorageFailureKind.Unreachable, UnreachableMessage, ex);
+                return new(StorageFailureKind.Unreachable, UnreachableMessage, ex,
+                    $"DNS or network failure reaching the storage account (check its private endpoint and private DNS): {ex.GetType().Name}.");
             case OperationCanceledException:
-                return new(StorageFailureKind.Unreachable, UnreachableMessage, ex);
+                return new(StorageFailureKind.Unreachable, UnreachableMessage, ex,
+                    "The request to the storage account was cancelled or timed out (check network reachability to its private endpoint).");
             case AggregateException { InnerExceptions.Count: 1 } agg:
                 return Map(agg.InnerExceptions[0]);
             default:
@@ -57,13 +66,25 @@ public static class StorageErrorMapper
             404 => new(StorageFailureKind.NotFound, NotFoundMessage, ex),
             409 when code is "ResourceAlreadyExists" or "BlobAlreadyExists" => new(StorageFailureKind.AlreadyExists, AlreadyExistsMessage, ex),
             412 => new(StorageFailureKind.AlreadyExists, AlreadyExistsMessage, ex),
-            401 or 403 => new(StorageFailureKind.NotAuthorised, NotAuthorisedMessage, ex),
+            401 or 403 => new(StorageFailureKind.NotAuthorised, NotAuthorisedMessage, ex, AuthDiagnostic(ex)),
             400 when code == "Md5Mismatch" => new(StorageFailureKind.Conflict, CorruptedChunkMessage, ex),
             400 when code == "InvalidBlockList" => new(StorageFailureKind.Conflict, UploadInterruptedMessage, ex),
             0 => new(StorageFailureKind.Unreachable, UnreachableMessage, ex),
             _ => new(StorageFailureKind.Other, OtherMessage, ex),
         };
     }
+
+    public const string NoTokenDiagnostic =
+        "The portal couldn't obtain an Azure token (managed identity not available, or local developer not signed in to Azure).";
+
+    private static string AuthDiagnostic(RequestFailedException ex) => ex.ErrorCode switch
+    {
+        "AuthorizationPermissionMismatch" =>
+            $"Azure returned {ex.Status} AuthorizationPermissionMismatch: the portal's managed identity has no data role on this storage account. Grant Storage File Data Privileged Contributor (file shares) or Storage Blob Data Contributor (containers); add the account to storageAccessTargets in Pulumi.",
+        "AuthorizationFailure" =>
+            $"Azure returned {ex.Status} AuthorizationFailure: the storage account's network rules blocked the request. Check the account has a private endpoint the portal can reach (storageAccessTargets in Pulumi) and that its private DNS resolves.",
+        _ => $"Azure returned {ex.Status} {(string.IsNullOrEmpty(ex.ErrorCode) ? "(no error code)" : ex.ErrorCode)}.",
+    };
 
     public static StorageFailureException MoveIntoItself() =>
         new(StorageFailureKind.Conflict, MoveIntoItselfMessage);

@@ -42,6 +42,7 @@ public sealed partial class AdminService
     private readonly string _staffDomain;
     private readonly HashSet<Guid> _allowedSubscriptions;
     private readonly ProbeCooldown _cooldown;
+    private readonly ILogger<AdminService>? _logger;
     private readonly TimeSpan _testTimeout;
 
     public const string InternalOwnerOnlyMessage = "Only an Owner can register internal storage.";
@@ -53,8 +54,9 @@ public sealed partial class AdminService
 
     public AdminService(IUserStore users, ICustomerStore customers, ITargetStore targets, IGrantStore grants,
         IStorageBackendResolver backends, AuditService audit, OwnerConfig owners, TimeProvider time, IConfiguration config,
-        ProbeCooldown? cooldown = null)
+        ProbeCooldown? cooldown = null, ILogger<AdminService>? logger = null)
     {
+        _logger = logger;
         _users = users;
         _customers = customers;
         _targets = targets;
@@ -323,9 +325,12 @@ public sealed partial class AdminService
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
+            var failure = StorageErrorMapper.Map(ex);
             var message = ex is OperationCanceledException && timeout.IsCancellationRequested
                 ? TestTimeoutMessage
-                : StorageErrorMapper.Map(ex).Message;
+                : failure.Diagnostic ?? failure.Message;
+            _logger?.LogWarning(failure.InnerException ?? failure,
+                "Test access failed on target {TargetId}: {Diagnostic}", target.Id, message);
             await RecordAsync(actor, TestTargetOp, target.CustomerId, target.Id, target.DisplayName, ctx, AuditResult.Failed, message);
             return new(AccessOutcome.Unavailable, null, message);
         }

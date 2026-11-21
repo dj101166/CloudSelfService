@@ -415,6 +415,22 @@ public class AdminServiceTests
     }
 
     [Fact]
+    public async Task TestTarget_PermissionMismatch_ReturnsDiagnostic_AndAuditsIt()
+    {
+        _fake.ThrowNotAuthorised = true;
+        _fake.NotAuthorisedErrorCode = "AuthorizationPermissionMismatch";
+
+        var result = await _svc.TestTargetAsync(_admin.Id, _alphaTarget.Id, Ctx);
+
+        Assert.Equal(AccessOutcome.Unavailable, result.Outcome);
+        Assert.Contains("AuthorizationPermissionMismatch", result.Message);
+        Assert.Contains("no data role", result.Message);
+        var row = Assert.Single(await AuditAsync(AdminService.TestTargetOp));
+        Assert.Equal(AuditResult.Failed, row.Result);
+        Assert.Contains("AuthorizationPermissionMismatch", row.Error);
+    }
+
+    [Fact]
     public async Task TestTarget_ByStaffRole_Denied_AndProbeNotCalled()
     {
         var result = await _svc.TestTargetAsync(_staff.Id, _alphaTarget.Id, Ctx);

@@ -4,10 +4,14 @@
 
 First release. Advanced Cloud Self Service is now a private storage access portal: customers and Advanced staff sign in with Microsoft and browse, upload and download files held in Advanced-hosted Azure storage, without ever being given a storage key, a SAS link or a direct storage address.
 
+### 🐛 Fixed
+- The version badge in the header now shows the release version instead of "dev".
+
 ### 🔄 Changed
 - The application has been rebuilt on the Advanced Developer Standards interface. It has a light, dark and system theme chosen from the account menu, a collapsible sidebar, and a release notes panel opened from the version chip in the header.
 
 ### ✨ Added
+- Test access on a storage target now explains why the portal cannot reach the account (no data role, blocked by the account's network rules, no Azure sign-in, or a network failure), and the same detail is written to the audit log and the application log. Customers still see only the general message.
 - Signing in now survives a restart or new release of the portal, so people are no longer signed out and uploads in progress are no longer interrupted.
 - Sign in with Microsoft (Entra, single tenant). Advanced staff are admitted on first sign-in with no role and see an "access pending" panel until an administrator grants one. Customers (invited guests, including guests from Azure Government organisations) are admitted only when Advanced has already registered them. Anyone else lands on an Access Denied page that tells them to contact Advanced support. Every sign-in, admitted or refused, is written to the audit log, including sign-ins refused because they came from another organisation or carried no account identifier.
 - An account menu showing who is signed in, with Sign out. An idle session is signed out after a period of inactivity (60 minutes by default) with a countdown warning, and every session ends after 12 hours regardless. A deactivated or demoted user loses access within a minute, even mid-session, and a browser whose session has ended on the server is signed out at its next activity instead of carrying on in a page that can no longer act.

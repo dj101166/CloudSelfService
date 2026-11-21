@@ -373,8 +373,8 @@ public sealed class StorageAccessService
                 op, targetId, path, failure.Kind, ctx.CorrelationId);
         else
             _logger.LogWarning(failure.InnerException ?? failure,
-                "Storage {Operation} failed on target {TargetId} at {Path}: {Kind} (correlation {CorrelationId}).",
-                op, targetId, path, failure.Kind, ctx.CorrelationId);
+                "Storage {Operation} failed on target {TargetId} at {Path}: {Kind} (correlation {CorrelationId}). {Diagnostic}",
+                op, targetId, path, failure.Kind, ctx.CorrelationId, failure.Diagnostic);
     }
 
     internal static bool IsRoutine(StorageFailureKind kind) =>
