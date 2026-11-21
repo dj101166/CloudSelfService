@@ -27,7 +27,9 @@ Phase 1 shipped as **v1.0.0 on 2026-11-21** and is deployed. Image `cloudselfser
 4. **Storage subnet capacity.** The /28 has 11 usable IPs, and each service per account takes one. The test account uses 2, so about 4 more customers fit on both services before the subnet must be enlarged.
 5. **`session-guard.js` drift (R50).** Only this app's copy treats a redirected keepalive as session-ended. Consistency-checker Check 34 flags it until it is propagated to the other suite apps.
 
-**Next-phase candidates:** in-app download progress, agreed as option A and parked (see [[project-download-progress-idea]]).
+**Next-phase candidates (both parked):**
+- in-app download progress, agreed as option A (see [[project-download-progress-idea]]);
+- the Files home as a subscription → storage account → share/container tree, with staff-named subscriptions (see [[project-files-tree-idea]]).
 
 **Phase 2 (automation API): not started.** All storage access already sits behind `StorageAccessService`, so the API reuses that gate.
 
