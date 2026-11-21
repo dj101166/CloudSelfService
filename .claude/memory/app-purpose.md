@@ -13,4 +13,4 @@ Staff admin covers Customers, Storage targets, Staff roles (Owner only) and an A
 
 **How to apply:** Any storage access goes through `StorageAccessService`. The old SLA / service health / app-service-restart idea is not built; restart rules in `.claude/rules/security.md` are kept for a future feature.
 
-Status: Phase 1 (file portal) is complete and release-ready as v1.0.0 (branch `feat/private-storage-access`). Phase 2 (an automation API for programmatic transfers) is not started. Operators: `docs/operations.md`.
+Status: Phase 1 (file portal) shipped as v1.0.0 on 2026-11-21, is deployed, and was validated against a private-only storage account; go-live blockers remain before customer cut-over — see [[project-phase1-status]]. Phase 2 (an automation API for programmatic transfers) is not started. Operators: `docs/operations.md`.
