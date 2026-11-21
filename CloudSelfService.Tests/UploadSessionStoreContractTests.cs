@@ -53,6 +53,21 @@ public abstract class UploadSessionStoreContract
         Assert.Equal(100, await store.SumOpenSizeForUserAsync(user, Now));
     }
 
+    protected async Task FirstPieceMd5_RoundTrips()
+    {
+        var store = await CreateStoreAsync();
+        var user = Guid.NewGuid();
+        var with = Session(user) with { FirstPieceMd5 = "1B2M2Y8AsgTpgAmY7PhCfg==" };
+        var without = Session(user);
+        await store.CreateAsync(with);
+        await store.CreateAsync(without);
+
+        Assert.Equal("1B2M2Y8AsgTpgAmY7PhCfg==", (await store.GetAsync(with.Id))!.FirstPieceMd5);
+        Assert.Null((await store.GetAsync(without.Id))!.FirstPieceMd5);
+        Assert.Equal(with.FirstPieceMd5,
+            (await store.FindResumableAsync(user, with.TargetId, with.FinalPath, with.Size, Now))!.FirstPieceMd5);
+    }
+
     protected async Task PurgeNeverDeletesOpenOrCompletingRows_EvenPastHardCutoff()
     {
         var store = await CreateStoreAsync();
@@ -87,6 +102,9 @@ public class InMemoryUploadSessionStoreContractTests : UploadSessionStoreContrac
 
     [Fact]
     public Task PurgeAsync_NeverDeletesOpenOrCompletingRows_EvenPastHardCutoff() => PurgeNeverDeletesOpenOrCompletingRows_EvenPastHardCutoff();
+
+    [Fact]
+    public Task UploadSessionStore_FirstPieceMd5_RoundTrips() => FirstPieceMd5_RoundTrips();
 }
 
 public class PgUploadSessionStoreContractTests : UploadSessionStoreContract
@@ -108,4 +126,7 @@ public class PgUploadSessionStoreContractTests : UploadSessionStoreContract
 
     [PgFact]
     public Task PurgeAsync_NeverDeletesOpenOrCompletingRows_EvenPastHardCutoff() => PurgeNeverDeletesOpenOrCompletingRows_EvenPastHardCutoff();
+
+    [PgFact]
+    public Task UploadSessionStore_FirstPieceMd5_RoundTrips() => FirstPieceMd5_RoundTrips();
 }

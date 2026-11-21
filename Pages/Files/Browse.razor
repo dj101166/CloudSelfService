@@ -299,6 +299,14 @@ else
         {
             this._items.Clear();
             this._continuation = null;
+            this._pagesLoaded = 0;
+            if (targetChanged)
+            {
+                // Otherwise the previous target's header and buttons would stay above the error.
+                this._target = null;
+                this._level = AccessLevel.None;
+                this._denied = false;
+            }
             this._alert = new Alert(error ?? "That path isn't valid.", "alert--danger", true);
             return;
         }

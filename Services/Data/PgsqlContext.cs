@@ -149,6 +149,7 @@ public sealed class PgsqlContext : IAsyncDisposable
         ALTER TABLE upload_sessions ADD COLUMN IF NOT EXISTS staging_removed BOOLEAN NOT NULL DEFAULT FALSE;
         ALTER TABLE upload_sessions ADD COLUMN IF NOT EXISTS staging_size BIGINT NOT NULL DEFAULT 0;
         ALTER TABLE upload_sessions ADD COLUMN IF NOT EXISTS cleanup_refused BOOLEAN NOT NULL DEFAULT FALSE;
+        ALTER TABLE upload_sessions ADD COLUMN IF NOT EXISTS first_piece_md5 TEXT NULL;
         CREATE INDEX IF NOT EXISTS idx_upload_sessions_owner_path ON upload_sessions (user_id, target_id, final_path);
         CREATE INDEX IF NOT EXISTS idx_upload_sessions_target_path ON upload_sessions (target_id, final_path);
         CREATE INDEX IF NOT EXISTS idx_upload_sessions_status_expiry ON upload_sessions (status, expires_at);

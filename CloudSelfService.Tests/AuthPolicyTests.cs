@@ -90,6 +90,20 @@ public class AuthPolicyTests
     [InlineData("/js/session-guard.js", false)]
     [InlineData("/images/advanced-logo-a.png", false)]
     [InlineData("/CloudSelfService.styles.css", false)]
+    [InlineData("/CloudSelfService.k8bafzscy8.styles.css", false)]
+    [InlineData("/favicon.png", false)]
+    [InlineData("/favicon.ico", false)]
+    [InlineData("/fonts/zenkaku-400.woff2", false)]
+    [InlineData("/lib/spark-md5/spark-md5.min.js", false)]
+    [InlineData("/Shared/ReconnectModal.razor.js", false)]
+    [InlineData("/files/7d1e3a2c-0000-4000-8000-000000000001/2024.01", true)]
+    [InlineData("/files/7d1e3a2c-0000-4000-8000-000000000001/Reports/q1.final", true)]
+    [InlineData("/files/7d1e3a2c-0000-4000-8000-000000000001", true)]
+    [InlineData("/api/files/7d1e3a2c-0000-4000-8000-000000000001/download", true)]
+    [InlineData("/api/admin/audit.csv", true)]
+    [InlineData("/help", true)]
+    [InlineData("/some.page", true)]
+    [InlineData("/robots.txt", true)]
     public void ShouldDisableCaching_PagesAndEndpointsOnly(string path, bool expected)
     {
         Assert.Equal(expected, AuthPolicy.ShouldDisableCaching(new PathString(path)));

@@ -8,7 +8,9 @@ using CloudSelfService.Services.Storage;
 
 namespace CloudSelfService.Services.Transfers;
 
-public sealed record BeginUploadRequest(Guid TargetId, string Folder, string FileName, long Size, bool Overwrite);
+/// <summary>FirstPieceMd5 (optional): base64 MD5 of piece 0, so a different file with the same name and size starts afresh.</summary>
+public sealed record BeginUploadRequest(Guid TargetId, string Folder, string FileName, long Size, bool Overwrite,
+    string? FirstPieceMd5 = null);
 
 public sealed record BeginUploadResponse(Guid SessionId, int ChunkSize, int ChunkCount, int ParallelChunks, IReadOnlyList<int> Received);
 
@@ -42,6 +44,7 @@ public sealed class UploadSessionService
     public const string TooManyUploadsMessage = "You have too many uploads in progress. Finish or cancel one, then try again.";
     public const string StorageSlowMessage = "Storage was slow to respond; the piece will be retried.";
     public const string InterruptedMessage = "Upload was interrupted; please start again.";
+    public const string FirstPieceMd5InvalidMessage = "firstPieceMd5 must be the base64 MD5 of the first piece.";
     private const string StagingSuffix = ".cssupload-";
     private const int MaxSegmentLength = 255;
 
@@ -124,6 +127,9 @@ public sealed class UploadSessionService
             return new(AccessOutcome.Invalid, null, NegativeSizeMessage);
         if (req.Size > _maxBytes)
             return new(AccessOutcome.Invalid, null, TooLargeMessage(_maxBytes));
+        if (req.FirstPieceMd5 is not null && !TryParseMd5(req.FirstPieceMd5, out _))
+            return new(AccessOutcome.Invalid, null, FirstPieceMd5InvalidMessage);
+        var firstPieceMd5 = req.FirstPieceMd5?.Trim();
         if (!StoragePath.TryNormalizePath(req.Folder, out var folder, out var error))
             return new(AccessOutcome.Invalid, null, error);
         if (!StoragePath.TryValidateName(req.FileName, out error))
@@ -144,6 +150,10 @@ public sealed class UploadSessionService
 
         var now = _time.GetUtcNow();
         var resumable = await _sessions.FindResumableAsync(userId, target.Id, finalPath, req.Size, now, ct);
+        // Same name and size is not enough to resume: a different file's first piece means a different file, so the
+        // open session is replaced (below) rather than finished with a mix of two files' pieces.
+        if (resumable is not null && !SameFirstPiece(resumable.FirstPieceMd5, firstPieceMd5))
+            resumable = null;
 
         // Per-user caps, before any storage call: a session reserves its declared size until it settles, so one user
         // can never stage more than MaxUploadBytes (or hold more than MaxOpenSessionsPerUser uploads) at a time.
@@ -205,7 +215,8 @@ public sealed class UploadSessionService
             return new(AccessOutcome.Ok, Response(resumable.Id, req.Size, received), null, auth.UserUpn);
         }
 
-        // The same file at a different size is a new upload of it: the older session can never complete usefully.
+        // The same file at a different size, or with a different first piece, is a new upload of it: the older session
+        // can never complete usefully.
         foreach (var older in await _sessions.ListOpenForUserPathAsync(userId, target.Id, finalPath, ct))
         {
             if (!await _sessions.TrySetStatusAsync(older.Id, UploadStatus.Open, UploadStatus.Aborted, ct: ct))
@@ -220,7 +231,7 @@ public sealed class UploadSessionService
         // The row is written first so the expiry sweep can always find (and remove) whatever storage was prepared.
         var session = new UploadSession(id, userId, target.Id, finalPath, staging, req.Size, ChunkMath.ChunkSize,
             req.Overwrite, now, now + _lifetime, UploadStatus.Open, TargetKind: target.Kind, ExistedAtBegin: existed,
-            StagingRemoved: target.Kind == StorageKind.BlobContainer);
+            StagingRemoved: target.Kind == StorageKind.BlobContainer, FirstPieceMd5: firstPieceMd5);
         await _sessions.CreateAsync(session, ct);
         try
         {
@@ -592,6 +603,13 @@ public sealed class UploadSessionService
         return leafLength <= MaxSegmentLength
                && StoragePath.TryNormalizePath(StagingPathFor(finalPath, Guid.Empty), out _, out _);
     }
+
+    /// <summary>
+    /// Whether a stored and a declared first-piece hash allow a resume. Only two known, different hashes refuse it: a
+    /// session or client without one (an older client, or an empty file) resumes on name and size as before.
+    /// </summary>
+    internal static bool SameFirstPiece(string? stored, string? declared) =>
+        stored is null || declared is null || string.Equals(stored, declared, StringComparison.Ordinal);
 
     private static bool TryParseMd5(string? base64, out byte[] md5)
     {

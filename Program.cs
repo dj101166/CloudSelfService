@@ -14,6 +14,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Components.Authorization;
 using Microsoft.AspNetCore.Components.Web;
 using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.IdentityModel.Protocols.OpenIdConnect;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -71,6 +72,9 @@ builder.Services.AddSingleton(SessionLifetime.FromConfiguration(builder.Configur
 builder.Services.AddSingleton(new OwnerConfig(DevSignIn.EffectiveOwners(builder.Environment, builder.Configuration)));
 builder.Services.AddScoped<CurrentUser>();
 builder.Services.AddScoped<CloudSelfService.Services.Files.PageAuditContext>();
+builder.Services.AddHttpContextAccessor();
+builder.Services.AddScoped<Microsoft.AspNetCore.Components.Server.Circuits.CircuitHandler, CloudSelfService.Services.Files.AuditCircuitHandler>();
+builder.Services.AddSignalR(o => o.AddFilter<CloudSelfService.Services.Files.ConnectionIpHubFilter>());
 builder.Services.AddSingleton<IdentityResolver>();
 builder.Services.AddSingleton<IAuthorizationHandler, AppRoleHandler>();
 builder.Services.AddCascadingAuthenticationState();

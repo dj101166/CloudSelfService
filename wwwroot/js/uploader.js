@@ -9,6 +9,9 @@
     var RETRY_DELAYS = [1000, 2000, 4000, 8000, 16000];
     var MAX_BUSY_WAITS = 10;
     var DEFAULT_RETRY_AFTER_SECONDS = 5;
+    // The server's fixed piece size (ChunkMath.ChunkSize); Begin confirms it, but piece 0 is hashed before Begin.
+    var CHUNK_SIZE = 4194304;
+    var MAX_RETRY_AFTER_SECONDS = 300;
     var MAX_RESTARTS = 3;
     var PROGRESS_INTERVAL_MS = 250;
     var ACTIVITY_INTERVAL_MS = 60000;
@@ -163,7 +166,8 @@
                 else { code = 'invalid'; }
             }
             var retryAfter = parseInt(r.headers.get('Retry-After') || '', 10);
-            throw toError(code, message, isNaN(retryAfter) ? DEFAULT_RETRY_AFTER_SECONDS : retryAfter);
+            retryAfter = isNaN(retryAfter) ? DEFAULT_RETRY_AFTER_SECONDS : Math.min(retryAfter, MAX_RETRY_AFTER_SECONDS);
+            throw toError(code, message, retryAfter);
         });
     }
 
@@ -237,12 +241,27 @@
         });
     }
 
+    // The first piece's MD5, sent at Begin so the server resumes a session only for the same file, not merely one with
+    // the same name and size. An empty file has no piece and sends none.
+    function firstPieceMd5(u) {
+        if (u.firstPieceMd5 !== undefined) { return Promise.resolve(u.firstPieceMd5); }
+        if (u.file.size === 0) { u.firstPieceMd5 = null; return Promise.resolve(null); }
+        return u.file.slice(0, Math.min(CHUNK_SIZE, u.file.size)).arrayBuffer().then(function (buffer) {
+            u.firstPieceMd5 = base64Md5(buffer);
+            return u.firstPieceMd5;
+        }, function () {
+            throw new UploadError('fatal', 'The file could not be read. It may have been changed or moved; select it again.');
+        });
+    }
+
     function begin(u, signal) {
-        return withRetry(u, function () {
-            return api('POST', '/api/uploads', {
-                json: { targetId: u.targetId, folder: u.folder, fileName: u.file.name, size: u.file.size, overwrite: u.overwrite }
+        return firstPieceMd5(u).then(function (md5) {
+            return withRetry(u, function () {
+                var body = { targetId: u.targetId, folder: u.folder, fileName: u.file.name, size: u.file.size, overwrite: u.overwrite };
+                if (md5) { body.firstPieceMd5 = md5; }
+                return api('POST', '/api/uploads', { json: body }, signal);
             }, signal);
-        }, signal).catch(function (e) {
+        }).catch(function (e) {
             // Begin has no session to lose, so restart / not_found here would only loop.
             if (e instanceof UploadError && e.kind === 'restart') { throw new UploadError('fatal', e.message, e.code); }
             throw e;
@@ -414,6 +433,7 @@
             });
             if (existing) {
                 existing.file = file;
+                existing.firstPieceMd5 = undefined;
                 existing.ref = dotnetRef;
                 if (!isActive(existing)) { existing.overwrite = !!overwrite; enqueue(existing); }
                 result.push({ id: existing.id, name: file.name, size: file.size, existing: true });

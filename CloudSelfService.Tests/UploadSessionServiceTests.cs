@@ -398,6 +398,75 @@ public class UploadSessionServiceTests
             svc.BeginAsync(_contrib.Id, new BeginUploadRequest(_share.Id, "", "a.bin", 3, false), Ctx));
     }
 
+    // ---- First-piece hash (R39) ----
+
+    private static readonly string HashA = Convert.ToBase64String(MD5.HashData(new byte[] { 1 }));
+    private static readonly string HashB = Convert.ToBase64String(MD5.HashData(new byte[] { 2 }));
+
+    private async Task<BeginUploadResponse> BeginWithHash(UploadSessionService svc, string? hash)
+    {
+        var result = await svc.BeginAsync(_contrib.Id, new BeginUploadRequest(_share.Id, "", "same.bin", 2 * ChunkMath.ChunkSize, false, hash), Ctx);
+        Assert.Equal(AccessOutcome.Ok, result.Outcome);
+        return result.Value!;
+    }
+
+    [Fact]
+    public async Task Begin_SameFirstPieceHash_ResumesSession()
+    {
+        var svc = Service();
+        var first = await BeginWithHash(svc, HashA);
+        Assert.Equal(AccessOutcome.Ok, (await Put(svc, _contrib.Id, first.SessionId, new byte[2 * ChunkMath.ChunkSize], 0)).Outcome);
+
+        var again = await BeginWithHash(svc, HashA);
+
+        Assert.Equal(first.SessionId, again.SessionId);
+        Assert.Equal(new[] { 0 }, again.Received);
+    }
+
+    [Fact]
+    public async Task Begin_DifferentFirstPieceHash_StartsFreshAndReplacesOld()
+    {
+        var svc = Service();
+        var first = await BeginWithHash(svc, HashA);
+        Assert.Equal(AccessOutcome.Ok, (await Put(svc, _contrib.Id, first.SessionId, new byte[2 * ChunkMath.ChunkSize], 0)).Outcome);
+
+        var other = await BeginWithHash(svc, HashB);
+
+        Assert.NotEqual(first.SessionId, other.SessionId);
+        Assert.Empty(other.Received);
+        Assert.Equal(UploadStatus.Aborted, (await _sessions.GetAsync(first.SessionId))!.Status);
+        Assert.Equal(HashB, (await _sessions.GetAsync(other.SessionId))!.FirstPieceMd5);
+        Assert.Contains(await UploadAudits(), a => a.Error == UploadSessionService.ReplacedMessage);
+    }
+
+    [Fact]
+    public async Task Begin_NoHashOnEitherSide_ResumesOnNameAndSize()
+    {
+        var svc = Service();
+        var first = await BeginWithHash(svc, null);
+        var withHash = await BeginWithHash(svc, HashA);
+        Assert.Equal(first.SessionId, withHash.SessionId);
+    }
+
+    [Fact]
+    public async Task Begin_MalformedFirstPieceHash_Invalid()
+    {
+        var result = await Service().BeginAsync(_contrib.Id,
+            new BeginUploadRequest(_share.Id, "", "same.bin", 10, false, "not-a-hash"), Ctx);
+
+        Assert.Equal(AccessOutcome.Invalid, result.Outcome);
+        Assert.Equal(UploadSessionService.FirstPieceMd5InvalidMessage, result.Message);
+    }
+
+    [Theory]
+    [InlineData(null, null, true)]
+    [InlineData("a", null, true)]
+    [InlineData(null, "a", true)]
+    [InlineData("a", "a", true)]
+    [InlineData("a", "b", false)]
+    public void SameFirstPiece_OnlyTwoKnownDifferentHashesRefuse(string? stored, string? declared, bool expected) =>
+        Assert.Equal(expected, UploadSessionService.SameFirstPiece(stored, declared));
+
     // ---- PutChunk ----
 
     [Fact]

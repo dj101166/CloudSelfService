@@ -37,21 +37,38 @@ public static partial class AuthPolicy
         return codes.Count > 0 ? string.Join(",", codes) : failure.GetType().Name;
     }
 
-    private static readonly string[] StaticPrefixes = { "/_framework", "/_content", "/css", "/js", "/images", "/lib" };
+    // Every folder MapStaticAssets serves from (wwwroot plus the scoped-CSS and collocated-JS outputs).
+    private static readonly string[] StaticPrefixes =
+        { "/_framework", "/_content", "/css", "/js", "/images", "/fonts", "/lib", "/Shared" };
+
+    // The root-level assets, named, because a page path can end in a dotted segment too (a folder called "2024.01").
+    private static readonly Regex RootAsset = RootAssetPattern();
+
+    // Customer data or API responses; never cacheable, whatever the last segment looks like.
+    private static readonly string[] AlwaysNoStorePrefixes = { "/files", "/api" };
 
     /// <summary>
-    /// Rule: no-store unless the path is under a static-asset folder or its last segment has a file
-    /// extension. Every page, endpoint and the circuit's /_blazor traffic is extensionless.
+    /// Rule: no-store for everything under /files and /api, and for every other path except the known static assets
+    /// (the static folders and the named root-level files). Pages, endpoints and the circuit's /_blazor are all no-store.
     /// </summary>
     public static bool ShouldDisableCaching(PathString path)
     {
         var value = path.Value ?? "/";
-        if (StaticPrefixes.Any(p => value.StartsWith(p + "/", StringComparison.OrdinalIgnoreCase)
-                                   || value.Equals(p, StringComparison.OrdinalIgnoreCase)))
+        if (AlwaysNoStorePrefixes.Any(p => UnderPrefix(value, p)))
+            return true;
+        if (StaticPrefixes.Any(p => UnderPrefix(value, p)))
             return false;
-        var last = value[(value.LastIndexOf('/') + 1)..];
-        return !last.Contains('.');
+        return !RootAsset.IsMatch(value);
     }
+
+    private static bool UnderPrefix(string value, string prefix) =>
+        value.StartsWith(prefix + "/", StringComparison.OrdinalIgnoreCase) || value.Equals(prefix, StringComparison.OrdinalIgnoreCase);
+
+    // CloudSelfService.styles.css and favicon.png, each also with the fingerprinted name MapStaticAssets serves
+    // (e.g. CloudSelfService.k8bafzscy8.styles.css), plus the modules manifest and favicon.ico for browsers that ask.
+    [GeneratedRegex(@"^/(CloudSelfService(\.[a-z0-9]+)?\.(styles\.css|modules\.json)|favicon(\.[a-z0-9]+)?\.(png|ico))$",
+        RegexOptions.IgnoreCase)]
+    private static partial Regex RootAssetPattern();
 
     [GeneratedRegex(@"AADSTS\d+")]
     private static partial Regex AadstsCode();

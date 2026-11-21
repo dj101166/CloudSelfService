@@ -26,11 +26,14 @@ public static class UploadStatus
 /// session's full size (R32, R34).
 /// CleanupRefused is set when cleanup refused to touch storage for this session (target gone or changed kind, or a
 /// staging path that isn't the session's own); the refusal is logged once and the sweep stops retrying it.
+/// FirstPieceMd5 is the base64 MD5 of piece 0 the client declared at Begin, so a different file of the same name and size
+/// is not resumed into this session; null when the client sent none (or the file is empty).
 /// </summary>
 public sealed record UploadSession(Guid Id, Guid UserId, Guid TargetId, string FinalPath, string StagingPath,
     long Size, int ChunkSize, bool Overwrite, DateTimeOffset CreatedAt, DateTimeOffset ExpiresAt, string Status,
     DateTimeOffset? ClaimedAt = null, DateTimeOffset? LastActivityAt = null, StorageKind TargetKind = StorageKind.FileShare,
-    bool ExistedAtBegin = false, bool StagingRemoved = false, long StagingSize = 0, bool CleanupRefused = false);
+    bool ExistedAtBegin = false, bool StagingRemoved = false, long StagingSize = 0, bool CleanupRefused = false,
+    string? FirstPieceMd5 = null);
 
 /// <summary>A purged row whose staging data was never confirmed removed, for a staff clean-up log line.</summary>
 public sealed record AbandonedStaging(Guid SessionId, Guid TargetId, string StagingPath);
@@ -328,14 +331,16 @@ public sealed class InMemoryUploadSessionStore : IUploadSessionStore
 public sealed class PgUploadSessionStore : IUploadSessionStore
 {
     private const string Cols = "id, user_id, target_id, final_path, staging_path, size, chunk_size, overwrite, created_at, " +
-                                "expires_at, status, claimed_at, last_activity_at, target_kind, existed_at_begin, staging_removed, staging_size, cleanup_refused";
+                                "expires_at, status, claimed_at, last_activity_at, target_kind, existed_at_begin, staging_removed, staging_size, cleanup_refused, " +
+                                "first_piece_md5";
     private readonly PgsqlContext _db;
     public PgUploadSessionStore(PgsqlContext db) => _db = db;
 
     private static UploadSession Map(NpgsqlDataReader r) => new(r.GetGuid(0), r.GetGuid(1), r.GetGuid(2), r.GetString(3),
         r.GetString(4), r.GetInt64(5), r.GetInt32(6), r.GetBoolean(7), r.GetFieldValue<DateTimeOffset>(8),
         r.GetFieldValue<DateTimeOffset>(9), r.GetString(10), r.IsDBNull(11) ? null : r.GetFieldValue<DateTimeOffset>(11),
-        r.IsDBNull(12) ? null : r.GetFieldValue<DateTimeOffset>(12), r.Enum<StorageKind>(13), r.GetBoolean(14), r.GetBoolean(15), r.GetInt64(16), r.GetBoolean(17));
+        r.IsDBNull(12) ? null : r.GetFieldValue<DateTimeOffset>(12), r.Enum<StorageKind>(13), r.GetBoolean(14), r.GetBoolean(15), r.GetInt64(16), r.GetBoolean(17),
+        r.IsDBNull(18) ? null : r.GetString(18));
 
     private static void AddTime(NpgsqlCommand cmd, string name, DateTimeOffset? value) =>
         cmd.Parameters.AddWithValue(name, NpgsqlTypes.NpgsqlDbType.TimestampTz, (object?)value?.ToUniversalTime() ?? DBNull.Value);
@@ -346,7 +351,7 @@ public sealed class PgUploadSessionStore : IUploadSessionStore
         await using var cmd = new NpgsqlCommand($"""
             INSERT INTO upload_sessions ({Cols})
             VALUES (@id, @uid, @tid, @final, @staging, @size, @chunk, @overwrite, @created, @expires, @status, @claimed, @activity,
-                    @kind, @existed, @removed, @stagingSize, @refused)
+                    @kind, @existed, @removed, @stagingSize, @refused, @firstMd5)
             """, conn);
         cmd.Parameters.AddWithValue("id", s.Id);
         cmd.Parameters.AddWithValue("uid", s.UserId);
@@ -366,6 +371,7 @@ public sealed class PgUploadSessionStore : IUploadSessionStore
         cmd.Parameters.AddWithValue("removed", s.StagingRemoved);
         cmd.Parameters.AddWithValue("stagingSize", s.StagingSize);
         cmd.Parameters.AddWithValue("refused", s.CleanupRefused);
+        cmd.Parameters.AddWithValue("firstMd5", NpgsqlTypes.NpgsqlDbType.Text, (object?)s.FirstPieceMd5 ?? DBNull.Value);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
