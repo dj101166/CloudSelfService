@@ -3,15 +3,15 @@
 `test_customer_full_upload_rename_delete_roundtrip` needs Storage:UseFake=true.
 """
 
-import re
+import uuid
 
 from playwright.sync_api import expect
 
 from conftest import BASE_URL, open_page
 
 
-def _open_first_share(page):
-    card = page.locator("[data-testid=target-card]").first
+def _open_share(page, name):
+    card = page.locator(f"[data-testid=target-card][data-target-name='{name}']")
     expect(card).to_be_visible(timeout=15000)
     card.click()
     expect(page.locator("[data-testid=browse-table]")).to_be_visible(timeout=15000)
@@ -20,7 +20,7 @@ def _open_first_share(page):
 
 def test_customer_read_sees_only_download(make_context):
     page = open_page(make_context("customer-read"), "/", "target-card")
-    _open_first_share(page)
+    _open_share(page, "Demo share (Read)")
     expect(page.locator("[data-testid=browse-level]")).to_have_text("Read")
     expect(page.locator("[data-testid=action-download]").first).to_be_visible()
     for hidden in ("action-upload", "action-new-folder", "action-rename", "action-delete"):
@@ -29,26 +29,44 @@ def test_customer_read_sees_only_download(make_context):
 
 def test_customer_full_upload_rename_delete_roundtrip(make_context):
     page = open_page(make_context("customer-full"), "/", "target-card")
-    _open_first_share(page)
+    _open_share(page, "Demo share (Full)")
     expect(page.locator("[data-testid=browse-level]")).to_have_text("Full")
 
-    page.locator("[data-testid=upload-input]").set_input_files(
-        {"name": "roundtrip.txt", "mimeType": "text/plain", "buffer": b"web test payload"})
-    row = page.locator("[data-testid=browse-row][data-name='roundtrip.txt']")
-    expect(row).to_be_visible(timeout=30000)
+    stem = f"roundtrip-{uuid.uuid4().hex[:8]}"
+    uploaded, renamed_name = f"{stem}.txt", f"{stem}-renamed.txt"
+    try:
+        page.locator("[data-testid=upload-input]").set_input_files(
+            {"name": uploaded, "mimeType": "text/plain", "buffer": b"web test payload"})
+        row = page.locator(f"[data-testid=browse-row][data-name='{uploaded}']")
+        expect(row).to_be_visible(timeout=30000)
 
-    row.locator("[data-testid=action-rename]").click()
-    name = page.locator("[data-testid=name-input]")
-    expect(name).to_be_visible()
-    name.fill("roundtrip-renamed.txt")
-    page.locator("[data-testid=name-ok]").click()
-    renamed = page.locator("[data-testid=browse-row][data-name='roundtrip-renamed.txt']")
-    expect(renamed).to_be_visible(timeout=15000)
-    expect(row).to_have_count(0)
+        row.locator("[data-testid=action-rename]").click()
+        name = page.locator("[data-testid=name-input]")
+        expect(name).to_be_visible()
+        name.fill(renamed_name)
+        page.locator("[data-testid=name-ok]").click()
+        renamed = page.locator(f"[data-testid=browse-row][data-name='{renamed_name}']")
+        expect(renamed).to_be_visible(timeout=15000)
+        expect(row).to_have_count(0)
 
-    renamed.locator("[data-testid=action-delete]").click()
-    page.locator("[data-testid=confirm-ok]").click()
-    expect(renamed).to_have_count(0, timeout=15000)
+        renamed.locator("[data-testid=action-delete]").click()
+        page.locator("[data-testid=confirm-ok]").click()
+        expect(renamed).to_have_count(0, timeout=15000)
+    finally:
+        _remove_leftovers(page, (uploaded, renamed_name))
+
+
+def _remove_leftovers(page, names):
+    """Best effort: a failed run must not leave files that turn the next run's upload into a replace prompt."""
+    for n in names:
+        row = page.locator(f"[data-testid=browse-row][data-name='{n}']")
+        try:
+            if row.count():
+                row.locator("[data-testid=action-delete]").click()
+                page.locator("[data-testid=confirm-ok]").click()
+                expect(row).to_have_count(0, timeout=10000)
+        except Exception:
+            pass
 
 
 def test_stranger_access_denied_copy(make_context):

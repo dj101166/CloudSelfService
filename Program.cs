@@ -226,7 +226,7 @@ AuthEndpoints.Map(app);
 app.MapDownloadEndpoints();
 app.MapUploadEndpoints();
 app.MapAdminEndpoints();
-app.MapRazorComponents<App>().AddInteractiveServerRenderMode();
+app.MapRazorComponents<App>().AddInteractiveServerRenderMode(o => o.ContentSecurityFrameAncestorsPolicy = "'none'");
 
 app.Run();
 

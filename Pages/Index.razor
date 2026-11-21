@@ -63,7 +63,7 @@ else
                 @foreach (var r in group.Targets)
                 {
                     <a class="card home__card" href="@FileDisplay.BrowseHref(r.Target.Id, "")" data-testid="target-card"
-                       data-target-id="@r.Target.Id">
+                       data-target-id="@r.Target.Id" data-target-name="@StoragePath.DisplayName(r.Target.DisplayName)">
                         <span class="home__card-icon"><Icon Name="@(r.Target.Kind == StorageKind.FileShare ? "folder" : "database")" /></span>
                         <span class="home__card-body">
                             <span class="home__card-name">@StoragePath.DisplayName(r.Target.DisplayName)</span>

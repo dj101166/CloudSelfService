@@ -195,6 +195,7 @@ public class PageAuditContextTests
         Assert.Contains("PageAudit.Capture(this.HttpContext)", app);
         Assert.Contains("CircuitHandler, CloudSelfService.Services.Files.AuditCircuitHandler>", program);
         Assert.Contains("AddHttpContextAccessor()", program);
+        Assert.Contains("o.ContentSecurityFrameAncestorsPolicy = \"'none'\"", program);
         Assert.Contains("AddFilter<CloudSelfService.Services.Files.ConnectionIpHubFilter>()", program);
     }
 }
