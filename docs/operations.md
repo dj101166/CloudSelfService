@@ -87,6 +87,8 @@ For the person deploying or running the app. Settings are App Service applicatio
 - **Reconnect IP path.** The IP recorded for actions taken on a live circuit after a reconnect uses a different code path from the first request. Spot-check at deploy: sign in, drop the connection, act, and confirm the audit row's IP.
 - **Clean the `_dev` database before the first deploy.** The `_dev` database must not hold Open upload sessions from pre-release commits. Run `TRUNCATE upload_sessions, upload_chunks;` there first.
 - **The audit log is append-only in the database.** A trigger rejects UPDATE, DELETE and TRUNCATE on `audit_events`, even for the owning role. The `_dev` truncation above is unaffected, because the upload tables are not protected. If old audit rows ever need purging, a DBA must disable the trigger deliberately (`ALTER TABLE audit_events DISABLE TRIGGER audit_events_no_change`, and `audit_events_no_truncate` for TRUNCATE) and re-enable it afterwards.
+- **Verify the key folder after deploy.** Check that a `dp-keys` folder appears on the Files share behind `DATA_ROOT`. If the mount is missing, the keys are silently written to the container disk and sign-ins will not survive a restart. The keys on the share are not encrypted (the suite pattern), so protect the share.
+- **Test databases accumulate audit rows.** In a throwaway database used for the `CSSP_TEST_PG` tests, audit rows pile up because TRUNCATE is blocked. Drop the database to clean up.
 - **WAF.** The App Gateway WAF needs a body-inspection exemption for `PUT /api/uploads/{id}/chunks/{index}` (4 MiB bodies).
 - **Port.** In a container the app listens on 8080 (`ASPNETCORE_URLS`); locally on 5300 via `Kestrel:Endpoints:Http:Url`.
 

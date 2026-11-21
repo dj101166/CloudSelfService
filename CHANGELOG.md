@@ -5,13 +5,10 @@
 First release. Advanced Cloud Self Service is now a private storage access portal: customers and Advanced staff sign in with Microsoft and browse, upload and download files held in Advanced-hosted Azure storage, without ever being given a storage key, a SAS link or a direct storage address.
 
 ### 🔄 Changed
-- Signing in now survives a restart or new release of the portal, so people are no longer signed out and uploads in progress are no longer interrupted.
 - The application has been rebuilt on the Advanced Developer Standards interface. It has a light, dark and system theme chosen from the account menu, a collapsible sidebar, and a release notes panel opened from the version chip in the header.
 
-### 🛡️ Security
-- The audit log can no longer be altered or deleted. The database itself refuses to change or remove audit entries, even for the portal's own account.
-
 ### ✨ Added
+- Signing in now survives a restart or new release of the portal, so people are no longer signed out and uploads in progress are no longer interrupted.
 - Sign in with Microsoft (Entra, single tenant). Advanced staff are admitted on first sign-in with no role and see an "access pending" panel until an administrator grants one. Customers (invited guests, including guests from Azure Government organisations) are admitted only when Advanced has already registered them. Anyone else lands on an Access Denied page that tells them to contact Advanced support. Every sign-in, admitted or refused, is written to the audit log.
 - An account menu showing who is signed in, with Sign out. An idle session is signed out after a period of inactivity (60 minutes by default) with a countdown warning, and every session ends after 12 hours regardless. A deactivated or demoted user loses access within a minute, even mid-session.
 - A dropped server connection recovers by itself (the page reloads) instead of leaving a stuck "disconnected from server" dialog, including after a container stop and start.
@@ -28,6 +25,7 @@ First release. Advanced Cloud Self Service is now a private storage access porta
 - The Dashboard, Service Health and App Services placeholder pages, replaced by the Files home and the file browser.
 
 ### 🛡️ Security
+- The audit log can no longer be altered or deleted. The database itself refuses to change or remove audit entries, even for the portal's own account.
 - Every storage operation passes through one access check. Customers see only what Advanced has granted them, at the level it was granted, and file paths are validated so nobody can step outside their share.
 - No storage key, SAS token or direct storage address ever reaches a browser. Downloads are always attachments with a generic content type.
 - Hardened HTTP security headers: framing denied, a strict content security policy that allows only the portal's own scripts, connections and images, Permissions-Policy, form-action 'self', and HSTS for one year. All file pages are marked no-store.
