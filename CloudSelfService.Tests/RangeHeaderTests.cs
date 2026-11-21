@@ -49,6 +49,8 @@ public class RangeHeaderTests
     [InlineData("bytes=-")]
     [InlineData("bytes=5-3")]
     [InlineData("bytes=0")]
+    [InlineData("bytes=99999999999999999999-")]
+    [InlineData("bytes=+5-")]
     public void Parse_Malformed_None(string header) =>
         Assert.Equal(RangeParseKind.None, RangeHeader.Parse(header, 1000).Kind);
 

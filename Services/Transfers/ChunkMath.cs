@@ -6,6 +6,10 @@ public static class ChunkMath
 {
     public const int ChunkSize = 4 * 1024 * 1024;
 
+    // Azure allows 50,000 committed blocks per blob; this is also what keeps the six-digit block-id index wide enough.
+    public const int MaxBlocksPerBlob = 50_000;
+    public const long MaxUploadBytes = (long)ChunkSize * MaxBlocksPerBlob;
+
     public static int ChunkCount(long size)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(size);

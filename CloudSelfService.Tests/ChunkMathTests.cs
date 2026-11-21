@@ -56,4 +56,12 @@ public class ChunkMathTests
         var decoded = Encoding.UTF8.GetString(Convert.FromBase64String(ChunkMath.BlockId(id, 42)));
         Assert.Equal("11111111222233334444555555555555-000042", decoded);
     }
+
+    [Fact]
+    public void ChunkCount_EffectiveMaxUpload_WithinBlobBlockLimit()
+    {
+        Assert.Equal(50_000, ChunkMath.ChunkCount(ChunkMath.MaxUploadBytes));
+        Assert.Equal(50_001, ChunkMath.ChunkCount(ChunkMath.MaxUploadBytes + 1));
+        Assert.Equal(ChunkMath.BlockId(Guid.Empty, 0).Length, ChunkMath.BlockId(Guid.Empty, ChunkMath.MaxBlocksPerBlob - 1).Length);
+    }
 }

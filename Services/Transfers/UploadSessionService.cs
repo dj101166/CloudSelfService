@@ -75,7 +75,11 @@ public sealed class UploadSessionService
         _audit = audit;
         _time = time;
         _logger = logger;
-        _maxBytes = Math.Max(0, config.GetValue<long?>("Transfers:MaxUploadBytes") ?? DefaultMaxUploadBytes);
+        var configuredMax = Math.Max(0, config.GetValue<long?>("Transfers:MaxUploadBytes") ?? DefaultMaxUploadBytes);
+        _maxBytes = Math.Min(configuredMax, ChunkMath.MaxUploadBytes);
+        if (configuredMax > _maxBytes)
+            _logger.LogWarning("Transfers:MaxUploadBytes {Configured} exceeds the {Limit}-byte ceiling set by Azure's 50,000 blocks per blob; using the ceiling.",
+                configuredMax, ChunkMath.MaxUploadBytes);
         _parallel = Math.Clamp(config.GetValue<int?>("Transfers:ParallelChunks") ?? DefaultParallelChunks, 1, 16);
         _lifetime = TimeSpan.FromHours(Math.Max(1, config.GetValue<int?>("Transfers:SessionHours") ?? DefaultSessionHours));
         _blobLock = TimeSpan.FromMinutes(Math.Max(1, config.GetValue<int?>("Transfers:BlobLockMinutes") ?? DefaultBlobLockMinutes));

@@ -412,6 +412,58 @@ public sealed class UploadEndpointTests : IDisposable
     }
 
     [Fact]
+    public async Task PutChunks_PerUserConcurrencyCap_429_AndRejectionDoesNotSpendToken()
+    {
+        using var factory = new TestAppFactory(("Transfers:MaxConcurrentChunksPerUser", "1"), ("Transfers:ChunksPerMinute", "2"));
+        var client = await factory.CreateClientAs("customer-contribute");
+        var other = await factory.CreateClientAs("customer-full");
+        var token = await TokenAsync(client);
+        var otherToken = await TokenAsync(other);
+        var target = await factory.DemoTargetAsync("Contribute");
+        var otherTarget = await factory.DemoTargetAsync("Full");
+        var file = Bytes(10);
+        var session = (await JsonOf(await client.SendAsync(Begin(token, target.Id, "", "a.bin", file.Length)))).GetProperty("sessionId").GetGuid();
+        var otherSession = (await JsonOf(await other.SendAsync(Begin(otherToken, otherTarget.Id, "", "a.bin", file.Length)))).GetProperty("sessionId").GetGuid();
+
+        var gate = new TaskCompletionSource();
+        var entered = new TaskCompletionSource();
+        factory.Storage.FailOnCall = call =>
+        {
+            if (!call.StartsWith("WriteChunk") || entered.Task.IsCompleted) return null;
+            entered.TrySetResult();
+            gate.Task.Wait();
+            return null;
+        };
+        var held = client.SendAsync(Chunk(token, session, 0, file));
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        var sameUser = await client.SendAsync(Chunk(token, session, 0, file));
+        var otherUser = await other.SendAsync(Chunk(otherToken, otherSession, 0, file));
+        gate.SetResult();
+        var heldResult = await held;
+
+        await AssertError(sameUser, HttpStatusCode.TooManyRequests, UploadErrorCodes.Busy);
+        Assert.Equal(HttpStatusCode.NoContent, otherUser.StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, heldResult.StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await client.SendAsync(Chunk(token, session, 0, file))).StatusCode);
+        await AssertError(await client.SendAsync(Chunk(token, session, 0, file)), HttpStatusCode.TooManyRequests, UploadErrorCodes.Busy);
+    }
+
+    [Fact]
+    public async Task Complete_DeclaredJsonBodyOver16KiB_413FromGuard()
+    {
+        var (client, token, target) = await ContributorAsync();
+        var session = await BeginOkAsync(client, token, target, "a.bin", 0);
+        var body = new StringContent(new string('x', 17 * 1024), System.Text.Encoding.UTF8, "application/json");
+
+        var response = await client.SendAsync(Request(HttpMethod.Post, $"/api/uploads/{session}/complete", token, body));
+
+        await AssertError(response, HttpStatusCode.RequestEntityTooLarge, UploadErrorCodes.TooLarge);
+        Assert.DoesNotContain(_factory.Storage.Calls, c => c.StartsWith("CompleteUpload"));
+        Assert.Equal(UploadStatus.Open, (await _factory.Services.GetRequiredService<IUploadSessionStore>().GetAsync(session))!.Status);
+    }
+
+    [Fact]
     public async Task PutChunk_MalformedMd5_RejectedBeforeSessionLookup()
     {
         using var failing = _factory.WithWebHostBuilder(b => b.ConfigureTestServices(s =>
