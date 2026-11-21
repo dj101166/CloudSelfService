@@ -45,16 +45,16 @@ Set in `appsettings.json`, `appsettings.Development.json` (git-ignored; copy fro
 
 | Key | Purpose |
 |---|---|
-| `ConnectionStrings:Default` | PostgreSQL. Unset means in-memory stores (data lost on restart) with a warning |
+| `ConnectionStrings:Default` | PostgreSQL. Required outside Development (the app refuses to start). In Development, unset means in-memory stores (data lost on restart) with a warning |
 | `Auth:Provider` | `Entra` (default) or `Dev` (Development only; the app refuses to start otherwise) |
-| `Auth:IdleTimeoutMinutes` / `IdleWarningSeconds` / `AbsoluteSessionHours` / `RevalidateSeconds` | Session lifetime and how often the live circuit re-checks the user |
+| `Auth:IdleTimeoutMinutes` / `IdleWarningSeconds` / `AbsoluteSessionHours` / `RevalidateSeconds` | Session lifetime, and how often the live circuit re-checks the user and customer are active, the oid binding and the absolute lifetime |
 | `Entra:TenantId` / `ClientId` / `ClientSecret` / `Instance` / `CallbackPath` / `StaffEmailDomain` | OIDC registration; staff are recognised by email domain |
-| `Authorization:Owners` | Comma-separated UPNs that are Owner. Config-authoritative, never stored |
+| `Authorization:Owners` | Comma-separated UPNs that are Owner. Config-authoritative, derived on every role check, never stored. Empty outside Development logs a startup warning |
 | `Storage:AllowedEndpointSuffixes` / `AllowedSubscriptions` | Which storage endpoints and subscriptions admins may register |
 | `Storage:UseFake` | In-memory backend (Development only) |
 | `Admin:TestAccessTimeoutSeconds` / `AuditExportsPerMinute` | Admin guard rails |
 | `Support:Contact` | Shown on Help and Access Denied |
-| `Transfers:*` | Upload and download limits, concurrency, rate limits, reauthorisation cadence |
+| `Transfers:*` | Upload and download limits, concurrency, rate limits (`RequestsPerMinute` / `MaxConcurrentPerUser` cover downloads and upload Begin/Status/Complete/Abort; chunk PUTs have their own), reauthorisation cadence |
 | `DATA_ROOT` | Directory (Azure Files mount) where Data Protection keys persist under `dp-keys`. Unset means ephemeral keys: every restart signs everyone out |
 | `APP_VERSION` | Build arg / env var shown in the topbar version chip |
 
@@ -63,14 +63,15 @@ Set in `appsettings.json`, `appsettings.Development.json` (git-ignored; copy fro
 - **Pages/**: `Index` (Files home), `Files/Browse`, `Help`, `Login`, `SignedOut`, `AccessDenied`, `Admin/{Customers,CustomerDetail,Targets,Staff,AuditLog}`.
 - **Shared/**: layout, nav, account menu, upload panel, dialogs, changelog dialog.
 - **Authorization/**: Entra OIDC wiring, policies, role handler, session revalidation, `DevSignIn`.
-- **Services/**: `Access/` (`StorageAccessService` is the single storage gate, `StoragePath`), `Storage/` (Azure and fake backends), `Identity/`, `Data/` (PostgreSQL and in-memory stores), `AdminService`, `ChangelogDocument`.
+- **Services/**: `Access/` (`StorageAccessService` is the single storage gate, `StoragePath`), `Storage/` (Azure and fake backends), `Identity/` (incl. `StaffAccess`, the effective-role rule), `Data/` (PostgreSQL and in-memory stores), `AdminService`, `StartupChecks`, `ChangelogDocument`.
 - **Endpoints/**: `DownloadEndpoints`, `UploadEndpoints` (`PUT /api/uploads/{id}/chunks/{index}`), auth endpoints, rate limits.
 - **wwwroot/**: `css/` (sumi tokens in `theme.css`), `js/cloudselfservice.js` (theme, sidebar), `js/uploader.js`, `lib/spark-md5/` (vendored, licence in `ThirdPartyNotices/`).
 - **CloudSelfService.Tests/**: xUnit; the Dockerfile runs it.
 
 ## Security checks (review these on every change)
 
-- **Single storage gate.** All storage reads and writes go through `StorageAccessService`. Never construct a storage client elsewhere or add a second path to storage. Files access uses `ShareTokenIntent.Backup`.
+- **Single storage gate.** All storage reads and writes are decided by `StorageAccessService`. Only `DownloadEndpoints`, `UploadSessionService`, `UploadCleanupService` and `AdminService` (Test access) also hold the raw backend, and they act only after a `StorageAccessService` decision and only on the target it returned. `StorageGateArchitectureTests` fails if any other type takes `IStorageBackendResolver`, `IStorageBackend` or `StorageClientFactory`; extending its allow-list is a security review decision. Never construct a storage client elsewhere. Files access uses `ShareTokenIntent.Backup`.
+- **Effective staff role.** Read it only through `StaffAccess` (`Effective`, `IsPending`, `Reaches`). Owner is derived from `Authorization:Owners` and never stored, so the stored `StaffRole` alone must never gate or label anything.
 - **No `/auth/service-signin`.** There is no shared-secret or API-key sign-in on this app.
 - **Dev sign-in and fake storage are Development-only.** `DevSignIn.AssertSafe` throws at startup otherwise; the built image was verified to exit with "Dev sign-in cannot run outside Development" on `Auth__Provider=Dev` in Production.
 - **Upload chunk route.** `PUT /api/uploads/{id}/chunks/{index}` carries 4 MiB bodies and needs a WAF exemption (body-inspection limit) at the App Gateway; it is antiforgery-protected, rate limited and session-bound.

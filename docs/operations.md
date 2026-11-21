@@ -8,7 +8,7 @@ For the person deploying or running the app. Settings are App Service applicatio
 
 | Key | Default | Notes |
 |---|---|---|
-| `ConnectionStrings:Default` | none | PostgreSQL. Unset means in-memory stores and a startup warning: nothing persists. An unreachable database fails the start on purpose. The schema is created and upgraded at start. |
+| `ConnectionStrings:Default` | none | PostgreSQL. Required outside Development: the app refuses to start without it ("ConnectionStrings:Default is required outside Development."). In Development, unset means in-memory stores and a startup warning: nothing persists. An unreachable database fails the start on purpose. The schema is created and upgraded at start. |
 
 ### Auth
 
@@ -18,7 +18,7 @@ For the person deploying or running the app. Settings are App Service applicatio
 | `Auth:IdleTimeoutMinutes` | 60 | Inactivity sign-out. |
 | `Auth:IdleWarningSeconds` | 120 | Countdown shown before the idle sign-out. |
 | `Auth:AbsoluteSessionHours` | 12 | A session ends this long after sign-in regardless of activity. |
-| `Auth:RevalidateSeconds` | 60 | How often a live session re-checks the user's active flag and role. |
+| `Auth:RevalidateSeconds` | 60 | How often a live session re-checks that the user (and, for a customer, their customer) is still active, that the record is still bound to the signed-in object id, and that the absolute session lifetime has not passed. Roles are not cached: every page and action re-reads them. |
 
 ### Data Protection
 
@@ -39,7 +39,7 @@ For the person deploying or running the app. Settings are App Service applicatio
 
 | Key | Notes |
 |---|---|
-| `Authorization:Owners` | Comma-separated UPNs. Owner is derived from this list on every sign-in and is never stored. At least one is needed to assign any staff role. |
+| `Authorization:Owners` | Comma-separated UPNs. Owner is derived from this list on every role check (page, menu and action) and is never stored, so an Owner's own record shows no role. At least one is needed to assign any staff role; outside Development the app logs "No Owners configured; nobody can assign staff roles." at start when the list is empty. |
 
 ### Storage
 
@@ -53,7 +53,7 @@ For the person deploying or running the app. Settings are App Service applicatio
 
 | Key | Default | Notes |
 |---|---|---|
-| `Admin:TestAccessTimeoutSeconds` | 20 | Limit for the Test access button (5 s cooldown per target). |
+| `Admin:TestAccessTimeoutSeconds` | 20 | Limit for the Test access button (5 s cooldown per admin, across all targets). |
 | `Admin:AuditExportsPerMinute` | 10 | Audit CSV export rate limit. |
 | `Support:Contact` | "your Advanced account team" | Shown on Help and Access Denied. |
 
@@ -61,7 +61,7 @@ For the person deploying or running the app. Settings are App Service applicatio
 
 | Key | Default | Notes |
 |---|---|---|
-| `Transfers:MaxUploadBytes` | 53687091200 (50 GiB) | Capped at 195.3 GiB, the Azure block limit; a higher value is reduced with a warning. |
+| `Transfers:MaxUploadBytes` | 53687091200 (50 GiB) | Capped at 195.3 GiB, the Azure block limit; a higher value is reduced, with one warning at startup. |
 | `Transfers:ParallelChunks` | 4 | Browser-side parallel 4 MiB pieces per upload. |
 | `Transfers:SessionHours` | 24 | Lifetime of an upload session. |
 | `Transfers:MaxOpenSessionsPerUser` | 8 | Unfinished uploads per user. |
@@ -72,8 +72,8 @@ For the person deploying or running the app. Settings are App Service applicatio
 | `Transfers:MaxConcurrentChunksTotal` | 64 | In-flight pieces across the app. |
 | `Transfers:ChunksPerMinute` | 600 | Piece rate limit per user. |
 | `Transfers:MinChunkBytesPerSecond` | 65536 | Pieces arriving slower than this are ended. |
-| `Transfers:RequestsPerMinute` | 120 | Download request rate per user. |
-| `Transfers:MaxConcurrentPerUser` | 4 | Concurrent downloads per user. |
+| `Transfers:RequestsPerMinute` | 120 | Request rate per user for downloads and the upload Begin, Status, Complete and Abort calls. Pieces have their own limits above. |
+| `Transfers:MaxConcurrentPerUser` | 4 | Concurrent requests per user across the same calls (downloads and upload Begin, Status, Complete, Abort). |
 | `Transfers:ReauthorizeBytes` | 67108864 (64 MiB) | A running download re-checks access after this many bytes... |
 | `Transfers:ReauthorizeSeconds` | 60 | ...or this many seconds. |
 
@@ -89,6 +89,7 @@ For the person deploying or running the app. Settings are App Service applicatio
 - **The audit log is append-only in the database.** A trigger rejects UPDATE, DELETE and TRUNCATE on `audit_events`, even for the owning role. The `_dev` truncation above is unaffected, because the upload tables are not protected. If old audit rows ever need purging, a DBA must disable the trigger deliberately (`ALTER TABLE audit_events DISABLE TRIGGER audit_events_no_change`, and `audit_events_no_truncate` for TRUNCATE) and re-enable it afterwards.
 - **Verify the key folder after deploy.** Check that a `dp-keys` folder appears on the Files share behind `DATA_ROOT`. If the mount is missing, the keys are silently written to the container disk and sign-ins will not survive a restart. The keys on the share are not encrypted (the suite pattern), so protect the share.
 - **Test databases accumulate audit rows.** In a throwaway database used for the `CSSP_TEST_PG` tests, audit rows pile up because TRUNCATE is blocked. Drop the database to clean up.
+- **Malware scan results are not shown (deferred).** Defender for Storage on-upload scanning records its verdict as a blob index tag (`Malware Scanning scan result`). Reading index tags needs the `Microsoft.Storage/storageAccounts/blobServices/containers/blobs/tags/read` data action, which the app's role, Storage Blob Data Contributor, does not include (Storage Blob Data Owner does). Rather than widen the managed identity to Owner on customer accounts, the app does not read or display the tag in v1.0.0. Scanning itself is unaffected: Defender's alerts and any automatic response configured there still apply. To revisit, grant a custom role adding only `blobs/tags/read` and read the tag in the blob listing.
 - **WAF.** The App Gateway WAF needs a body-inspection exemption for `PUT /api/uploads/{id}/chunks/{index}` (4 MiB bodies).
 - **Port.** In a container the app listens on 8080 (`ASPNETCORE_URLS`); locally on 5300 via `Kestrel:Endpoints:Http:Url`.
 

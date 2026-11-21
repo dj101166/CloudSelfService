@@ -201,6 +201,10 @@ One service, `StorageAccessService`, is the **only** code that touches storage. 
 takes `(user, targetId, path, operation)`, resolves the user's effective level for that target,
 refuses if insufficient, executes, and writes the audit row. Pages and transfer endpoints call
 it; nothing else holds a storage client. This is the seam phase 2's API reuses.
+The few other callers that hold the raw backend (`DownloadEndpoints`, `UploadSessionService`,
+`UploadCleanupService` and `AdminService`'s Test access) act only after a `StorageAccessService`
+decision and only on the target it returned; `StorageGateArchitectureTests` fails the build if
+any other type takes a backend, resolver or client factory.
 
 - **Clients:** `Azure.Storage.Files.Shares` with `ShareTokenIntent.Backup`, and
   `Azure.Storage.Blobs`; one client per account, cached. Credential: `DefaultAzureCredential`
@@ -253,6 +257,11 @@ Uploads and downloads do **not** go through the Blazor circuit.
 - **Malware scanning** is an infra concern: enable Microsoft Defender for Storage on-upload
   malware scanning on the target accounts (section 6). The app surfaces the scan result tag on
   blobs where present; it does not run its own scanner.
+  - **Note (deferred, R47):** not implemented in v1.0.0. Defender writes the verdict as the blob
+    index tag `Malware Scanning scan result`, and reading index tags needs the
+    `blobs/tags/read` data action, which Storage Blob Data Contributor (the role in section 6)
+    does not include. Displaying it would mean granting Storage Blob Data Owner or a custom role
+    on customer accounts; that is left for a later decision. Scanning itself is unaffected.
 
 ### 5.6 Data model (PostgreSQL)
 
