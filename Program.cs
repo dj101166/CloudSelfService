@@ -61,6 +61,7 @@ else
     builder.Services.AddSingleton<IStorageBackendResolver, StorageBackendResolver>();
 }
 builder.Services.AddScoped<StorageAccessService>();
+builder.Services.AddSingleton<ProbeCooldown>();
 builder.Services.AddScoped<AdminService>();
 builder.Services.AddScoped<UploadSessionService>();
 builder.Services.AddHostedService<UploadCleanupService>();
@@ -162,8 +163,7 @@ builder.Services.AddAuthorization(options =>
 
 var app = builder.Build();
 
-if ((builder.Configuration.GetSection("Storage:AllowedSubscriptions").Get<string[]>() ?? Array.Empty<string>())
-        .All(string.IsNullOrWhiteSpace))
+if (AdminService.ParseAllowedSubscriptions(builder.Configuration).Count == 0)
     app.Logger.LogWarning("Storage:AllowedSubscriptions is empty — any subscription the managed identity can reach may be registered");
 
 var pg = app.Services.GetRequiredService<PgsqlContext>();

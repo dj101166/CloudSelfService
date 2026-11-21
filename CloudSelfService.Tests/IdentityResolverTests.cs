@@ -244,6 +244,21 @@ public class IdentityResolverTests
     }
 
     [Fact]
+    public async Task Admit_FirstBind_MemberCustomerUser_ComparedAgainstTid()
+    {
+        var tenant = Guid.NewGuid();
+        var c = new Customer(Guid.NewGuid(), "Member Co", true, "", tenant.ToString(), CustomerCloud.Commercial, CrossTenantStatus.NotRequired);
+        await _customers.UpsertAsync(c);
+        await AddCustomerUser(c.Id, "m@member.example");
+
+        var wrong = await Resolver().AdmitAsync(new EntraIdentity("oid-m", Guid.NewGuid().ToString(), "m@member.example", "M", IsGuest: false));
+        var right = await Resolver().AdmitAsync(new EntraIdentity("oid-m", tenant.ToString(), "m@member.example", "M", IsGuest: false));
+
+        Assert.Equal(AdmissionOutcome.UnknownCustomer, wrong.Outcome);
+        Assert.Equal(AdmissionOutcome.Admitted, right.Outcome);
+    }
+
+    [Fact]
     public async Task Admit_BoundCustomer_HomeTenantNotRecheckedOnLaterSignIns()
     {
         var c = new Customer(Guid.NewGuid(), "Gov Co", true, "", Guid.NewGuid().ToString(), CustomerCloud.AzureGov, CrossTenantStatus.Complete);

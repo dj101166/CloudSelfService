@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -42,17 +41,19 @@ public sealed partial class AdminService
     private readonly TimeProvider _time;
     private readonly string _staffDomain;
     private readonly HashSet<Guid> _allowedSubscriptions;
-    private readonly ConcurrentDictionary<Guid, DateTimeOffset> _lastTest = new();
+    private readonly ProbeCooldown _cooldown;
+    private readonly TimeSpan _testTimeout;
 
     public const string InternalOwnerOnlyMessage = "Only an Owner can register internal storage.";
     public const string SubscriptionNotAllowedMessage = "That subscription isn't on the allowed list for this portal.";
     public const string TestTimeoutMessage = "The storage account didn't respond in time.";
     public const string TestCooldownMessage = "Wait a few seconds before testing again.";
-    public static readonly TimeSpan TestTimeout = TimeSpan.FromSeconds(20);
+    public const double DefaultTestTimeoutSeconds = 20;
     public static readonly TimeSpan TestCooldown = TimeSpan.FromSeconds(5);
 
     public AdminService(IUserStore users, ICustomerStore customers, ITargetStore targets, IGrantStore grants,
-        IStorageBackendResolver backends, AuditService audit, OwnerConfig owners, TimeProvider time, IConfiguration config)
+        IStorageBackendResolver backends, AuditService audit, OwnerConfig owners, TimeProvider time, IConfiguration config,
+        ProbeCooldown? cooldown = null)
     {
         _users = users;
         _customers = customers;
@@ -62,15 +63,33 @@ public sealed partial class AdminService
         _audit = audit;
         _owners = owners;
         _time = time;
+        _cooldown = cooldown ?? new ProbeCooldown(time);
+        _testTimeout = TimeSpan.FromSeconds(Math.Max(0.001, config.GetValue<double?>("Admin:TestAccessTimeoutSeconds") ?? DefaultTestTimeoutSeconds));
         _staffDomain = config["Entra:StaffEmailDomain"] is { Length: > 0 } d ? d : "advancedutility.com";
         var configured = config.GetSection("Storage:AllowedEndpointSuffixes").Get<string[]>()
             ?.Select(s => s.Trim().ToLowerInvariant()).Where(s => s.Length > 0).Distinct().ToArray();
         AllowedEndpointSuffixes = configured is { Length: > 0 } ? configured : DefaultSuffixes;
-        _allowedSubscriptions = (config.GetSection("Storage:AllowedSubscriptions").Get<string[]>() ?? Array.Empty<string>())
-            .Select(x => Guid.TryParse(x?.Trim(), out var g) ? g : Guid.Empty).Where(g => g != Guid.Empty).ToHashSet();
+        _allowedSubscriptions = ParseAllowedSubscriptions(config);
     }
 
     public IReadOnlyList<string> AllowedEndpointSuffixes { get; }
+
+    /// <summary>
+    /// The configured subscription allow-list. Any non-blank entry that is not a GUID throws: dropping it would leave an
+    /// empty set, which means "any subscription", so a typo would silently open registration up.
+    /// </summary>
+    public static HashSet<Guid> ParseAllowedSubscriptions(IConfiguration config)
+    {
+        var set = new HashSet<Guid>();
+        foreach (var raw in config.GetSection("Storage:AllowedSubscriptions").Get<string[]>() ?? Array.Empty<string>())
+        {
+            if (string.IsNullOrWhiteSpace(raw)) continue;
+            if (!Guid.TryParse(raw.Trim(), out var id) || id == Guid.Empty)
+                throw new InvalidOperationException($"Storage:AllowedSubscriptions contains an invalid subscription id: {raw}");
+            set.Add(id);
+        }
+        return set;
+    }
 
     /// <summary>Empty means any subscription the managed identity can reach may be registered.</summary>
     public bool HasSubscriptionAllowList => _allowedSubscriptions.Count > 0;
@@ -164,7 +183,9 @@ public sealed partial class AdminService
         if (!IsValidUpn(name, out var at))
             return new(AccessOutcome.Invalid, null, "Enter the user's UPN, like name@customer.example.");
         var normalized = UpnNormalizer.Normalize(name);
-        if (normalized.EndsWith("@" + UpnNormalizer.Normalize(_staffDomain), StringComparison.Ordinal) || _owners.IsOwner(name))
+        if (_owners.IsOwner(name))
+            return new(AccessOutcome.Invalid, null, OwnersFromConfigMessage);
+        if (normalized.EndsWith("@" + UpnNormalizer.Normalize(_staffDomain), StringComparison.Ordinal))
             return new(AccessOutcome.Invalid, null, StaffUpnMessage);
         if (await _users.FindByUpnAsync(name, ct) is not null)
             return new(AccessOutcome.Invalid, null, "A user with that UPN already exists.");
@@ -243,13 +264,18 @@ public sealed partial class AdminService
             return new(AccessOutcome.Invalid, null, "That customer no longer exists.");
 
         var existing = t.Id == Guid.Empty ? null : await _targets.GetAsync(t.Id, ct);
-        if (t.CustomerId is null && existing?.CustomerId is not null || t.CustomerId is null && existing is null)
+        // Internal storage is Owner-managed: creating it, moving a customer's target to it, and (for an existing internal
+        // target) handing it to a customer or re-pointing it at other storage all need an Owner. A display name or
+        // active flag edit does not.
+        var locationChanged = existing is not null
+            && (existing.AccountName != account || existing.ContainerName != container || existing.Kind != t.Kind
+                || !string.Equals(existing.EndpointSuffix, suffix, StringComparison.OrdinalIgnoreCase));
+        var internalChange = (t.CustomerId is null && (existing is null || existing.CustomerId is not null))
+            || (existing is { CustomerId: null } && (t.CustomerId is not null || locationChanged));
+        if (internalChange && _owners.EffectiveRole(actor) < StaffRole.Owner)
         {
-            if (_owners.EffectiveRole(actor) < StaffRole.Owner)
-            {
-                await RecordAsync(actor, SaveTargetOp, existing?.CustomerId, existing?.Id, display, ctx, AuditResult.Denied, InternalOwnerOnlyMessage);
-                return new(AccessOutcome.Denied, null, InternalOwnerOnlyMessage);
-            }
+            await RecordAsync(actor, SaveTargetOp, existing?.CustomerId, existing?.Id, display, ctx, AuditResult.Denied, InternalOwnerOnlyMessage);
+            return new(AccessOutcome.Denied, null, InternalOwnerOnlyMessage);
         }
         if (existing?.CustomerId is { } oldOwner && oldOwner != t.CustomerId
             && (await _grants.ListForCustomerAsync(oldOwner, ct)).Any(g => g.TargetId == existing.Id))
@@ -285,14 +311,12 @@ public sealed partial class AdminService
         var target = await _targets.GetAsync(targetId, ct);
         if (target is null) return new(AccessOutcome.NotFound, null, "That target no longer exists.");
 
-        var now = _time.GetUtcNow();
-        if (_lastTest.TryGetValue(actor.Id, out var last) && now - last < TestCooldown)
+        if (!_cooldown.TryEnter(actor.Id, TestCooldown))
             return new(AccessOutcome.Busy, null, TestCooldownMessage);
-        _lastTest[actor.Id] = now;
 
         var noun = target.Kind == StorageKind.FileShare ? "file share" : "container";
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        timeout.CancelAfter(TestTimeout);
+        timeout.CancelAfter(_testTimeout);
         try
         {
             await _backends.For(target).ProbeAsync(target, timeout.Token);

@@ -1136,9 +1136,19 @@ public class AdminServiceTests
     public async Task TestTarget_HungProbe_TimesOutWithMessage()
     {
         _fake.FailOnCall = c => c.StartsWith("Probe") ? new OperationCanceledException() : null;
-        var timedOutByUs = await _svc.TestTargetAsync(_admin.Id, _alphaTarget.Id, Ctx);
+        _fake.FailOnCall = c =>
+        {
+            if (!c.StartsWith("Probe")) return null;
+            Thread.Sleep(400);
+            return new OperationCanceledException();
+        };
+        var svc = Build(new Dictionary<string, string?> { ["Admin:TestAccessTimeoutSeconds"] = "0.05" });
+
+        var timedOutByUs = await svc.TestTargetAsync(_admin.Id, _alphaTarget.Id, Ctx);
 
         Assert.Equal(AccessOutcome.Unavailable, timedOutByUs.Outcome);
+        Assert.Equal(AdminService.TestTimeoutMessage, timedOutByUs.Message);
+        Assert.Equal(AdminService.TestTimeoutMessage, Assert.Single(await AuditAsync(AdminService.TestTargetOp)).Error);
     }
 
     [Fact]
@@ -1171,4 +1181,125 @@ public class AdminServiceTests
     [Fact]
     public void HomeTenantOf_Member_Null() =>
         Assert.Null(IdentityResolver.HomeTenantOf(new EntraIdentity("o", "t", "u@x", "U", IsGuest: false) { Idp = "https://sts.windows.net/11111111-2222-3333-4444-555555555555/" }));
+
+    [Fact]
+    public void HomeTenantOf_Member_UsesTid() =>
+        Assert.Equal(Guid.Parse("11111111-2222-3333-4444-555555555555"),
+            IdentityResolver.HomeTenantOf(new EntraIdentity("o", "11111111-2222-3333-4444-555555555555", "u@x", "U", IsGuest: false)));
+
+    [Theory]
+    [InlineData("prod-sub")]
+    [InlineData("11111111-2222-3333-4444-55555555555")]
+    [InlineData("00000000-0000-0000-0000-000000000000")]
+    public void AllowedSubscriptions_NonGuidEntry_FailsFast(string entry)
+    {
+        var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Storage:AllowedSubscriptions:0"] = Guid.NewGuid().ToString(),
+            ["Storage:AllowedSubscriptions:1"] = entry,
+        }).Build();
+
+        var ex = Assert.Throws<InvalidOperationException>(() => AdminService.ParseAllowedSubscriptions(config));
+        Assert.Contains("Storage:AllowedSubscriptions contains an invalid subscription id: " + entry, ex.Message);
+        Assert.Throws<InvalidOperationException>(() => Build(new Dictionary<string, string?> { ["Storage:AllowedSubscriptions:0"] = entry }));
+    }
+
+    [Fact]
+    public void AllowedSubscriptions_BlankEntriesIgnored_ValidParsed()
+    {
+        var id = Guid.NewGuid();
+        var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Storage:AllowedSubscriptions:0"] = " ",
+            ["Storage:AllowedSubscriptions:1"] = " " + id.ToString("N").ToUpperInvariant() + " ",
+        }).Build();
+
+        Assert.Equal(new[] { id }, AdminService.ParseAllowedSubscriptions(config));
+        Assert.Empty(AdminService.ParseAllowedSubscriptions(new ConfigurationBuilder().Build()));
+    }
+
+    [Fact]
+    public async Task TestTarget_CooldownSharedAcrossAdminServiceInstances()
+    {
+        var shared = new ProbeCooldown(new AppRoleHandlerTests.FixedTime(Now));
+        AdminService Make() => new(_users, _customers, _targets, _grants, _fake, new AuditService(_audit, NullLogger<AuditService>.Instance),
+            new OwnerConfig(OwnerUpn), new AppRoleHandlerTests.FixedTime(Now), new ConfigurationBuilder().Build(), shared);
+
+        var first = await Make().TestTargetAsync(_admin.Id, _alphaTarget.Id, Ctx);
+        var secondCircuit = await Make().TestTargetAsync(_admin.Id, _alphaTarget.Id, Ctx);
+        var otherActor = await Make().TestTargetAsync(_owner.Id, _alphaTarget.Id, Ctx);
+
+        Assert.Equal(AccessOutcome.Ok, first.Outcome);
+        Assert.Equal(AccessOutcome.Busy, secondCircuit.Outcome);
+        Assert.Equal(AccessOutcome.Ok, otherActor.Outcome);
+    }
+
+    private sealed class MovingTime(DateTimeOffset start) : TimeProvider
+    {
+        public DateTimeOffset Now = start;
+        public override DateTimeOffset GetUtcNow() => Now;
+    }
+
+    [Fact]
+    public void ProbeCooldown_AllowsAgainAfterWindow()
+    {
+        var clock = new MovingTime(Now);
+        var cooldown = new ProbeCooldown(clock);
+        var actor = Guid.NewGuid();
+
+        Assert.True(cooldown.TryEnter(actor, TimeSpan.FromSeconds(5)));
+        Assert.False(cooldown.TryEnter(actor, TimeSpan.FromSeconds(5)));
+        clock.Now = Now.AddSeconds(6);
+        Assert.True(cooldown.TryEnter(actor, TimeSpan.FromSeconds(5)));
+    }
+
+    [Fact]
+    public async Task SaveTarget_ExistingInternal_HandedToCustomerOrRepointed_StaffAdminDenied_OwnerOk()
+    {
+        var internalTarget = Target(null, "Internal", "internalstore", "internal-one");
+        await _targets.UpsertAsync(internalTarget);
+        var owner = WithOwners(OwnerUpn);
+
+        foreach (var changed in new[]
+                 {
+                     internalTarget with { CustomerId = _alpha.Id },
+                     internalTarget with { AccountName = "otheraccount" },
+                     internalTarget with { ContainerName = "other-share" },
+                     internalTarget with { Kind = StorageKind.BlobContainer },
+                     internalTarget with { EndpointSuffix = "core.usgovcloudapi.net" },
+                 })
+        {
+            var byAdmin = await _svc.SaveTargetAsync(_admin.Id, changed, Ctx);
+            Assert.Equal(AccessOutcome.Denied, byAdmin.Outcome);
+            Assert.Equal(AdminService.InternalOwnerOnlyMessage, byAdmin.Message);
+        }
+        var stored = (await _targets.GetAsync(internalTarget.Id))!;
+        Assert.Null(stored.CustomerId);
+        Assert.Equal("internalstore", stored.AccountName);
+
+        var handed = await owner.SaveTargetAsync(_owner.Id, internalTarget with { CustomerId = _alpha.Id }, Ctx);
+        Assert.Equal(AccessOutcome.Ok, handed.Outcome);
+    }
+
+    [Fact]
+    public async Task SaveTarget_ExistingInternal_DisplayNameAndActiveEdit_StaffAdminAllowed()
+    {
+        var internalTarget = Target(null, "Internal", "internalstore", "internal-one");
+        await _targets.UpsertAsync(internalTarget);
+
+        var result = await _svc.SaveTargetAsync(_admin.Id, internalTarget with { DisplayName = "New name", Active = false }, Ctx);
+
+        Assert.Equal(AccessOutcome.Ok, result.Outcome);
+        Assert.Equal("New name", (await _targets.GetAsync(internalTarget.Id))!.DisplayName);
+    }
+
+    [Fact]
+    public async Task AddCustomerUser_ConfigOwnerUpn_UsesOwnersMessage()
+    {
+        var result = await _svc.AddCustomerUserAsync(_admin.Id, _alpha.Id, OwnerUpn, "", Ctx);
+        var external = await WithOwners("boss@partner.example").AddCustomerUserAsync(_admin.Id, _alpha.Id, "boss@partner.example", "", Ctx);
+
+        Assert.Equal(AdminService.OwnersFromConfigMessage, result.Message);
+        Assert.Equal(AdminService.OwnersFromConfigMessage, external.Message);
+    }
 }

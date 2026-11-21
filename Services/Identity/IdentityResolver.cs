@@ -169,12 +169,13 @@ public sealed class IdentityResolver
     }
 
     /// <summary>
-    /// The guest's home tenant: the GUID in the <c>idp</c> claim (https://sts.windows.net/{tid}/ or
-    /// https://login.microsoftonline.us/{tid}/v2.0). Null for a member, for a consumer idp, or when the claim is absent.
+    /// The caller's home tenant: for a member, the token's <c>tid</c>; for a guest, the GUID in the <c>idp</c> claim (https://sts.windows.net/{tid}/ or
+    /// https://login.microsoftonline.us/{tid}/v2.0). Null for a consumer idp or when the claim is absent.
     /// </summary>
     public static Guid? HomeTenantOf(EntraIdentity id)
     {
-        if (!id.IsGuest || string.IsNullOrWhiteSpace(id.Idp)) return null;
+        if (!id.IsGuest) return Guid.TryParse(id.TenantId, out var memberTid) ? memberTid : null;
+        if (string.IsNullOrWhiteSpace(id.Idp)) return null;
         if (!Uri.TryCreate(id.Idp.Trim(), UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttps) return null;
         var first = uri.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
         return Guid.TryParse(first, out var tid) ? tid : null;
