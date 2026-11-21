@@ -138,6 +138,25 @@ public sealed class PgsqlContext : IAsyncDisposable
         CREATE INDEX IF NOT EXISTS idx_audit_events_user_at ON audit_events (user_id, at DESC);
         CREATE INDEX IF NOT EXISTS idx_audit_events_operation_at ON audit_events (operation, at DESC);
 
+        CREATE OR REPLACE FUNCTION audit_events_append_only() RETURNS trigger AS $fn$
+        BEGIN
+            RAISE EXCEPTION 'audit_events is append-only' USING ERRCODE = 'insufficient_privilege';
+        END;
+        $fn$ LANGUAGE plpgsql;
+
+        DO $$ BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'audit_events_no_change') THEN
+                CREATE TRIGGER audit_events_no_change
+                    BEFORE UPDATE OR DELETE ON audit_events
+                    FOR EACH ROW EXECUTE FUNCTION audit_events_append_only();
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'audit_events_no_truncate') THEN
+                CREATE TRIGGER audit_events_no_truncate
+                    BEFORE TRUNCATE ON audit_events
+                    FOR EACH STATEMENT EXECUTE FUNCTION audit_events_append_only();
+            END IF;
+        END $$;
+
         CREATE TABLE IF NOT EXISTS upload_sessions (
             id           UUID PRIMARY KEY,
             user_id      UUID NOT NULL,

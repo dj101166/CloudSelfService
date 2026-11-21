@@ -43,6 +43,29 @@ public class PgStoresIntegrationTests
     }
 
     [PgFact]
+    public async Task AuditEvents_UpdateDeleteTruncate_AreRejected()
+    {
+        await using var ctx = await CtxAsync();
+        var store = new PgAuditStore(ctx);
+        var id = Guid.NewGuid();
+        await store.AppendAsync(new AuditEvent(id, DateTimeOffset.UtcNow, null, "u", null, null, "Download", "/p", null,
+            AuditResult.Success, "", "1.1.1.1", "corr"));
+
+        async Task Run(string sql)
+        {
+            await using var cmd = ctx.DataSource.CreateCommand(sql);
+            var ex = await Assert.ThrowsAsync<Npgsql.PostgresException>(() => cmd.ExecuteNonQueryAsync());
+            Assert.Equal("42501", ex.SqlState);
+        }
+
+        await Run($"UPDATE audit_events SET error = 'x' WHERE id = '{id}'");
+        await Run($"DELETE FROM audit_events WHERE id = '{id}'");
+        await Run("TRUNCATE audit_events");
+        await ctx.EnsureSchemaAsync();
+        await Run($"DELETE FROM audit_events WHERE id = '{id}'");
+    }
+
+    [PgFact]
     public async Task CustomerAndTargetStores_RoundTrip()
     {
         await using var ctx = await CtxAsync();

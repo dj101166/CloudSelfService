@@ -5,7 +5,11 @@
 First release. Advanced Cloud Self Service is now a private storage access portal: customers and Advanced staff sign in with Microsoft and browse, upload and download files held in Advanced-hosted Azure storage, without ever being given a storage key, a SAS link or a direct storage address.
 
 ### 🔄 Changed
+- Signing in now survives a restart or new release of the portal, so people are no longer signed out and uploads in progress are no longer interrupted.
 - The application has been rebuilt on the Advanced Developer Standards interface. It has a light, dark and system theme chosen from the account menu, a collapsible sidebar, and a release notes panel opened from the version chip in the header.
+
+### 🛡️ Security
+- The audit log can no longer be altered or deleted. The database itself refuses to change or remove audit entries, even for the portal's own account.
 
 ### ✨ Added
 - Sign in with Microsoft (Entra, single tenant). Advanced staff are admitted on first sign-in with no role and see an "access pending" panel until an administrator grants one. Customers (invited guests, including guests from Azure Government organisations) are admitted only when Advanced has already registered them. Anyone else lands on an Access Denied page that tells them to contact Advanced support. Every sign-in, admitted or refused, is written to the audit log.

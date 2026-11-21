@@ -13,6 +13,7 @@ using Microsoft.AspNetCore.Authentication.OpenIdConnect;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Components.Authorization;
 using Microsoft.AspNetCore.Components.Web;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.IdentityModel.Protocols.OpenIdConnect;
@@ -23,6 +24,29 @@ var builder = WebApplication.CreateBuilder(args);
 var usCulture = new System.Globalization.CultureInfo("en-US");
 System.Globalization.CultureInfo.DefaultThreadCurrentCulture   = usCulture;
 System.Globalization.CultureInfo.DefaultThreadCurrentUICulture = usCulture;
+
+{
+    var keysPath = CloudSelfService.Services.DataProtectionPaths.KeyDirectory(builder.Configuration["DATA_ROOT"]);
+    if (keysPath is null)
+    {
+        Console.WriteLine("WARNING: Data Protection keys are not persisted; sign-ins will not survive a restart. Set DATA_ROOT.");
+    }
+    else
+    {
+        try
+        {
+            var keysDir = new DirectoryInfo(keysPath);
+            keysDir.Create();
+            builder.Services.AddDataProtection()
+                .PersistKeysToFileSystem(keysDir)
+                .SetApplicationName("CloudSelfService");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"WARNING: Data Protection key persistence failed ({ex.Message}). Sign-ins will not survive a restart.");
+        }
+    }
+}
 
 builder.Services.AddRazorComponents().AddInteractiveServerComponents()
     .RegisterPersistentService<CloudSelfService.Services.Files.PageAuditContext>(RenderMode.InteractiveServer);

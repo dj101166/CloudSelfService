@@ -55,6 +55,7 @@ Set in `appsettings.json`, `appsettings.Development.json` (git-ignored; copy fro
 | `Admin:TestAccessTimeoutSeconds` / `AuditExportsPerMinute` | Admin guard rails |
 | `Support:Contact` | Shown on Help and Access Denied |
 | `Transfers:*` | Upload and download limits, concurrency, rate limits, reauthorisation cadence |
+| `DATA_ROOT` | Directory (Azure Files mount) where Data Protection keys persist under `dp-keys`. Unset means ephemeral keys: every restart signs everyone out |
 | `APP_VERSION` | Build arg / env var shown in the topbar version chip |
 
 ## Architecture

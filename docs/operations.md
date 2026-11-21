@@ -20,6 +20,12 @@ For the person deploying or running the app. Settings are App Service applicatio
 | `Auth:AbsoluteSessionHours` | 12 | A session ends this long after sign-in regardless of activity. |
 | `Auth:RevalidateSeconds` | 60 | How often a live session re-checks the user's active flag and role. |
 
+### Data Protection
+
+| Key | Default | Notes |
+|---|---|---|
+| `DATA_ROOT` | none | A persistent directory (the Azure Files mount). Data Protection keys are stored in `dp-keys` beneath it, so sign-ins and in-flight uploads survive a restart. Unset means ephemeral keys and a startup warning. If the directory cannot be created the app logs a warning and continues with ephemeral keys. |
+
 ### Entra
 
 | Key | Default | Notes |
@@ -80,6 +86,7 @@ For the person deploying or running the app. Settings are App Service applicatio
 - **IP trust depends on the App Gateway.** Forwarded headers are trusted without a proxy allow-list, so the audited client IP is only reliable if the App Gateway is the only way to reach the app. Do not expose the App Service directly.
 - **Reconnect IP path.** The IP recorded for actions taken on a live circuit after a reconnect uses a different code path from the first request. Spot-check at deploy: sign in, drop the connection, act, and confirm the audit row's IP.
 - **Clean the `_dev` database before the first deploy.** The `_dev` database must not hold Open upload sessions from pre-release commits. Run `TRUNCATE upload_sessions, upload_chunks;` there first.
+- **The audit log is append-only in the database.** A trigger rejects UPDATE, DELETE and TRUNCATE on `audit_events`, even for the owning role. The `_dev` truncation above is unaffected, because the upload tables are not protected. If old audit rows ever need purging, a DBA must disable the trigger deliberately (`ALTER TABLE audit_events DISABLE TRIGGER audit_events_no_change`, and `audit_events_no_truncate` for TRUNCATE) and re-enable it afterwards.
 - **WAF.** The App Gateway WAF needs a body-inspection exemption for `PUT /api/uploads/{id}/chunks/{index}` (4 MiB bodies).
 - **Port.** In a container the app listens on 8080 (`ASPNETCORE_URLS`); locally on 5300 via `Kestrel:Endpoints:Http:Url`.
 

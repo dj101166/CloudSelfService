@@ -12,6 +12,13 @@ public class PgSchemaTests
         Assert.Contains("grants_owner_check", PgsqlContext.SchemaSql);
     }
 
+    [Theory]
+    [InlineData("audit_events_append_only")]
+    [InlineData("audit_events_no_change")]
+    [InlineData("audit_events_no_truncate")]
+    public void SchemaSql_HasAuditAppendOnlyObjects(string name) =>
+        Assert.Contains(name, PgsqlContext.SchemaSql);
+
     [Fact]
     public void AuditStoreSql_NoUpdateOrDelete()
     {
