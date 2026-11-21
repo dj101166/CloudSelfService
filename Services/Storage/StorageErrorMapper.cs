@@ -80,9 +80,9 @@ public static class StorageErrorMapper
     private static string AuthDiagnostic(RequestFailedException ex) => ex.ErrorCode switch
     {
         "AuthorizationPermissionMismatch" =>
-            $"Azure returned {ex.Status} AuthorizationPermissionMismatch: the portal's managed identity has no data role on this storage account. Grant Storage File Data Privileged Contributor (file shares) or Storage Blob Data Contributor (containers); add the account to storageAccessTargets in Pulumi.",
+            $"Azure returned {ex.Status} AuthorizationPermissionMismatch: the portal's managed identity has no data role on this storage account, or one without the needed permission. Grant Storage File Data Privileged Contributor (file shares) or Storage Blob Data Contributor (containers); add the account to storageAccessTargets in Pulumi.",
         "AuthorizationFailure" =>
-            $"Azure returned {ex.Status} AuthorizationFailure: the storage account's network rules blocked the request. Check the account has a private endpoint the portal can reach (storageAccessTargets in Pulumi) and that its private DNS resolves.",
+            $"Azure returned {ex.Status} AuthorizationFailure: most likely the storage account's network rules blocked the request (Azure also uses this code for other authorization failures). Check the account has a private endpoint the portal can reach (storageAccessTargets in Pulumi) and that its private DNS resolves.",
         _ => $"Azure returned {ex.Status} {(string.IsNullOrEmpty(ex.ErrorCode) ? "(no error code)" : ex.ErrorCode)}.",
     };
 

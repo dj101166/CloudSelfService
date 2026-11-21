@@ -99,8 +99,8 @@ Test access (staff admin) and the application log show why the portal could not 
 
 | Diagnostic | Meaning | Fix |
 |---|---|---|
-| `AuthorizationPermissionMismatch` | The managed identity has no data role on the account. | Add the account to `storageAccessTargets` in Pulumi and apply; allow 5-10 minutes for role propagation. |
-| `AuthorizationFailure` | The account's network rules blocked the request. | Give the account a private endpoint the portal can reach (`storageAccessTargets`) and confirm its private DNS resolves. |
+| `AuthorizationPermissionMismatch` | The managed identity has no data role on the account, or one without the needed permission. | Add the account to `storageAccessTargets` in Pulumi and apply; allow 5-10 minutes for role propagation. |
+| `AuthorizationFailure` | Most likely the account's network rules blocked the request (Azure also uses this code for other authorization failures). | Give the account a private endpoint the portal can reach (`storageAccessTargets`) and confirm its private DNS resolves. |
 | Could not obtain an Azure token | No managed identity is available, or a local developer is not signed in to Azure. | Enable the App Service managed identity; locally run `az login`. |
 
 ## Customers in Azure Government
