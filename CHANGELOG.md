@@ -1,25 +1,31 @@
-# Changelog — Advanced Cloud Self Service
+# Changelog - Advanced Cloud Self Service
 
 ## [1.0.0] - TBD
 
-Initial (unreleased) scaffold. This app has never been published, so all work to date is collected here as the pending v1.0.0.
+First release. Advanced Cloud Self Service is now a private storage access portal: customers and Advanced staff sign in with Microsoft and browse, upload and download files held in Advanced-hosted Azure storage, without ever being given a storage key, a SAS link or a direct storage address.
+
+### 🔄 Changed
+- The application has been rebuilt on the Advanced Developer Standards interface. It has a light, dark and system theme chosen from the account menu, a collapsible sidebar, and a release notes panel opened from the version chip in the header.
+- The Dashboard, Service Health and App Services placeholder pages have been replaced by the Files home and the file browser.
 
 ### ✨ Added
-- Initial scaffold: Blazor Server (.NET 10, MudBlazor 9) skeleton matching the suite brand palette (cyan `#019EC0` accent, navy-to-teal sidebar, full dark-mode support).
-- Topbar with full Advanced logo, version chip that opens release-notes panel, and a Light/Dark toggle persisted via `localStorage` key `cloudSelfServiceTheme`.
-- Sidebar navigation: Dashboard (`/`), Service Health (`/service-health`), App Services (`/app-services`).
-- Sign in with Microsoft (Entra, single tenant). Advanced staff are admitted on first sign-in with no role and see an "access pending" panel until an administrator grants one; customers (B2B guests) are admitted only when Advanced has already registered them, and anyone else lands on an Access Denied page telling them to contact Advanced support. Every sign-in, admitted or refused, is written to the audit log.
-- Account menu shows who is signed in and offers Sign out; an idle session is signed out after `Auth:IdleTimeoutMinutes` with a countdown warning.
-- A dropped Blazor server connection auto-recovers (auto-reload) instead of showing the "disconnected from server" dialog, and the reconnect dialog self-heals after a container stop/start rather than staying stuck until the tab is closed.
-- Chunked, resumable uploads of files up to 50 GB: each 4 MiB piece is MD5-checked by storage, an interrupted upload resumes where it stopped when the same file is selected again, and abandoned uploads are cleaned up after 24 hours.
-- The upload size limit (`Transfers:MaxUploadBytes`) is capped at 195.3 GiB, the most Azure can commit to one blob (50,000 blocks of 4 MiB); a higher configured value is reduced to the cap with a startup warning.
+- Sign in with Microsoft (Entra, single tenant). Advanced staff are admitted on first sign-in with no role and see an "access pending" panel until an administrator grants one. Customers (invited guests, including guests from Azure Government organisations) are admitted only when Advanced has already registered them. Anyone else lands on an Access Denied page that tells them to contact Advanced support. Every sign-in, admitted or refused, is written to the audit log.
+- An account menu showing who is signed in, with Sign out. An idle session is signed out after `Auth:IdleTimeoutMinutes` with a countdown warning, and a session ends after `Auth:AbsoluteSessionHours` regardless. A deactivated or demoted user loses access within a minute, even mid-session.
+- A dropped server connection recovers by itself (the page reloads) instead of leaving a stuck "disconnected from server" dialog, including after a container stop and start.
 - Files home: one card per share or container you can reach, with its kind and your access level. Advanced staff see every customer's, grouped by customer (internal storage under "Advanced internal"), with a filter box.
-- File browser: breadcrumb, folders then files with size and local modified time, "Load more" for very large folders, and actions by access level - download (Read); upload by button or drag and drop, new folder, rename and move (Contribute); delete, with the folder's name typed to confirm a folder delete (Full).
-- Upload panel with progress, pause, resume and cancel. Replacing an existing file asks first. A dropped connection retries each piece, then pauses; Resume, or selecting the same file again, carries on from where it stopped.
+- File browser: breadcrumb, folders then files with size and local modified time, "Load more" for very large folders, and actions by access level. Read allows download. Contribute adds upload by button or drag and drop, new folder, and rename or move. Full adds delete, with the folder's name typed to confirm a folder delete.
+- Chunked, resumable uploads of files up to 50 GB. Each 4 MiB piece is checked by MD5, an interrupted upload resumes where it stopped when the same file is selected again, and abandoned uploads are cleaned up after 24 hours. The upload panel shows progress with pause, resume and cancel, asks before replacing an existing file, and retries a dropped piece before pausing.
+- The upload size limit (`Transfers:MaxUploadBytes`) is capped at 195.3 GiB, the most Azure can commit to one blob (50,000 blocks of 4 MiB). A higher configured value is reduced to the cap with a startup warning.
+- Downloads stream through the portal as attachments with range support, and access is re-checked during a long download.
 - Help page: signing in as an invited guest, what Read, Contribute and Full allow, large uploads, and contacting Advanced support.
 - Staff admin: Customers (add, edit, users by UPN, per-share access levels, and the cross-tenant checklist for Azure Government customers), Storage targets (register shares and containers, with a Test access button), Staff (Owner only: assign Staff or Staff Admin; Owners come from configuration) and an Audit log with filters and a CSV export. Every admin change is audited. `docs/gov-cloud-guest-setup.md` is the checklist to send an Azure Government customer's IT.
+- A container build that runs the full test suite and fails if any test fails, an operations guide (`docs/operations.md`), and an app-owned browser test suite in `webapp-tests/`.
 
 ### 🛡️ Security
-- Admin hardening: deactivating or demoting a user can no longer be undone by a sign-in racing it (sign-in is one conditional update that never writes active or role); Owner is derived from configuration and never stored; CSV cells are all quoted and neutralised after `;` `,` `|` separators; registering storage can be limited to `Storage:AllowedSubscriptions`, and only an Owner can register internal storage; UPNs compare in one normalised form (NFKC, lowercase) in code and database; a customer's first sign-in must come from their recorded home tenant and not while cross-tenant setup is pending; Test access times out after 20 s with a 5 s cooldown; the audit export is limited to 10 per minute, marks truncation, and the database refuses repointing a granted target's storage. Azure Government storage endpoints are no longer allowed by default.
-- Hardened HTTP security headers: added Permissions-Policy and CSP form-action 'self'; HSTS max-age set to 1 year.
-- Customer-user UPNs and new file names containing an unpaired UTF-16 surrogate or private-use character are now rejected; an audit-export filter dated 9999-12-31 no longer fails.
+- Every storage operation passes through one access check. Customers see only what Advanced has granted them, at the level it was granted, and file paths are validated so nobody can step outside their share.
+- No storage key, SAS token or direct storage address ever reaches a browser. Downloads are always attachments with a generic content type.
+- Hardened HTTP security headers: framing denied, a strict content security policy that allows only the portal's own scripts, connections and images, Permissions-Policy, form-action 'self', and HSTS for one year. All file pages are marked no-store.
+- Development sign-in and the fake storage backend are refused outside the Development environment, and the application will not start if either is switched on in production.
+- Admin hardening: deactivating or demoting a user can no longer be undone by a sign-in racing it. Owner is derived from configuration and never stored. CSV export cells are all quoted and neutralised against spreadsheet formulas. Registering storage can be limited to `Storage:AllowedSubscriptions`, and only an Owner can register internal storage. UPNs compare in one normalised form (NFKC, lowercase) in code and database. A customer's first sign-in must come from their recorded home tenant, and not while cross-tenant setup is pending. Test access times out after 20 s with a 5 s cooldown, the audit export is limited to 10 per minute and marks truncation, and the database refuses repointing a granted target's storage. Azure Government storage endpoints are not allowed by default.
+- Customer-user UPNs and new file names containing an unpaired UTF-16 surrogate or private-use character are rejected.
+- Upload and download requests are rate limited per user and overall, and uploads that stall below a minimum speed are ended.

@@ -15,5 +15,5 @@ appsettings.*.json
 .superpowers/
 .playwright-mcp/
 docs/
-ThirdPartyNotices/
 CLAUDE-SECURITY-*/
+webapp-tests/

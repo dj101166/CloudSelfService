@@ -1,0 +1,88 @@
+# Operations guide - Advanced Cloud Self Service
+
+For the person deploying or running the app. Settings are App Service application settings (`Section__Key`) or `appsettings.json` keys.
+
+## Configuration keys
+
+### ConnectionStrings
+
+| Key | Default | Notes |
+|---|---|---|
+| `ConnectionStrings:Default` | none | PostgreSQL. Unset means in-memory stores and a startup warning: nothing persists. An unreachable database fails the start on purpose. The schema is created and upgraded at start. |
+
+### Auth
+
+| Key | Default | Notes |
+|---|---|---|
+| `Auth:Provider` | `Entra` | `Dev` is Development only; the app refuses to start with it elsewhere. |
+| `Auth:IdleTimeoutMinutes` | 60 | Inactivity sign-out. |
+| `Auth:IdleWarningSeconds` | 120 | Countdown shown before the idle sign-out. |
+| `Auth:AbsoluteSessionHours` | 12 | A session ends this long after sign-in regardless of activity. |
+| `Auth:RevalidateSeconds` | 60 | How often a live session re-checks the user's active flag and role. |
+
+### Entra
+
+| Key | Default | Notes |
+|---|---|---|
+| `Entra:TenantId`, `Entra:ClientId`, `Entra:ClientSecret` | empty | App registration in Advanced's tenant. Keep the secret in App Service settings or Key Vault. |
+| `Entra:Instance` | `https://login.microsoftonline.com` | |
+| `Entra:CallbackPath` | framework default | Must match the registered redirect URI. |
+| `Entra:StaffEmailDomain` | `advancedutility.com` | Users with this domain are staff and are created with no role on first sign-in. |
+
+### Authorization
+
+| Key | Notes |
+|---|---|
+| `Authorization:Owners` | Comma-separated UPNs. Owner is derived from this list on every sign-in and is never stored. At least one is needed to assign any staff role. |
+
+### Storage
+
+| Key | Default | Notes |
+|---|---|---|
+| `Storage:AllowedEndpointSuffixes` | `core.windows.net` | Admins can only register storage whose endpoint ends in one of these. Azure Government (`core.usgovcloudapi.net`) is off unless added. |
+| `Storage:AllowedSubscriptions` | empty | If set, only these subscription IDs can be registered. A malformed entry fails the start. |
+| `Storage:UseFake` | false | In-memory backend. Development only. |
+
+### Admin and Support
+
+| Key | Default | Notes |
+|---|---|---|
+| `Admin:TestAccessTimeoutSeconds` | 20 | Limit for the Test access button (5 s cooldown per target). |
+| `Admin:AuditExportsPerMinute` | 10 | Audit CSV export rate limit. |
+| `Support:Contact` | "your Advanced account team" | Shown on Help and Access Denied. |
+
+### Transfers
+
+| Key | Default | Notes |
+|---|---|---|
+| `Transfers:MaxUploadBytes` | 53687091200 (50 GiB) | Capped at 195.3 GiB, the Azure block limit; a higher value is reduced with a warning. |
+| `Transfers:ParallelChunks` | 4 | Browser-side parallel 4 MiB pieces per upload. |
+| `Transfers:SessionHours` | 24 | Lifetime of an upload session. |
+| `Transfers:MaxOpenSessionsPerUser` | 8 | Unfinished uploads per user. |
+| `Transfers:IdleSessionMinutes` | 120 | An upload with no piece for this long is abandoned. |
+| `Transfers:CompletingTimeoutMinutes` | 30 | Time allowed for the final commit. |
+| `Transfers:BlobLockMinutes` | 15 | Lock on a target file while one session writes it. |
+| `Transfers:MaxConcurrentChunksPerUser` | 16 | In-flight pieces per user. |
+| `Transfers:MaxConcurrentChunksTotal` | 64 | In-flight pieces across the app. |
+| `Transfers:ChunksPerMinute` | 600 | Piece rate limit per user. |
+| `Transfers:MinChunkBytesPerSecond` | 65536 | Pieces arriving slower than this are ended. |
+| `Transfers:RequestsPerMinute` | 120 | Download request rate per user. |
+| `Transfers:MaxConcurrentPerUser` | 4 | Concurrent downloads per user. |
+| `Transfers:ReauthorizeBytes` | 67108864 (64 MiB) | A running download re-checks access after this many bytes... |
+| `Transfers:ReauthorizeSeconds` | 60 | ...or this many seconds. |
+
+## Things an operator must know
+
+- **Empty parent folders on Files.** Deleting or moving the last item in a folder can leave the (empty) parent folder behind on an Azure Files share. It is cosmetic; folders can be deleted by a Full user.
+- **Abandoned one-piece uploads hold quota.** An upload that sends one piece and is then abandoned reserves the full logical file size against the user's quota until the session expires, up to 24 hours. This is bounded by the per-user byte cap and the open-session cap.
+- **Audit fails open.** If the audit store cannot be written, the user's action still proceeds and the failure is logged. Watch the application log for audit write errors.
+- **Idle sign-out is client-side.** The idle timer runs in the browser. An active upload counts as activity and keeps the session alive; the absolute session limit still applies.
+- **IP trust depends on the App Gateway.** Forwarded headers are trusted without a proxy allow-list, so the audited client IP is only reliable if the App Gateway is the only way to reach the app. Do not expose the App Service directly.
+- **Reconnect IP path.** The IP recorded for actions taken on a live circuit after a reconnect uses a different code path from the first request. Spot-check at deploy: sign in, drop the connection, act, and confirm the audit row's IP.
+- **Clean the `_dev` database before the first deploy.** The `_dev` database must not hold Open upload sessions from pre-release commits. Run `TRUNCATE upload_sessions, upload_chunks;` there first.
+- **WAF.** The App Gateway WAF needs a body-inspection exemption for `PUT /api/uploads/{id}/chunks/{index}` (4 MiB bodies).
+- **Port.** In a container the app listens on 8080 (`ASPNETCORE_URLS`); locally on 5300 via `Kestrel:Endpoints:Http:Url`.
+
+## Customers in Azure Government
+
+See `gov-cloud-guest-setup.md` for the checklist to send the customer's IT administrator.

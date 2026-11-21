@@ -1,19 +1,14 @@
 # Testing — Advanced Cloud Self Service
 
-## Current state
-No test project exists in the initial scaffold. Add one when meaningful pure-function logic is introduced in `Services/`.
+## Layout
+- `CloudSelfService.Tests/` (xUnit, `InternalsVisibleTo` granted) holds unit, contract and endpoint tests. Run: `dotnet test CloudSelfService.Tests/CloudSelfService.Tests.csproj`. Name the project: a bare `dotnet test` runs nothing.
+- PostgreSQL integration tests skip unless `CSSP_TEST_PG` is set to a connection string for a throwaway database.
+- `webapp-tests/` is the app-owned Playwright pytest suite (`data-testid` selectors only). It starts nothing; point `CSSP_BASE_URL` at an app running in Development with `Auth__Provider=Dev` and `Storage__UseFake=true`.
 
-## When to add tests
-Create `CloudSelfService.Tests/` (xUnit) when any of the following exist:
-- Pure-function helpers in `Services/` (parsing, calculations, data mapping)
-- Model arithmetic or business rules
-- Azure API response parsing logic
-
-## Test conventions (follow the suite standard)
-- xUnit in `CloudSelfService.Tests/` with `InternalsVisibleTo` grant in the `.csproj`
+## Conventions
 - Test naming: `MethodName_Condition_ExpectedResult`
-- Skip: UI rendering, live Azure API calls, HTTP connections
-- Target: pure functions, parsing, boundary conditions
+- Skip: live Azure calls unless explicitly enabled
+- Target: access decisions, path handling, parsing, boundary conditions, endpoint contracts
 
 ## Dockerfile test gate
-When a test project exists, add `dotnet test` to the Dockerfile build stage (before `dotnet publish`) so failing tests block container builds. See `EscapedDefects/Dockerfile` for the pattern.
+The Dockerfile build stage runs `dotnet test` before `dotnet publish`, so a failing test blocks the container build. Some tests read `ThirdPartyNotices/`, so keep that folder out of `.dockerignore`.

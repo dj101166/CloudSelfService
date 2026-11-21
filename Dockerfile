@@ -5,9 +5,15 @@ WORKDIR /src
 ARG APP_VERSION=0.0.0
 
 COPY CloudSelfService.csproj .
-RUN dotnet restore CloudSelfService.csproj
+COPY CloudSelfService.Tests/CloudSelfService.Tests.csproj CloudSelfService.Tests/
+RUN dotnet restore CloudSelfService.csproj && \
+    dotnet restore CloudSelfService.Tests/CloudSelfService.Tests.csproj
 
 COPY . .
+
+# Test gate: a failing test fails the image build.
+RUN dotnet test CloudSelfService.Tests/CloudSelfService.Tests.csproj -c Release --no-restore
+
 RUN dotnet publish CloudSelfService.csproj \
     -c Release \
     -o /app/publish \
@@ -21,7 +27,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Remove shipped SSH host keys — regenerated at container startup by entrypoint
-RUN rm -f /etc/ssh/ssh_host_*
+RUN rm -f /etc/ssh/ssh_host_* && mkdir -p /run/sshd
 
 # Non-root app user
 RUN groupadd --gid 1001 appuser && \

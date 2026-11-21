@@ -55,6 +55,7 @@
             <div class="appmenu__section-label">Theme</div>
 
             <button type="button" role="menuitemradio" class="appmenu__item"
+                    data-testid="theme-light"
                     aria-checked="@(this._mode == "light" ? "true" : "false")"
                     @onclick='() => this.SetModeAsync("light")'>
                 <span class="appmenu__icon"><Icon Name="sun" /></span>
@@ -66,6 +67,7 @@
             </button>
 
             <button type="button" role="menuitemradio" class="appmenu__item"
+                    data-testid="theme-dark"
                     aria-checked="@(this._mode == "dark" ? "true" : "false")"
                     @onclick='() => this.SetModeAsync("dark")'>
                 <span class="appmenu__icon"><Icon Name="moon" /></span>
@@ -77,6 +79,7 @@
             </button>
 
             <button type="button" role="menuitemradio" class="appmenu__item"
+                    data-testid="theme-system"
                     aria-checked="@(this._mode == "system" ? "true" : "false")"
                     @onclick='() => this.SetModeAsync("system")'>
                 <span class="appmenu__icon"><Icon Name="monitor" /></span>

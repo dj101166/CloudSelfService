@@ -83,7 +83,9 @@ public class UploaderScriptTests
     public void SparkMd5_IsVendoredWithItsLicence()
     {
         var lib = Path.Combine(Root(), "wwwroot", "lib", "spark-md5");
-        Assert.Contains("SparkMD5", File.ReadAllText(Path.Combine(lib, "spark-md5.min.js")));
+        var script = File.ReadAllText(Path.Combine(lib, "spark-md5.min.js"));
+        Assert.Contains("SparkMD5", script);
+        Assert.StartsWith("/*! spark-md5 v3.0.2 | (c) André Cruz | MIT License */", script);
         // Only the script is served; the notices are documentation at the repo root, taken under MIT.
         Assert.Equal(new[] { "spark-md5.min.js" }, Directory.GetFiles(lib).Select(Path.GetFileName).ToArray());
         var notice = File.ReadAllText(Path.Combine(Root(), "ThirdPartyNotices", "spark-md5", "LICENSE"));
