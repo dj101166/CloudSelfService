@@ -99,21 +99,26 @@ public sealed class IdentityResolver
             return (Denied(AdmissionOutcome.Deactivated, user), "staff record is inactive");
 
         var now = DateTimeOffset.UtcNow;
-        if (user is not null)
-            user = await RefreshNamesAsync(user, id, ct) with { EntraObjectId = id.ObjectId, LastSignInAt = now };
+        if (user is null)
+        {
+            // Owner is never persisted: EffectiveRole derives it from configuration, so a sign-in writes no role at all.
+            var created = new AppUser(Guid.NewGuid(), UserKind.Staff, null, id.Upn, id.DisplayName, id.ObjectId, StaffRole.None, true, now, now);
+            if (await BindNewAsync(created, id, ct) is not { } fresh)
+                return (Denied(AdmissionOutcome.UnknownCustomer, null), "object id bind lost a race");
+            return (StaffAdmission(fresh), "");
+        }
 
-        var role = _owners.IsOwner(id.Upn) ? StaffRole.Owner
-            : user is null ? StaffRole.None
-            : _owners.EffectiveRole(user);
-        user = user is null
-            ? new AppUser(Guid.NewGuid(), UserKind.Staff, null, id.Upn, id.DisplayName, id.ObjectId, role, true, now, now)
-            : user with { StaffRole = role };
+        var (upn, name) = await NamesAsync(user, id, ct);
+        if (await SignInAsync(user, id, upn, name, now, ct) is not { } bound)
+            return await LostRaceAsync(user.Id, ct);
+        return (StaffAdmission(bound), "");
+    }
 
-        if (await BindAsync(user, id, ct) is not { } bound)
-            return (Denied(AdmissionOutcome.UnknownCustomer, null), "object id bind lost a race");
-
-        var outcome = bound.StaffRole == StaffRole.None ? AdmissionOutcome.AdmittedPendingRole : AdmissionOutcome.Admitted;
-        return (new Admission(outcome, bound), "");
+    private Admission StaffAdmission(AppUser stored)
+    {
+        var role = _owners.EffectiveRole(stored);
+        var outcome = role == StaffRole.None ? AdmissionOutcome.AdmittedPendingRole : AdmissionOutcome.Admitted;
+        return new Admission(outcome, stored with { StaffRole = role });
     }
 
     private async Task<(Admission, string)> AdmitCustomerAsync(EntraIdentity id, CancellationToken ct)
@@ -146,21 +151,43 @@ public sealed class IdentityResolver
         if (!user.Active || !customer.Active)
             return (Denied(AdmissionOutcome.Deactivated, user), user.Active ? "customer is inactive" : "user is inactive");
 
-        user = await RefreshNamesAsync(user, id, ct);
-        if (await BindAsync(user with { EntraObjectId = id.ObjectId, LastSignInAt = DateTimeOffset.UtcNow }, id, ct) is not { } bound)
-            return (Denied(AdmissionOutcome.UnknownCustomer, null), "object id bind lost a race");
+        if (user.EntraObjectId is null)
+        {
+            // The first bind is the moment a name becomes an identity, so it is where the home tenant is checked.
+            if (customer.CrossTenantStatus == CrossTenantStatus.Pending)
+                return (Denied(AdmissionOutcome.UnknownCustomer, null), "customer's cross-tenant setup is pending");
+            if (!string.IsNullOrWhiteSpace(customer.HomeTenantId)
+                && !(Guid.TryParse(customer.HomeTenantId, out var expected) && HomeTenantOf(id) == expected))
+                return (Denied(AdmissionOutcome.UnknownCustomer, null), "Home tenant does not match");
+        }
+
+        var (upn, name) = await NamesAsync(user, id, ct);
+        if (await SignInAsync(user, id, upn, name, DateTimeOffset.UtcNow, ct) is not { } bound)
+            return await LostRaceAsync(user.Id, ct);
 
         return (new Admission(AdmissionOutcome.Admitted, bound), "");
     }
 
     /// <summary>
-    /// Takes the UPN and display name from the token once the caller is known to own the record, so
-    /// a rename in Entra reaches the record (and with it the Owners check, which is by UPN). An
-    /// email-only identity never renames a record, and neither does a UPN another record holds.
+    /// The guest's home tenant: the GUID in the <c>idp</c> claim (https://sts.windows.net/{tid}/ or
+    /// https://login.microsoftonline.us/{tid}/v2.0). Null for a member, for a consumer idp, or when the claim is absent.
     /// </summary>
-    private async Task<AppUser> RefreshNamesAsync(AppUser user, EntraIdentity id, CancellationToken ct)
+    public static Guid? HomeTenantOf(EntraIdentity id)
     {
-        if (id.UpnFromEmail || string.IsNullOrWhiteSpace(id.Upn)) return user;
+        if (!id.IsGuest || string.IsNullOrWhiteSpace(id.Idp)) return null;
+        if (!Uri.TryCreate(id.Idp.Trim(), UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttps) return null;
+        var first = uri.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
+        return Guid.TryParse(first, out var tid) ? tid : null;
+    }
+
+    /// <summary>
+    /// The UPN and display name to store once the caller is known to own the record, so a rename in Entra reaches the
+    /// record (and with it the Owners check, which is by UPN). An email-only identity never renames a record, and
+    /// neither does a UPN another record holds.
+    /// </summary>
+    private async Task<(string Upn, string Name)> NamesAsync(AppUser user, EntraIdentity id, CancellationToken ct)
+    {
+        if (id.UpnFromEmail || string.IsNullOrWhiteSpace(id.Upn)) return (user.Upn, user.DisplayName);
 
         var upn = user.Upn;
         if (!string.Equals(upn, id.Upn, StringComparison.Ordinal))
@@ -169,16 +196,35 @@ public sealed class IdentityResolver
             if (holder is null || holder.Id == user.Id) upn = id.Upn;
         }
 
-        var name = string.IsNullOrWhiteSpace(id.DisplayName) ? user.DisplayName : id.DisplayName;
-        return user with { Upn = upn, DisplayName = name };
+        return (upn, string.IsNullOrWhiteSpace(id.DisplayName) ? user.DisplayName : id.DisplayName);
     }
 
     /// <summary>
-    /// Writes the record and re-reads it. Two first sign-ins for one pre-registered UPN can both
-    /// pass the "oid is null" check; the store's last write wins, so only the caller whose oid is
-    /// actually stored afterwards is admitted.
+    /// One atomic UPDATE that binds the oid only while the user is still active; it never writes Active or the role, so
+    /// a sign-in racing an admin's deactivate or demote cannot undo it. Null when it matched no row.
     /// </summary>
-    private async Task<AppUser?> BindAsync(AppUser user, EntraIdentity id, CancellationToken ct)
+    private async Task<AppUser?> SignInAsync(AppUser user, EntraIdentity id, string upn, string name, DateTimeOffset now, CancellationToken ct)
+    {
+        try
+        {
+            return await _users.RecordSignInAsync(user.Id, id.ObjectId, upn, name, now, ct);
+        }
+        catch (InvalidOperationException)
+        {
+            return null;
+        }
+    }
+
+    private async Task<(Admission, string)> LostRaceAsync(Guid userId, CancellationToken ct)
+    {
+        var current = await _users.GetAsync(userId, ct);
+        return current is { Active: false }
+            ? (Denied(AdmissionOutcome.Deactivated, current), "deactivated during sign-in")
+            : (Denied(AdmissionOutcome.UnknownCustomer, null), "object id bind lost a race");
+    }
+
+    /// <summary>Inserts a first-time staff record and re-reads it, so only the caller whose oid is actually stored is admitted.</summary>
+    private async Task<AppUser?> BindNewAsync(AppUser user, EntraIdentity id, CancellationToken ct)
     {
         try
         {

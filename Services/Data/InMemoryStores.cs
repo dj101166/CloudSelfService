@@ -1,4 +1,5 @@
 using CloudSelfService.Models;
+using CloudSelfService.Services.Identity;
 
 namespace CloudSelfService.Services.Data;
 
@@ -22,7 +23,7 @@ public sealed class InMemoryUserStore : IUserStore
     {
         lock (_lock)
             return Task.FromResult(_items.Values.FirstOrDefault(
-                u => string.Equals(u.Upn, upn, StringComparison.OrdinalIgnoreCase)));
+                u => UpnNormalizer.Normalize(u.Upn) == UpnNormalizer.Normalize(upn)));
     }
 
     public Task<IReadOnlyList<AppUser>> ListAsync(UserKind? kind = null, Guid? customerId = null, CancellationToken ct = default)
@@ -37,13 +38,50 @@ public sealed class InMemoryUserStore : IUserStore
     {
         lock (_lock)
         {
-            if (_items.Values.Any(u => u.Id != user.Id && string.Equals(u.Upn, user.Upn, StringComparison.OrdinalIgnoreCase)))
+            if (_items.Values.Any(u => u.Id != user.Id && UpnNormalizer.Normalize(u.Upn) == UpnNormalizer.Normalize(user.Upn)))
                 throw new InvalidOperationException($"A user with UPN '{user.Upn}' already exists.");
             if (user.EntraObjectId is not null && _items.Values.Any(u => u.Id != user.Id && u.EntraObjectId == user.EntraObjectId))
                 throw new InvalidOperationException("Entra object id is already bound to another user.");
             _items[user.Id] = user;
         }
         return Task.CompletedTask;
+    }
+
+    public Task<bool> SetActiveAsync(Guid userId, bool active, CancellationToken ct = default)
+    {
+        lock (_lock)
+        {
+            if (!_items.TryGetValue(userId, out var u)) return Task.FromResult(false);
+            _items[userId] = u with { Active = active };
+            return Task.FromResult(true);
+        }
+    }
+
+    public Task<bool> SetStaffRoleAsync(Guid userId, StaffRole role, CancellationToken ct = default)
+    {
+        lock (_lock)
+        {
+            if (!_items.TryGetValue(userId, out var u) || u.Kind != UserKind.Staff) return Task.FromResult(false);
+            _items[userId] = u with { StaffRole = role };
+            return Task.FromResult(true);
+        }
+    }
+
+    public Task<AppUser?> RecordSignInAsync(Guid userId, string oid, string upn, string displayName, DateTimeOffset now, CancellationToken ct = default)
+    {
+        lock (_lock)
+        {
+            if (!_items.TryGetValue(userId, out var u) || !u.Active
+                || (u.EntraObjectId is not null && u.EntraObjectId != oid))
+                return Task.FromResult<AppUser?>(null);
+            if (_items.Values.Any(x => x.Id != userId && UpnNormalizer.Normalize(x.Upn) == UpnNormalizer.Normalize(upn)))
+                throw new InvalidOperationException($"A user with UPN '{upn}' already exists.");
+            if (_items.Values.Any(x => x.Id != userId && x.EntraObjectId == oid))
+                throw new InvalidOperationException("Entra object id is already bound to another user.");
+            var updated = u with { EntraObjectId = oid, Upn = upn, DisplayName = displayName, LastSignInAt = now };
+            _items[userId] = updated;
+            return Task.FromResult<AppUser?>(updated);
+        }
     }
 }
 

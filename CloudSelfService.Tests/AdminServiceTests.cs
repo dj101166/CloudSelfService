@@ -35,7 +35,12 @@ public class AdminServiceTests
     public AdminServiceTests()
     {
         _grants = new InMemoryGrantStore(_targets);
-        _svc = Build(new Dictionary<string, string?> { ["Entra:StaffEmailDomain"] = "advancedutility.com" });
+        _svc = Build(new Dictionary<string, string?>
+        {
+            ["Entra:StaffEmailDomain"] = "advancedutility.com",
+            ["Storage:AllowedEndpointSuffixes:0"] = "core.windows.net",
+            ["Storage:AllowedEndpointSuffixes:1"] = "core.usgovcloudapi.net",
+        });
 
         _custUser = new AppUser(Guid.NewGuid(), UserKind.Customer, _alpha.Id, "pat@alpha.example", "Pat", null, StaffRole.None, true, Now, null);
         _alphaTarget = Target(_alpha.Id, "Alpha share", "alphastore", "alpha-share");
@@ -391,7 +396,7 @@ public class AdminServiceTests
         var share = await _svc.TestTargetAsync(_admin.Id, _alphaTarget.Id, Ctx);
         var blob = Target(_alpha.Id, "Blob", "blobstore", "blob-one") with { Kind = StorageKind.BlobContainer };
         await _targets.UpsertAsync(blob);
-        var container = await _svc.TestTargetAsync(_admin.Id, blob.Id, Ctx);
+        var container = await _svc.TestTargetAsync(_owner.Id, blob.Id, Ctx);
 
         Assert.Equal("Reachable — the portal can list this file share.", share.Value);
         Assert.Equal("Reachable — the portal can list this container.", container.Value);
@@ -454,23 +459,23 @@ public class AdminServiceTests
     }
 
     [Theory]
-    [InlineData("=SUM(A1)", "'=SUM(A1)")]
-    [InlineData("+1", "'+1")]
-    [InlineData("-1", "'-1")]
-    [InlineData("@cmd", "'@cmd")]
-    [InlineData("\tx", "'\tx")]
+    [InlineData("=SUM(A1)", "\"'=SUM(A1)\"")]
+    [InlineData("+1", "\"'+1\"")]
+    [InlineData("-1", "\"'-1\"")]
+    [InlineData("@cmd", "\"'@cmd\"")]
+    [InlineData("\tx", "\"'\tx\"")]
     [InlineData("\rx", "\"'\rx\"")]
-    [InlineData("plain", "plain")]
+    [InlineData("plain", "\"plain\"")]
     [InlineData("a,b", "\"a,b\"")]
     [InlineData("say \"hi\"", "\"say \"\"hi\"\"\"")]
     [InlineData("=1,2", "\"'=1,2\"")]
     [InlineData("line\nbreak", "\"line\nbreak\"")]
-    [InlineData("", "")]
+    [InlineData("", "\"\"")]
     public void AuditCsv_FormulaPrefix_Escaped(string input, string expected) =>
         Assert.Equal(expected, CsvCell.Escape(input));
 
     [Fact]
-    public void AuditCsv_Null_IsEmpty() => Assert.Equal("", CsvCell.Escape(null));
+    public void AuditCsv_Null_IsEmpty() => Assert.Equal("\"\"", CsvCell.Escape(null));
 
     [Fact]
     public void AuditCsv_Document_HasHeaderAndEscapedRows()
@@ -483,8 +488,8 @@ public class AdminServiceTests
 
         var lines = csv.Split("\r\n", StringSplitOptions.RemoveEmptyEntries);
         Assert.Equal(2, lines.Length);
-        Assert.StartsWith("Time (UTC),User,Customer,Target,Operation,Path,Bytes,Result,Error,Source IP,Correlation ID", lines[0]);
-        Assert.Equal("2026-11-20 00:00:00,'=evil@x.com,Alpha,Alpha share,Download,\"a,b.txt\",12,Failed,boom,1.2.3.4,corr", lines[1]);
+        Assert.StartsWith("\"Time (UTC)\",\"User\",\"Customer\"", lines[0]);
+        Assert.Equal("\"2026-11-20 00:00:00\",\"'=evil@x.com\",\"Alpha\",\"Alpha share\",\"Download\",\"a,b.txt\",\"12\",\"Failed\",\"boom\",\"1.2.3.4\",\"corr\"", lines[1]);
     }
 
     [Fact]
@@ -714,9 +719,11 @@ public class AdminServiceTests
     {
         await _grants.SetAsync(new Grant(_alpha.Id, _alphaTarget.Id, AccessLevel.Read, "x", Now));
 
-        var result = await _svc.SaveTargetAsync(_admin.Id, _alphaTarget with { CustomerId = null }, Ctx);
+        var byAdmin = await _svc.SaveTargetAsync(_admin.Id, _alphaTarget with { CustomerId = null }, Ctx);
+        var byOwner = await WithOwners(OwnerUpn).SaveTargetAsync(_owner.Id, _alphaTarget with { CustomerId = null }, Ctx);
 
-        Assert.Equal(AccessOutcome.Invalid, result.Outcome);
+        Assert.Equal(AccessOutcome.Denied, byAdmin.Outcome);
+        Assert.Equal(AccessOutcome.Invalid, byOwner.Outcome);
         Assert.Equal(_alpha.Id, (await _targets.GetAsync(_alphaTarget.Id))!.CustomerId);
         Assert.NotNull(await _grants.GetAsync(_alpha.Id, _alphaTarget.Id));
     }
@@ -855,7 +862,7 @@ public class AdminServiceTests
         var blank = Build(new Dictionary<string, string?> { ["Storage:AllowedEndpointSuffixes:0"] = " " });
         var none = Build(new Dictionary<string, string?>());
 
-        var defaults = new[] { AdminService.DefaultEndpointSuffix, AdminService.GovEndpointSuffix };
+        var defaults = new[] { AdminService.DefaultEndpointSuffix };
         Assert.Equal(defaults, blank.AllowedEndpointSuffixes);
         Assert.Equal(defaults, none.AllowedEndpointSuffixes);
     }
@@ -966,4 +973,202 @@ public class AdminServiceTests
         Assert.NotNull(q);
         Assert.NotNull(q!.To);
     }
+
+    [Fact]
+    public async Task SaveTarget_DefaultSuffixes_RefuseGovStorage()
+    {
+        var svc = Build(new Dictionary<string, string?>());
+
+        var result = await svc.SaveTargetAsync(_admin.Id, Target(_alpha.Id, "Gov", "govaccount", "gov-one") with { EndpointSuffix = "core.usgovcloudapi.net" }, Ctx);
+
+        Assert.Equal(AccessOutcome.Invalid, result.Outcome);
+    }
+
+    [Fact]
+    public async Task SaveTarget_SubscriptionNotInAllowList_Invalid_InListOk_EmptyAny()
+    {
+        var allowed = Guid.NewGuid();
+        var svc = Build(new Dictionary<string, string?> { ["Storage:AllowedSubscriptions:0"] = allowed.ToString() });
+
+        var bad = await svc.SaveTargetAsync(_admin.Id, Target(_alpha.Id, "T", "goodaccount", "container-one"), Ctx);
+        var good = await svc.SaveTargetAsync(_admin.Id, Target(_alpha.Id, "T", "goodaccount", "container-one") with { SubscriptionId = allowed.ToString().ToUpperInvariant() }, Ctx);
+        var open = await Build(new Dictionary<string, string?>()).SaveTargetAsync(_admin.Id, Target(_alpha.Id, "T2", "goodaccount2", "container-two"), Ctx);
+
+        Assert.Equal(AccessOutcome.Invalid, bad.Outcome);
+        Assert.Equal(AccessOutcome.Ok, good.Outcome);
+        Assert.Equal(AccessOutcome.Ok, open.Outcome);
+    }
+
+    [Fact]
+    public async Task SaveTarget_NewInternalTarget_StaffAdminDenied_OwnerOk()
+    {
+        var internalTarget = Target(null, "Internal", "internalstore", "internal-one");
+
+        var byAdmin = await _svc.SaveTargetAsync(_admin.Id, internalTarget, Ctx);
+        var byOwner = await WithOwners(OwnerUpn).SaveTargetAsync(_owner.Id, internalTarget, Ctx);
+
+        Assert.Equal(AccessOutcome.Denied, byAdmin.Outcome);
+        Assert.Equal(AdminService.InternalOwnerOnlyMessage, byAdmin.Message);
+        Assert.Equal(AccessOutcome.Ok, byOwner.Outcome);
+    }
+
+    [Fact]
+    public async Task SaveTarget_MoveExistingToInternal_StaffAdminDenied()
+    {
+        var result = await _svc.SaveTargetAsync(_admin.Id, _alphaTarget with { CustomerId = null }, Ctx);
+
+        Assert.Equal(AccessOutcome.Denied, result.Outcome);
+        Assert.Equal(_alpha.Id, (await _targets.GetAsync(_alphaTarget.Id))!.CustomerId);
+    }
+
+    [Fact]
+    public async Task SaveTarget_EditExistingInternal_ByStaffAdmin_Allowed()
+    {
+        var internalTarget = Target(null, "Internal", "internalstore", "internal-one");
+        await _targets.UpsertAsync(internalTarget);
+
+        var rename = await _svc.SaveTargetAsync(_admin.Id, internalTarget with { DisplayName = "Renamed" }, Ctx);
+
+        Assert.Equal(AccessOutcome.Ok, rename.Outcome);
+    }
+
+    [Fact]
+    public async Task SetUserActive_RacingSignIn_CannotReactivate()
+    {
+        // The admission read the user while active; the admin then deactivates; the admission's write must not win.
+        var user = await _users.GetAsync(_custUser.Id);
+        await _svc.SetUserActiveAsync(_admin.Id, _custUser.Id, false, Ctx);
+
+        var recorded = await _users.RecordSignInAsync(user!.Id, "oid-pat", user.Upn, user.DisplayName, Now);
+
+        Assert.Null(recorded);
+        Assert.False((await _users.GetAsync(_custUser.Id))!.Active);
+    }
+
+    [Fact]
+    public async Task SetStaffRole_RacingSignIn_RoleSurvives()
+    {
+        await _svc.SetStaffRoleAsync(_owner.Id, _staff.Id, StaffRole.None, Ctx);
+
+        var recorded = await _users.RecordSignInAsync(_staff.Id, "oid-" + _staff.Upn, _staff.Upn, "Sam", Now);
+
+        Assert.Equal(StaffRole.None, recorded!.StaffRole);
+        Assert.Equal(StaffRole.None, (await _users.GetAsync(_staff.Id))!.StaffRole);
+    }
+
+    [Fact]
+    public async Task SetStaffRole_StoreRefusesNonStaff_NotFound()
+    {
+        Assert.False(await _users.SetStaffRoleAsync(_custUser.Id, StaffRole.Staff));
+        Assert.False(await _users.SetActiveAsync(Guid.NewGuid(), false));
+    }
+
+    [Theory]
+    [InlineData("report;=HYPERLINK(\"x\")", "\"report;'=HYPERLINK(\"\"x\"\")\"")]
+    [InlineData("a,+1", "\"a,'+1\"")]
+    [InlineData("a| -2", "\"a| '-2\"")]
+    [InlineData("a;  @b", "\"a;  '@b\"")]
+    [InlineData("plain", "\"plain\"")]
+    [InlineData("x-y+z=w@q", "\"x-y+z=w@q\"")]
+    [InlineData("", "\"\"")]
+    public void CsvCell_NeutralisesAfterSeparators_AndQuotesEveryCell(string input, string expected) =>
+        Assert.Equal(expected, CsvCell.Escape(input));
+
+    [Fact]
+    public void AuditCsv_Truncated_AddsFinalLine()
+    {
+        var csv = CsvCell.AuditCsv(Array.Empty<AuditEvent>(), new Dictionary<Guid, string>(), new Dictionary<Guid, string>(), 5000);
+
+        Assert.EndsWith("# truncated at 5000 rows — narrow the filters to see more\r\n", csv);
+        Assert.Equal("audit-20261120-0905-truncated.csv", CloudSelfService.Endpoints.AdminEndpoints.FileNameFor(new DateTimeOffset(2026, 11, 20, 9, 5, 0, TimeSpan.Zero), true));
+    }
+
+    [Fact]
+    public async Task AddCustomerUser_NormalisedStaffDomain_OrConfigOwner_Invalid()
+    {
+        var dotted = await _svc.AddCustomerUserAsync(_admin.Id, _alpha.Id, "x@advancedut\u0130lity.com", "", Ctx);
+        var wide = await _svc.AddCustomerUserAsync(_admin.Id, _alpha.Id, "x@\uFF41dvancedutility.com", "", Ctx);
+        var owner = await _svc.AddCustomerUserAsync(_admin.Id, _alpha.Id, "OWNER@advancedutility.com", "", Ctx);
+        var external = await WithOwners("boss@partner.example").AddCustomerUserAsync(_admin.Id, _alpha.Id, "Boss@Partner.Example", "", Ctx);
+
+        Assert.All(new[] { dotted, wide, owner, external }, r => Assert.Equal(AccessOutcome.Invalid, r.Outcome));
+    }
+
+    [Theory]
+    [InlineData("pat@d\u00F6main.example")]
+    [InlineData("pat@\u212Aelvin.example")]
+    public async Task AddCustomerUser_NonAsciiDomain_Invalid(string upn)
+    {
+        var result = await _svc.AddCustomerUserAsync(_admin.Id, _alpha.Id, upn, "", Ctx);
+
+        Assert.Equal(AccessOutcome.Invalid, result.Outcome);
+    }
+
+    [Fact]
+    public void UpnNormalizer_FoldsKelvinAndCompatibilityForms()
+    {
+        Assert.Equal("kelvin@x.example", UpnNormalizer.Normalize("\u212Aelvin@X.example"));
+        Assert.Equal("a@b.example", UpnNormalizer.Normalize("\uFF21@B.example"));
+        Assert.Equal("", UpnNormalizer.Normalize(null));
+    }
+
+    [Fact]
+    public async Task InMemoryUserStore_FindByUpn_UsesNormalisedForm()
+    {
+        await _users.UpsertAsync(Staff("k@x.example", StaffRole.None));
+
+        Assert.NotNull(await _users.FindByUpnAsync("K@X.example"));
+        Assert.NotNull(await _users.FindByUpnAsync("\u212A@x.example"));
+    }
+
+    [Fact]
+    public async Task TestTarget_SecondCallWithinCooldown_Busy_NoSecondProbe()
+    {
+        await _svc.TestTargetAsync(_admin.Id, _alphaTarget.Id, Ctx);
+
+        var second = await _svc.TestTargetAsync(_admin.Id, _alphaTarget.Id, Ctx);
+
+        Assert.Equal(AccessOutcome.Busy, second.Outcome);
+        Assert.Equal(1, _fake.Calls.Count(c => c.StartsWith("Probe")));
+    }
+
+    [Fact]
+    public async Task TestTarget_HungProbe_TimesOutWithMessage()
+    {
+        _fake.FailOnCall = c => c.StartsWith("Probe") ? new OperationCanceledException() : null;
+        var timedOutByUs = await _svc.TestTargetAsync(_admin.Id, _alphaTarget.Id, Ctx);
+
+        Assert.Equal(AccessOutcome.Unavailable, timedOutByUs.Outcome);
+    }
+
+    [Fact]
+    public void OwnerConfig_Upns_IsACopy_AndMatchesNormalised()
+    {
+        var owners = new OwnerConfig("Boss@x.example");
+        var copy = (string[])owners.Upns;
+        copy[0] = "attacker@x.example";
+
+        Assert.True(owners.IsOwner("boss@X.EXAMPLE"));
+        Assert.False(owners.IsOwner("attacker@x.example"));
+        Assert.True(owners.IsOwner("\u212Aoss@x.example") == false);
+    }
+
+    [Theory]
+    [InlineData("https://sts.windows.net/11111111-2222-3333-4444-555555555555/", true)]
+    [InlineData("https://login.microsoftonline.us/11111111-2222-3333-4444-555555555555/v2.0", true)]
+    [InlineData("live.com", false)]
+    [InlineData("http://sts.windows.net/11111111-2222-3333-4444-555555555555/", false)]
+    [InlineData("https://sts.windows.net/not-a-guid/", false)]
+    [InlineData("", false)]
+    public void HomeTenantOf_ParsesIdpClaim(string idp, bool parsed)
+    {
+        var id = new EntraIdentity("o", "t", "u@x.example", "U", IsGuest: true) { Idp = idp };
+
+        Assert.Equal(parsed, IdentityResolver.HomeTenantOf(id) is not null);
+        if (parsed) Assert.Equal(Guid.Parse("11111111-2222-3333-4444-555555555555"), IdentityResolver.HomeTenantOf(id));
+    }
+
+    [Fact]
+    public void HomeTenantOf_Member_Null() =>
+        Assert.Null(IdentityResolver.HomeTenantOf(new EntraIdentity("o", "t", "u@x", "U", IsGuest: false) { Idp = "https://sts.windows.net/11111111-2222-3333-4444-555555555555/" }));
 }

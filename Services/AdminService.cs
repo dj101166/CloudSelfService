@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -26,11 +27,10 @@ public sealed partial class AdminService
     public const string SetStaffRoleOp = "Admin.SetStaffRole";
 
     public const string DefaultEndpointSuffix = "core.windows.net";
-    public const string GovEndpointSuffix = "core.usgovcloudapi.net";
     public const string StaffUpnMessage = "Advanced staff sign in with their own account and don't need to be added.";
     public const string OwnersFromConfigMessage = "Owners are managed in configuration, not here.";
 
-    private static readonly string[] DefaultSuffixes = { DefaultEndpointSuffix, GovEndpointSuffix };
+    private static readonly string[] DefaultSuffixes = { DefaultEndpointSuffix };
 
     private readonly IUserStore _users;
     private readonly ICustomerStore _customers;
@@ -41,6 +41,15 @@ public sealed partial class AdminService
     private readonly OwnerConfig _owners;
     private readonly TimeProvider _time;
     private readonly string _staffDomain;
+    private readonly HashSet<Guid> _allowedSubscriptions;
+    private readonly ConcurrentDictionary<Guid, DateTimeOffset> _lastTest = new();
+
+    public const string InternalOwnerOnlyMessage = "Only an Owner can register internal storage.";
+    public const string SubscriptionNotAllowedMessage = "That subscription isn't on the allowed list for this portal.";
+    public const string TestTimeoutMessage = "The storage account didn't respond in time.";
+    public const string TestCooldownMessage = "Wait a few seconds before testing again.";
+    public static readonly TimeSpan TestTimeout = TimeSpan.FromSeconds(20);
+    public static readonly TimeSpan TestCooldown = TimeSpan.FromSeconds(5);
 
     public AdminService(IUserStore users, ICustomerStore customers, ITargetStore targets, IGrantStore grants,
         IStorageBackendResolver backends, AuditService audit, OwnerConfig owners, TimeProvider time, IConfiguration config)
@@ -57,9 +66,14 @@ public sealed partial class AdminService
         var configured = config.GetSection("Storage:AllowedEndpointSuffixes").Get<string[]>()
             ?.Select(s => s.Trim().ToLowerInvariant()).Where(s => s.Length > 0).Distinct().ToArray();
         AllowedEndpointSuffixes = configured is { Length: > 0 } ? configured : DefaultSuffixes;
+        _allowedSubscriptions = (config.GetSection("Storage:AllowedSubscriptions").Get<string[]>() ?? Array.Empty<string>())
+            .Select(x => Guid.TryParse(x?.Trim(), out var g) ? g : Guid.Empty).Where(g => g != Guid.Empty).ToHashSet();
     }
 
     public IReadOnlyList<string> AllowedEndpointSuffixes { get; }
+
+    /// <summary>Empty means any subscription the managed identity can reach may be registered.</summary>
+    public bool HasSubscriptionAllowList => _allowedSubscriptions.Count > 0;
 
     /// <summary>The operation names the audit page offers as a filter.</summary>
     public static readonly IReadOnlyList<string> AuditOperationNames = new[]
@@ -133,7 +147,8 @@ public sealed partial class AdminService
                     or UnicodeCategory.PrivateUse)
                 return false;
         }
-        return !(name[0] is '=' or '+' or '-' or '@') && !(name[at + 1] is '=' or '+' or '-' or '@');
+        return !(name[0] is '=' or '+' or '-' or '@') && !(name[at + 1] is '=' or '+' or '-' or '@')
+            && name.AsSpan(at + 1).ToString().All(char.IsAscii);
     }
 
     public async Task<AccessResult<AppUser>> AddCustomerUserAsync(Guid actorId, Guid customerId, string upn, string displayName,
@@ -148,7 +163,8 @@ public sealed partial class AdminService
         var name = (upn ?? "").Trim();
         if (!IsValidUpn(name, out var at))
             return new(AccessOutcome.Invalid, null, "Enter the user's UPN, like name@customer.example.");
-        if (name.EndsWith("@" + _staffDomain, StringComparison.OrdinalIgnoreCase))
+        var normalized = UpnNormalizer.Normalize(name);
+        if (normalized.EndsWith("@" + UpnNormalizer.Normalize(_staffDomain), StringComparison.Ordinal) || _owners.IsOwner(name))
             return new(AccessOutcome.Invalid, null, StaffUpnMessage);
         if (await _users.FindByUpnAsync(name, ct) is not null)
             return new(AccessOutcome.Invalid, null, "A user with that UPN already exists.");
@@ -188,8 +204,8 @@ public sealed partial class AdminService
 
         try
         {
-            if (user.Active != active)
-                await _users.UpsertAsync(user with { Active = active }, ct);
+            if (!await _users.SetActiveAsync(user.Id, active, ct))
+                return new(AccessOutcome.NotFound, "That user no longer exists.");
         }
         catch (InvalidOperationException ex) { return new(AccessOutcome.Invalid, ex.Message); }
         await RecordAsync(actor, SetUserActiveOp, user.CustomerId, null, $"{user.Upn} = {(active ? "active" : "inactive")}", ctx);
@@ -220,10 +236,21 @@ public sealed partial class AdminService
             : null;
         if (error is not null) return new(AccessOutcome.Invalid, null, error);
 
+        if (_allowedSubscriptions.Count > 0 && !_allowedSubscriptions.Contains(Guid.Parse(sub)))
+            return new(AccessOutcome.Invalid, null, SubscriptionNotAllowedMessage);
+
         if (t.CustomerId is { } cid && await _customers.GetAsync(cid, ct) is null)
             return new(AccessOutcome.Invalid, null, "That customer no longer exists.");
 
         var existing = t.Id == Guid.Empty ? null : await _targets.GetAsync(t.Id, ct);
+        if (t.CustomerId is null && existing?.CustomerId is not null || t.CustomerId is null && existing is null)
+        {
+            if (_owners.EffectiveRole(actor) < StaffRole.Owner)
+            {
+                await RecordAsync(actor, SaveTargetOp, existing?.CustomerId, existing?.Id, display, ctx, AuditResult.Denied, InternalOwnerOnlyMessage);
+                return new(AccessOutcome.Denied, null, InternalOwnerOnlyMessage);
+            }
+        }
         if (existing?.CustomerId is { } oldOwner && oldOwner != t.CustomerId
             && (await _grants.ListForCustomerAsync(oldOwner, ct)).Any(g => g.TargetId == existing.Id))
             return new(AccessOutcome.Invalid, null, "Remove this target's grants before moving it to another customer.");
@@ -258,14 +285,23 @@ public sealed partial class AdminService
         var target = await _targets.GetAsync(targetId, ct);
         if (target is null) return new(AccessOutcome.NotFound, null, "That target no longer exists.");
 
+        var now = _time.GetUtcNow();
+        if (_lastTest.TryGetValue(actor.Id, out var last) && now - last < TestCooldown)
+            return new(AccessOutcome.Busy, null, TestCooldownMessage);
+        _lastTest[actor.Id] = now;
+
         var noun = target.Kind == StorageKind.FileShare ? "file share" : "container";
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(TestTimeout);
         try
         {
-            await _backends.For(target).ProbeAsync(target, ct);
+            await _backends.For(target).ProbeAsync(target, timeout.Token);
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
-            var message = StorageErrorMapper.Map(ex).Message;
+            var message = ex is OperationCanceledException && timeout.IsCancellationRequested
+                ? TestTimeoutMessage
+                : StorageErrorMapper.Map(ex).Message;
             await RecordAsync(actor, TestTargetOp, target.CustomerId, target.Id, target.DisplayName, ctx, AuditResult.Failed, message);
             return new(AccessOutcome.Unavailable, null, message);
         }
@@ -314,7 +350,11 @@ public sealed partial class AdminService
         if (user is not { Kind: UserKind.Staff }) return new(AccessOutcome.NotFound, "That staff user no longer exists.");
         if (_owners.IsOwner(user.Upn)) return new(AccessOutcome.Invalid, OwnersFromConfigMessage);
 
-        try { await _users.UpsertAsync(user with { StaffRole = role }, ct); }
+        try
+        {
+            if (!await _users.SetStaffRoleAsync(user.Id, role, ct))
+                return new(AccessOutcome.NotFound, "That staff user no longer exists.");
+        }
         catch (InvalidOperationException ex) { return new(AccessOutcome.Invalid, ex.Message); }
         await RecordAsync(actor, SetStaffRoleOp, null, null, $"{user.Upn} = {role}", ctx);
         return new(AccessOutcome.Ok);
@@ -410,21 +450,38 @@ public static class AuditFilters
 public static class CsvCell
 {
     /// <summary>
-    /// A cell a spreadsheet would read as a formula (leading = + - @, tab or CR) is prefixed with an apostrophe so it
-    /// shows as text; then RFC 4180 quoting applies if it holds a comma, quote or line break.
+    /// A formula starter (= + - @, tab, CR) at the start of the cell or after a ; , | or tab separator is prefixed with
+    /// an apostrophe so it shows as text; then EVERY cell is RFC 4180 quoted, so no locale's separator can split it.
     /// </summary>
     public static string Escape(string? value)
     {
-        var s = value ?? "";
-        if (s.Length > 0 && s[0] is '=' or '+' or '-' or '@' or '\t' or '\r')
-            s = "'" + s;
-        return s.IndexOfAny(new[] { ',', '"', '\r', '\n' }) >= 0 ? "\"" + s.Replace("\"", "\"\"") + "\"" : s;
+        var s = Neutralise(value ?? "");
+        return "\"" + s.Replace("\"", "\"\"") + "\"";
+    }
+
+    // A formula starter is dangerous at the start of a cell AND after a separator a spreadsheet may split on
+    // (; for locales where it is the list separator, plus , | and tab), optionally after spaces.
+    private static string Neutralise(string s)
+    {
+        var sb = new StringBuilder(s.Length + 4);
+        var atStart = true;
+        foreach (var ch in s)
+        {
+            if (atStart && ch is '=' or '+' or '-' or '@' or '\t' or '\r')
+                sb.Append('\'');
+            sb.Append(ch);
+            if (ch is ';' or ',' or '|' or '\t')
+                atStart = true;
+            else if (ch != ' ')
+                atStart = false;
+        }
+        return sb.ToString();
     }
 
     public static string Row(IEnumerable<string?> cells) => string.Join(',', cells.Select(Escape));
 
     public static string AuditCsv(IEnumerable<AuditEvent> events, IReadOnlyDictionary<Guid, string> customers,
-        IReadOnlyDictionary<Guid, string> targets)
+        IReadOnlyDictionary<Guid, string> targets, int? truncatedAt = null)
     {
         var sb = new StringBuilder();
         sb.Append(Row(new[] { "Time (UTC)", "User", "Customer", "Target", "Operation", "Path", "Bytes", "Result", "Error", "Source IP", "Correlation ID" })).Append("\r\n");
@@ -440,6 +497,8 @@ public static class CsvCell
                 e.SourceIp, e.CorrelationId,
             })).Append("\r\n");
         }
+        if (truncatedAt is { } n)
+            sb.Append($"# truncated at {n} rows — narrow the filters to see more").Append("\r\n");
         return sb.ToString();
     }
 }

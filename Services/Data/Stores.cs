@@ -9,6 +9,19 @@ public interface IUserStore
     Task<AppUser?> FindByUpnAsync(string upn, CancellationToken ct = default);
     Task<IReadOnlyList<AppUser>> ListAsync(UserKind? kind = null, Guid? customerId = null, CancellationToken ct = default);
     Task UpsertAsync(AppUser user, CancellationToken ct = default);
+
+    /// <summary>Changes only the Active flag, so it cannot overwrite anything a concurrent sign-in wrote. False when no such user.</summary>
+    Task<bool> SetActiveAsync(Guid userId, bool active, CancellationToken ct = default);
+
+    /// <summary>Changes only the staff role, of a Staff-kind user. False when there is no such staff user.</summary>
+    Task<bool> SetStaffRoleAsync(Guid userId, StaffRole role, CancellationToken ct = default);
+
+    /// <summary>
+    /// Records a sign-in atomically: binds the oid and refreshes UPN, name and time ONLY while the user is still active
+    /// and the record is unbound or already bound to this oid. Never writes Active or the role. Null when it matched no
+    /// row (deactivated meanwhile, bound to another oid, or gone); the caller then refuses admission.
+    /// </summary>
+    Task<AppUser?> RecordSignInAsync(Guid userId, string oid, string upn, string displayName, DateTimeOffset now, CancellationToken ct = default);
 }
 
 public interface ICustomerStore

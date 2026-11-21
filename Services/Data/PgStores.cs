@@ -1,4 +1,5 @@
 using CloudSelfService.Models;
+using CloudSelfService.Services.Identity;
 using Npgsql;
 
 namespace CloudSelfService.Services.Data;
@@ -53,7 +54,7 @@ public sealed class PgUserStore : IUserStore
 
     public Task<AppUser?> GetAsync(Guid id, CancellationToken ct = default) => OneAsync("id = @p", "p", id, ct);
     public Task<AppUser?> FindByObjectIdAsync(string oid, CancellationToken ct = default) => OneAsync("entra_object_id = @p", "p", oid, ct);
-    public Task<AppUser?> FindByUpnAsync(string upn, CancellationToken ct = default) => OneAsync("lower(upn) = lower(@p)", "p", upn, ct);
+    public Task<AppUser?> FindByUpnAsync(string upn, CancellationToken ct = default) => OneAsync("upn_normalized = @p", "p", UpnNormalizer.Normalize(upn), ct);
 
     public async Task<IReadOnlyList<AppUser>> ListAsync(UserKind? kind = null, Guid? customerId = null, CancellationToken ct = default)
     {
@@ -69,9 +70,9 @@ public sealed class PgUserStore : IUserStore
     {
         await using var conn = await _db.DataSource.OpenConnectionAsync(ct);
         await using var cmd = new NpgsqlCommand("""
-            INSERT INTO users (id, kind, customer_id, upn, display_name, entra_object_id, staff_role, active, created_at, last_sign_in_at)
-            VALUES (@id, @kind, @cid, @upn, @dn, @oid, @role, @active, @created, @last)
-            ON CONFLICT (id) DO UPDATE SET kind = EXCLUDED.kind, customer_id = EXCLUDED.customer_id, upn = EXCLUDED.upn,
+            INSERT INTO users (id, kind, customer_id, upn, upn_normalized, display_name, entra_object_id, staff_role, active, created_at, last_sign_in_at)
+            VALUES (@id, @kind, @cid, @upn, @upnn, @dn, @oid, @role, @active, @created, @last)
+            ON CONFLICT (id) DO UPDATE SET kind = EXCLUDED.kind, customer_id = EXCLUDED.customer_id, upn = EXCLUDED.upn, upn_normalized = EXCLUDED.upn_normalized,
                 display_name = EXCLUDED.display_name, entra_object_id = EXCLUDED.entra_object_id, staff_role = EXCLUDED.staff_role,
                 active = EXCLUDED.active, last_sign_in_at = EXCLUDED.last_sign_in_at
             """, conn);
@@ -79,6 +80,7 @@ public sealed class PgUserStore : IUserStore
         cmd.Parameters.AddWithValue("kind", u.Kind.ToString());
         cmd.Parameters.AddWithValue("cid", NpgsqlTypes.NpgsqlDbType.Uuid, (object?)u.CustomerId ?? DBNull.Value);
         cmd.Parameters.AddWithValue("upn", u.Upn);
+        cmd.Parameters.AddWithValue("upnn", UpnNormalizer.Normalize(u.Upn));
         cmd.Parameters.AddWithValue("dn", u.DisplayName);
         cmd.Parameters.AddWithValue("oid", NpgsqlTypes.NpgsqlDbType.Text, (object?)u.EntraObjectId ?? DBNull.Value);
         cmd.Parameters.AddWithValue("role", u.StaffRole.ToString());
@@ -86,6 +88,49 @@ public sealed class PgUserStore : IUserStore
         cmd.Parameters.AddWithValue("created", u.CreatedAt.ToUniversalTime());
         cmd.Parameters.AddWithValue("last", NpgsqlTypes.NpgsqlDbType.TimestampTz, (object?)u.LastSignInAt?.ToUniversalTime() ?? DBNull.Value);
         await cmd.ExecWriteAsync("A user with that UPN or Entra object id already exists.", "Rejected by a database check.", ct);
+    }
+
+    public async Task<bool> SetActiveAsync(Guid userId, bool active, CancellationToken ct = default)
+    {
+        await using var conn = await _db.DataSource.OpenConnectionAsync(ct);
+        await using var cmd = new NpgsqlCommand("UPDATE users SET active = @a WHERE id = @id", conn);
+        cmd.Parameters.AddWithValue("a", active);
+        cmd.Parameters.AddWithValue("id", userId);
+        return await cmd.ExecuteNonQueryAsync(ct) > 0;
+    }
+
+    public async Task<bool> SetStaffRoleAsync(Guid userId, StaffRole role, CancellationToken ct = default)
+    {
+        await using var conn = await _db.DataSource.OpenConnectionAsync(ct);
+        await using var cmd = new NpgsqlCommand("UPDATE users SET staff_role = @r WHERE id = @id AND kind = 'Staff'", conn);
+        cmd.Parameters.AddWithValue("r", role.ToString());
+        cmd.Parameters.AddWithValue("id", userId);
+        return await cmd.ExecuteNonQueryAsync(ct) > 0;
+    }
+
+    // One statement: the active check, the oid check and the write cannot be interleaved with an admin's change.
+    public async Task<AppUser?> RecordSignInAsync(Guid userId, string oid, string upn, string displayName, DateTimeOffset now, CancellationToken ct = default)
+    {
+        await using var conn = await _db.DataSource.OpenConnectionAsync(ct);
+        await using var cmd = new NpgsqlCommand($"""
+            UPDATE users SET entra_object_id = @oid, last_sign_in_at = @now, upn = @upn, upn_normalized = @upnn, display_name = @dn
+            WHERE id = @id AND active AND (entra_object_id IS NULL OR entra_object_id = @oid)
+            RETURNING {Cols}
+            """, conn);
+        cmd.Parameters.AddWithValue("oid", oid);
+        cmd.Parameters.AddWithValue("now", now.ToUniversalTime());
+        cmd.Parameters.AddWithValue("upn", upn);
+        cmd.Parameters.AddWithValue("upnn", UpnNormalizer.Normalize(upn));
+        cmd.Parameters.AddWithValue("dn", displayName);
+        cmd.Parameters.AddWithValue("id", userId);
+        try
+        {
+            return await cmd.ReadOneAsync(Map, ct);
+        }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UniqueViolation)
+        {
+            throw new InvalidOperationException("A user with that UPN or Entra object id already exists.", ex);
+        }
     }
 }
 
@@ -294,7 +339,7 @@ public sealed class PgAuditStore : IAuditStore
     public async Task<IReadOnlyList<AuditEvent>> QueryAsync(AuditQuery q, CancellationToken ct = default)
     {
         await using var conn = await _db.DataSource.OpenConnectionAsync(ct);
-        await using var cmd = new NpgsqlCommand(QuerySql, conn);
+        await using var cmd = new NpgsqlCommand(QuerySql, conn) { CommandTimeout = 30 };
         cmd.Parameters.AddWithValue("uid", NpgsqlTypes.NpgsqlDbType.Uuid, (object?)q.UserId ?? DBNull.Value);
         cmd.Parameters.AddWithValue("cid", NpgsqlTypes.NpgsqlDbType.Uuid, (object?)q.CustomerId ?? DBNull.Value);
         cmd.Parameters.AddWithValue("tid", NpgsqlTypes.NpgsqlDbType.Uuid, (object?)q.TargetId ?? DBNull.Value);

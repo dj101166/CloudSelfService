@@ -162,6 +162,10 @@ builder.Services.AddAuthorization(options =>
 
 var app = builder.Build();
 
+if ((builder.Configuration.GetSection("Storage:AllowedSubscriptions").Get<string[]>() ?? Array.Empty<string>())
+        .All(string.IsNullOrWhiteSpace))
+    app.Logger.LogWarning("Storage:AllowedSubscriptions is empty — any subscription the managed identity can reach may be registered");
+
 var pg = app.Services.GetRequiredService<PgsqlContext>();
 // An unreachable database fails the start on purpose.
 if (pg.IsAvailable) await pg.EnsureSchemaAsync();

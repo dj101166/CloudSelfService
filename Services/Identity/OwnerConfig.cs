@@ -10,16 +10,25 @@ namespace CloudSelfService.Services.Identity;
 public sealed class OwnerConfig
 {
     private readonly HashSet<string> _owners;
+    private readonly string[] _display;
 
-    public OwnerConfig(string commaSeparatedOwners) =>
-        _owners = new HashSet<string>(
-            commaSeparatedOwners.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
-            StringComparer.OrdinalIgnoreCase);
+    public OwnerConfig(string commaSeparatedOwners)
+    {
+        _display = commaSeparatedOwners.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        _owners = new HashSet<string>(_display.Select(UpnNormalizer.Normalize), StringComparer.Ordinal);
+    }
 
-    public IReadOnlyCollection<string> Upns => _owners;
+    /// <summary>A copy, so a caller cannot change who is an Owner.</summary>
+    public IReadOnlyCollection<string> Upns => _display.ToArray();
 
-    public bool IsOwner(string upn) => !string.IsNullOrWhiteSpace(upn) && _owners.Contains(upn.Trim());
+    public bool IsOwner(string upn) => !string.IsNullOrWhiteSpace(upn) && _owners.Contains(UpnNormalizer.Normalize(upn.Trim()));
 
+    /// <summary>
+    /// Owner is derived here, never stored: a configured Owner's staff record is Owner whatever role it holds, and a
+    /// persisted Owner who has left the configuration counts as StaffAdmin. That keeps a sign-in from ever writing a role.
+    /// </summary>
     public StaffRole EffectiveRole(AppUser user) =>
-        user.StaffRole == StaffRole.Owner && !IsOwner(user.Upn) ? StaffRole.StaffAdmin : user.StaffRole;
+        user.Kind == UserKind.Staff && IsOwner(user.Upn) ? StaffRole.Owner
+        : user.StaffRole == StaffRole.Owner ? StaffRole.StaffAdmin
+        : user.StaffRole;
 }

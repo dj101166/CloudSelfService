@@ -129,7 +129,7 @@ public sealed class AdminEndpointTests : IDisposable
     [Fact]
     public async Task AuditCsv_BeyondTransfersLimit_429()
     {
-        using var factory = new TestAppFactory(("Transfers:RequestsPerMinute", "1"));
+        using var factory = new TestAppFactory(("Admin:AuditExportsPerMinute", "1"));
         var client = await factory.CreateClientAs("staff-owner");
 
         var first = await client.GetAsync("/api/admin/audit.csv");

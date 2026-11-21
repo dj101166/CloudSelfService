@@ -45,6 +45,10 @@ public sealed class PgsqlContext : IAsyncDisposable
             last_sign_in_at  TIMESTAMPTZ NULL
         );
         CREATE UNIQUE INDEX IF NOT EXISTS ux_users_upn_lower ON users (lower(upn));
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS upn_normalized TEXT;
+        UPDATE users SET upn_normalized = lower(upn) WHERE upn_normalized IS NULL;
+        ALTER TABLE users ALTER COLUMN upn_normalized SET NOT NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_users_upn_normalized ON users (upn_normalized);
 
         CREATE TABLE IF NOT EXISTS storage_targets (
             id              UUID PRIMARY KEY,
@@ -90,9 +94,13 @@ public sealed class PgsqlContext : IAsyncDisposable
 
         CREATE OR REPLACE FUNCTION targets_owner_change_fn() RETURNS trigger AS $fn$
         BEGIN
-            IF NEW.customer_id IS DISTINCT FROM OLD.customer_id
+            IF (NEW.customer_id IS DISTINCT FROM OLD.customer_id
+                OR NEW.account_name IS DISTINCT FROM OLD.account_name
+                OR NEW.container_name IS DISTINCT FROM OLD.container_name
+                OR NEW.kind IS DISTINCT FROM OLD.kind
+                OR NEW.endpoint_suffix IS DISTINCT FROM OLD.endpoint_suffix)
                AND EXISTS (SELECT 1 FROM grants g WHERE g.target_id = OLD.id) THEN
-                RAISE EXCEPTION 'storage target % owner cannot change while grants exist', OLD.id
+                RAISE EXCEPTION 'storage target % owner or location cannot change while grants exist', OLD.id
                     USING ERRCODE = 'check_violation';
             END IF;
             RETURN NEW;
@@ -127,6 +135,8 @@ public sealed class PgsqlContext : IAsyncDisposable
         CREATE INDEX IF NOT EXISTS idx_audit_events_at ON audit_events (at DESC);
         CREATE INDEX IF NOT EXISTS idx_audit_events_customer ON audit_events (customer_id);
         CREATE INDEX IF NOT EXISTS idx_audit_events_target ON audit_events (target_id);
+        CREATE INDEX IF NOT EXISTS idx_audit_events_user_at ON audit_events (user_id, at DESC);
+        CREATE INDEX IF NOT EXISTS idx_audit_events_operation_at ON audit_events (operation, at DESC);
 
         CREATE TABLE IF NOT EXISTS upload_sessions (
             id           UUID PRIMARY KEY,

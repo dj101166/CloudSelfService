@@ -16,7 +16,7 @@ public static class AdminEndpoints
 
     public static void MapAdminEndpoints(this WebApplication app) =>
         app.MapGet("/api/admin/audit.csv", AuditCsvAsync).RequireAuthorization(Policies.StaffAdmin)
-            .RequireRateLimiting(RateLimits.Transfers);
+            .RequireRateLimiting(RateLimits.AuditExport);
 
     public static string FilterSummary(Guid? user, Guid? customer, Guid? target, string? operation, string? result, string? from, string? to)
     {
@@ -32,8 +32,8 @@ public static class AdminEndpoints
         return text.Length > 500 ? text[..500] : text;
     }
 
-    public static string FileNameFor(DateTimeOffset now) =>
-        $"audit-{now.UtcDateTime.ToString("yyyyMMdd-HHmm", CultureInfo.InvariantCulture)}.csv";
+    public static string FileNameFor(DateTimeOffset now, bool truncated = false) =>
+        $"audit-{now.UtcDateTime.ToString("yyyyMMdd-HHmm", CultureInfo.InvariantCulture)}{(truncated ? "-truncated" : "")}.csv";
 
     private static async Task<IResult> AuditCsvAsync(HttpContext ctx, IAuditStore audit, ICustomerStore customers,
         ITargetStore targets, IUserStore users, AdminService admin, TimeProvider time, ILoggerFactory loggers,
@@ -55,13 +55,15 @@ public static class AdminEndpoints
             return Results.Unauthorized();
 
         string csv;
+        var truncated = false;
         try
         {
             var actor = await users.GetAsync(actorId, ctx.RequestAborted);
             var events = await audit.QueryAsync(query, ctx.RequestAborted);
             var customerNames = (await customers.ListAsync(ctx.RequestAborted)).ToDictionary(c => c.Id, c => c.Name);
             var targetNames = (await targets.ListAsync(null, ctx.RequestAborted)).ToDictionary(t => t.Id, t => t.DisplayName);
-            csv = CsvCell.AuditCsv(events, customerNames, targetNames);
+            truncated = events.Count >= AuditFilters.ExportLimit;
+            csv = CsvCell.AuditCsv(events, customerNames, targetNames, truncated ? AuditFilters.ExportLimit : null);
             await admin.RecordExportAsync(actorId, actor?.Upn ?? "", FilterSummary(user, customer, target, operation, result, from, to),
                 events.Count, AuthEndpoints.AuditContextFor(ctx));
         }
@@ -76,7 +78,7 @@ public static class AdminEndpoints
         }
 
         ctx.Response.Headers["X-Content-Type-Options"] = "nosniff";
-        ctx.Response.Headers.ContentDisposition = $"attachment; filename=\"{FileNameFor(time.GetUtcNow())}\"";
+        ctx.Response.Headers.ContentDisposition = $"attachment; filename=\"{FileNameFor(time.GetUtcNow(), truncated)}\"";
         return Results.Text(csv, "text/csv; charset=utf-8");
     }
 }

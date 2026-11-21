@@ -250,4 +250,73 @@ public class PgStoresIntegrationTests
         Assert.Null(await store.GetAsync(other.Id));
         Assert.Empty(await store.ReceivedChunksAsync(other.Id));
     }
+
+    [PgFact]
+    public async Task UserStore_TargetedWrites_AndRecordSignIn()
+    {
+        await using var ctx = await CtxAsync();
+        var users = new PgUserStore(ctx);
+        var suffix = Guid.NewGuid().ToString("N");
+        var staff = new AppUser(Guid.NewGuid(), UserKind.Staff, null, $"S{suffix}@x.example", "S", null, StaffRole.StaffAdmin, true, DateTimeOffset.UtcNow, null);
+        await users.UpsertAsync(staff);
+
+        Assert.True(await users.SetStaffRoleAsync(staff.Id, StaffRole.Staff));
+        Assert.Equal(StaffRole.Staff, (await users.GetAsync(staff.Id))!.StaffRole);
+        Assert.True(await users.SetActiveAsync(staff.Id, false));
+        Assert.Null(await users.RecordSignInAsync(staff.Id, "oid-" + suffix, staff.Upn, "S", DateTimeOffset.UtcNow));
+        Assert.False((await users.GetAsync(staff.Id))!.Active);
+
+        await users.SetActiveAsync(staff.Id, true);
+        var bound = await users.RecordSignInAsync(staff.Id, "oid-" + suffix, $"s{suffix}@X.example", "S2", DateTimeOffset.UtcNow);
+        Assert.Equal(StaffRole.Staff, bound!.StaffRole);
+        Assert.True(bound.Active);
+        Assert.Equal("oid-" + suffix, bound.EntraObjectId);
+        Assert.Null(await users.RecordSignInAsync(staff.Id, "other-oid", staff.Upn, "S", DateTimeOffset.UtcNow));
+
+        var customer = new AppUser(Guid.NewGuid(), UserKind.Customer, null, $"c{suffix}@x.example", "C", null, StaffRole.None, true, DateTimeOffset.UtcNow, null);
+        await Assert.ThrowsAnyAsync<Exception>(() => users.UpsertAsync(customer with { CustomerId = Guid.NewGuid() }));
+        Assert.False(await users.SetStaffRoleAsync(Guid.NewGuid(), StaffRole.Staff));
+    }
+
+    [PgFact]
+    public async Task UserStore_FindByUpn_UsesNormalisedColumn_AndKelvinCollides()
+    {
+        await using var ctx = await CtxAsync();
+        var users = new PgUserStore(ctx);
+        var suffix = Guid.NewGuid().ToString("N");
+        await users.UpsertAsync(new AppUser(Guid.NewGuid(), UserKind.Staff, null, $"k{suffix}@x.example", "K", null, StaffRole.None, true, DateTimeOffset.UtcNow, null));
+
+        Assert.NotNull(await users.FindByUpnAsync($"\u212A{suffix}@X.example"));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => users.UpsertAsync(
+            new AppUser(Guid.NewGuid(), UserKind.Staff, null, $"\u212A{suffix}@x.example", "K2", null, StaffRole.None, true, DateTimeOffset.UtcNow, null)));
+    }
+
+    [PgFact]
+    public async Task TargetStore_RepointWithGrants_RejectedByTrigger()
+    {
+        await using var ctx = await CtxAsync();
+        var customers = new PgCustomerStore(ctx);
+        var targets = new PgTargetStore(ctx);
+        var grants = new PgGrantStore(ctx);
+        var c = Cust();
+        await customers.UpsertAsync(c);
+        var t = Target(c.Id);
+        await targets.UpsertAsync(t);
+        await targets.UpsertAsync(t with { DisplayName = "renamed" });
+        await grants.SetAsync(new Grant(c.Id, t.Id, AccessLevel.Read, "x", DateTimeOffset.UtcNow));
+
+        await targets.UpsertAsync(t with { DisplayName = "renamed again", Active = false });
+        foreach (var changed in new[] { t with { AccountName = "other" + Guid.NewGuid().ToString("N")[..8] }, t with { ContainerName = "other" },
+                     t with { Kind = StorageKind.FileShare }, t with { EndpointSuffix = "core.windows.net" } })
+            await Assert.ThrowsAsync<InvalidOperationException>(() => targets.UpsertAsync(changed));
+    }
+
+    [PgFact]
+    public async Task AuditStore_Query_HasIndexesAndStillFilters()
+    {
+        await using var ctx = await CtxAsync();
+        await using var conn = await ctx.DataSource.OpenConnectionAsync();
+        await using var cmd = new Npgsql.NpgsqlCommand("SELECT count(*) FROM pg_indexes WHERE indexname IN ('idx_audit_events_user_at','idx_audit_events_operation_at','ux_users_upn_normalized')", conn);
+        Assert.Equal(3L, (long)(await cmd.ExecuteScalarAsync())!);
+    }
 }

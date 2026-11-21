@@ -69,7 +69,8 @@ public class IdentityResolverTests
             .AdmitAsync(Staff("boss@advancedutility.com", "oid-boss"));
 
         Assert.Equal(AdmissionOutcome.Admitted, result.Outcome);
-        Assert.Equal(StaffRole.Owner, (await _users.FindByObjectIdAsync("oid-boss"))!.StaffRole);
+        Assert.Equal(StaffRole.Owner, result.User!.StaffRole);
+        Assert.Equal(StaffRole.Staff, (await _users.FindByObjectIdAsync("oid-boss"))!.StaffRole);
     }
 
     [Fact]
@@ -80,8 +81,10 @@ public class IdentityResolverTests
 
         var result = await Resolver(owners: "someone@advancedutility.com").AdmitAsync(Staff("boss@advancedutility.com", "oid-boss"));
 
+        // A sign-in never writes a role: the stored Owner stays and EffectiveRole reads it as StaffAdmin.
         Assert.Equal(AdmissionOutcome.Admitted, result.Outcome);
-        Assert.Equal(StaffRole.StaffAdmin, (await _users.FindByObjectIdAsync("oid-boss"))!.StaffRole);
+        Assert.Equal(StaffRole.StaffAdmin, result.User!.StaffRole);
+        Assert.Equal(StaffRole.Owner, (await _users.FindByObjectIdAsync("oid-boss"))!.StaffRole);
     }
 
     [Fact]
@@ -98,7 +101,7 @@ public class IdentityResolverTests
         var stored = await _users.GetAsync(id);
         Assert.Equal("new.name@advancedutility.com", stored!.Upn);
         Assert.Equal("New Name", stored.DisplayName);
-        Assert.Equal(StaffRole.StaffAdmin, stored.StaffRole);
+        Assert.Equal(StaffRole.StaffAdmin, result.User!.StaffRole);
         Assert.Equal(AdmissionOutcome.Admitted, result.Outcome);
     }
 
@@ -146,6 +149,122 @@ public class IdentityResolverTests
 
         Assert.Equal(AdmissionOutcome.Admitted, result.Outcome);
         Assert.Equal(StaffRole.Owner, result.User!.StaffRole);
+        Assert.Equal(StaffRole.None, (await _users.FindByObjectIdAsync("oid-sam"))!.StaffRole);
+    }
+
+    [Fact]
+    public async Task Admit_DeactivatedBetweenReadAndWrite_StaysInactiveAndRefused()
+    {
+        var customer = await AddCustomer();
+        var user = await AddCustomerUser(customer.Id, oid: "oid-pat");
+        var racing = new DeactivateAfterReadUsers(_users, user.Id);
+        var resolver = new IdentityResolver(racing, _customers, new AuditService(_audit, NullLogger<AuditService>.Instance),
+            new ConfigurationBuilder().Build(), new OwnerConfig(""));
+
+        var result = await resolver.AdmitAsync(Guest("pat@customer.example", "oid-pat"));
+
+        Assert.Equal(AdmissionOutcome.Deactivated, result.Outcome);
+        Assert.False((await _users.GetAsync(user.Id))!.Active);
+    }
+
+    [Fact]
+    public async Task Admit_StaffDemotedBetweenReadAndWrite_RoleSurvives()
+    {
+        var staff = new AppUser(Guid.NewGuid(), UserKind.Staff, null, "sam@advancedutility.com", "Sam", "oid-sam", StaffRole.StaffAdmin, true, DateTimeOffset.UtcNow, null);
+        await _users.UpsertAsync(staff);
+        var racing = new DeactivateAfterReadUsers(_users, staff.Id, demoteTo: StaffRole.None);
+        var resolver = new IdentityResolver(racing, _customers, new AuditService(_audit, NullLogger<AuditService>.Instance),
+            new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["Entra:StaffEmailDomain"] = "advancedutility.com" }).Build(),
+            new OwnerConfig(""));
+
+        var result = await resolver.AdmitAsync(Staff());
+
+        Assert.Equal(AdmissionOutcome.AdmittedPendingRole, result.Outcome);
+        Assert.Equal(StaffRole.None, (await _users.GetAsync(staff.Id))!.StaffRole);
+    }
+
+    /// <summary>Lets the resolver read the user, then makes the admin's change before the resolver writes.</summary>
+    private sealed class DeactivateAfterReadUsers(IUserStore inner, Guid victim, StaffRole? demoteTo = null) : IUserStore
+    {
+        private bool _fired;
+
+        private async Task FireAsync()
+        {
+            if (_fired) return;
+            _fired = true;
+            if (demoteTo is { } role) await inner.SetStaffRoleAsync(victim, role);
+            else await inner.SetActiveAsync(victim, false);
+        }
+
+        public Task<AppUser?> GetAsync(Guid id, CancellationToken ct = default) => inner.GetAsync(id, ct);
+        public async Task<AppUser?> FindByObjectIdAsync(string oid, CancellationToken ct = default)
+        {
+            var user = await inner.FindByObjectIdAsync(oid, ct);
+            await FireAsync();
+            return user;
+        }
+        public Task<AppUser?> FindByUpnAsync(string upn, CancellationToken ct = default) => inner.FindByUpnAsync(upn, ct);
+        public Task<IReadOnlyList<AppUser>> ListAsync(UserKind? kind = null, Guid? customerId = null, CancellationToken ct = default) => inner.ListAsync(kind, customerId, ct);
+        public Task UpsertAsync(AppUser user, CancellationToken ct = default) => inner.UpsertAsync(user, ct);
+        public Task<bool> SetActiveAsync(Guid userId, bool active, CancellationToken ct = default) => inner.SetActiveAsync(userId, active, ct);
+        public Task<bool> SetStaffRoleAsync(Guid userId, StaffRole role, CancellationToken ct = default) => inner.SetStaffRoleAsync(userId, role, ct);
+        public Task<AppUser?> RecordSignInAsync(Guid userId, string oid, string upn, string displayName, DateTimeOffset now, CancellationToken ct = default) =>
+            inner.RecordSignInAsync(userId, oid, upn, displayName, now, ct);
+    }
+
+    [Fact]
+    public async Task Admit_FirstBind_HomeTenantMismatch_Refused_Match_Admitted()
+    {
+        var tenant = Guid.NewGuid();
+        var c = new Customer(Guid.NewGuid(), "Gov Co", true, "", tenant.ToString(), CustomerCloud.AzureGov, CrossTenantStatus.Complete);
+        await _customers.UpsertAsync(c);
+        await AddCustomerUser(c.Id);
+
+        var wrong = await Resolver().AdmitAsync(Guest() with { Idp = $"https://login.microsoftonline.us/{Guid.NewGuid()}/v2.0" });
+        var none = await Resolver().AdmitAsync(Guest());
+        var right = await Resolver().AdmitAsync(Guest() with { Idp = $"https://login.microsoftonline.us/{tenant}/v2.0" });
+
+        Assert.Equal(AdmissionOutcome.UnknownCustomer, wrong.Outcome);
+        Assert.Equal(AdmissionOutcome.UnknownCustomer, none.Outcome);
+        Assert.Equal(AdmissionOutcome.Admitted, right.Outcome);
+        var denied = (await _audit.QueryAsync(new AuditQuery(Operation: "SignIn", Result: AuditResult.Denied))).Select(e => e.Error);
+        Assert.Contains(denied, e => e.Contains("Home tenant does not match"));
+    }
+
+    [Fact]
+    public async Task Admit_FirstBind_CrossTenantPending_Refused()
+    {
+        var c = new Customer(Guid.NewGuid(), "Gov Co", true, "", null, CustomerCloud.AzureGov, CrossTenantStatus.Pending);
+        await _customers.UpsertAsync(c);
+        await AddCustomerUser(c.Id);
+
+        var result = await Resolver().AdmitAsync(Guest());
+
+        Assert.Equal(AdmissionOutcome.UnknownCustomer, result.Outcome);
+    }
+
+    [Fact]
+    public async Task Admit_BoundCustomer_HomeTenantNotRecheckedOnLaterSignIns()
+    {
+        var c = new Customer(Guid.NewGuid(), "Gov Co", true, "", Guid.NewGuid().ToString(), CustomerCloud.AzureGov, CrossTenantStatus.Complete);
+        await _customers.UpsertAsync(c);
+        await AddCustomerUser(c.Id, oid: "oid-pat");
+
+        var result = await Resolver().AdmitAsync(Guest());
+
+        Assert.Equal(AdmissionOutcome.Admitted, result.Outcome);
+    }
+
+    [Fact]
+    public void EntraIdentityReader_KeepsIdpClaim()
+    {
+        var principal = new System.Security.Claims.ClaimsPrincipal(new System.Security.Claims.ClaimsIdentity(new[]
+        {
+            new System.Security.Claims.Claim("oid", "o"), new System.Security.Claims.Claim("preferred_username", "a@b.example"),
+            new System.Security.Claims.Claim("idp", "https://sts.windows.net/11111111-2222-3333-4444-555555555555/"),
+        }));
+
+        Assert.Equal("https://sts.windows.net/11111111-2222-3333-4444-555555555555/", EntraIdentityReader.Read(principal)!.Idp);
     }
 
     [Fact]

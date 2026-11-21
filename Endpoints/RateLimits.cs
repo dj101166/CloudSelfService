@@ -17,6 +17,8 @@ public static class RateLimits
 {
     public const string Transfers = "transfers";
     public const string Chunks = "upload-chunks";
+    public const string AuditExport = "audit-export";
+    public const int DefaultAuditExportsPerMinute = 10;
     public const string RejectedMessage = "Too many requests. Please wait a moment and try again.";
     public const int DefaultRequestsPerMinute = 120;
     public const int DefaultMaxConcurrentPerUser = 4;
@@ -65,6 +67,15 @@ public static class RateLimits
                 QueueLimit = 0,
                 AutoReplenishment = true,
             }))));
+        var exports = Math.Max(1, config.GetValue<int?>("Admin:AuditExportsPerMinute") ?? DefaultAuditExportsPerMinute);
+        options.AddPolicy<string>(AuditExport, ctx => RateLimitPartition.GetTokenBucketLimiter(PartitionKey(ctx), _ => new TokenBucketRateLimiterOptions
+        {
+            TokenLimit = exports,
+            TokensPerPeriod = exports,
+            ReplenishmentPeriod = TimeSpan.FromMinutes(1),
+            QueueLimit = 0,
+            AutoReplenishment = true,
+        }));
         options.AddPolicy<string>(Chunks, ctx => RateLimitPartition.Get(PartitionKey(ctx), _ => new ChainedLimiter(
             new SharedLimiter(globalChunks),
             new ChainedLimiter(

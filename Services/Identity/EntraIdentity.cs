@@ -10,6 +10,9 @@ public sealed record EntraIdentity(string ObjectId, string TenantId, string Upn,
     /// never be what binds this oid to a pre-registered record or marks the caller as staff.
     /// </summary>
     public bool UpnFromEmail { get; init; }
+
+    /// <summary>The raw <c>idp</c> claim: for a B2B guest, the issuer URL of their home tenant.</summary>
+    public string? Idp { get; init; }
 }
 
 public static class EntraIdentityReader
@@ -39,6 +42,7 @@ public static class EntraIdentityReader
         return new EntraIdentity(oidClaim.Value, FirstNonBlank(p, "tid") ?? "", upn, name, isGuest)
         {
             UpnFromEmail = verifiedUpn is null && upn.Length > 0,
+            Idp = idp,
         };
     }
 
@@ -46,7 +50,7 @@ public static class EntraIdentityReader
         !id.IsGuest
         && !id.UpnFromEmail
         && !string.IsNullOrWhiteSpace(staffDomain)
-        && id.Upn.EndsWith("@" + staffDomain, StringComparison.OrdinalIgnoreCase);
+        && UpnNormalizer.Normalize(id.Upn).EndsWith("@" + UpnNormalizer.Normalize(staffDomain), StringComparison.Ordinal);
 
     private static string? FirstNonBlank(ClaimsPrincipal p, params string[] types)
     {
