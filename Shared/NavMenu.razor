@@ -5,8 +5,12 @@
     does that, keyed off an attribute on <html> that survives a reload.
 *@
 <nav class="app__nav" data-testid="app-nav">
-    <NavLink class="app__nav-link" ActiveClass="app__nav-link--active" href="" Match="NavLinkMatch.All">
+    <FilesNavLink class="app__nav-link" ActiveClass="app__nav-link--active" href="">
         <Icon Name="folder" />
         <span class="app__nav-link__label">Files</span>
+    </FilesNavLink>
+    <NavLink class="app__nav-link" ActiveClass="app__nav-link--active" href="help">
+        <Icon Name="help" />
+        <span class="app__nav-link__label">Help</span>
     </NavLink>
 </nav>

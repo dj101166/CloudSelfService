@@ -1,0 +1,89 @@
+@inject IJSRuntime JS
+
+@*
+    Asks for one name or path: "New folder" and "Rename or move" both use it. The parent does the work in OnSubmit and
+    sets Error when it fails, so the dialog stays open with what the user typed.
+*@
+@if (this.IsOpen)
+{
+    <div class="modal__scrim" @onclick="this.CancelAsync">
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="name-dialog-title"
+             data-testid="name-dialog" @onclick:stopPropagation="true" @onkeydown="this.OnKeyDownAsync">
+            <form class="dialog__form" @onsubmit="this.SubmitAsync">
+                <div class="modal__head">
+                    <h2 class="modal__title" id="name-dialog-title">@this.Title</h2>
+                </div>
+                <div class="modal__body">
+                    <div class="field">
+                        <label class="label" for="name-dialog-input">@this.Label</label>
+                        <input id="name-dialog-input" class="input" data-testid="name-input" autocomplete="off"
+                               spellcheck="false" @bind="this._value" @bind:event="oninput" />
+                        @if (!string.IsNullOrEmpty(this.Hint))
+                        {
+                            <p class="hint">@this.Hint</p>
+                        }
+                        @if (!string.IsNullOrEmpty(this.Error))
+                        {
+                            <p class="field-error" role="alert" data-testid="name-error">@this.Error</p>
+                        }
+                    </div>
+                </div>
+                <div class="modal__actions">
+                    <button type="button" class="btn btn--secondary" data-testid="name-cancel" @onclick="this.CancelAsync">Cancel</button>
+                    <button type="submit" class="btn btn--primary" data-testid="name-ok"
+                            disabled="@(this.Busy || string.IsNullOrWhiteSpace(this._value))">@this.ConfirmText</button>
+                </div>
+            </form>
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public bool IsOpen { get; set; }
+    [Parameter] public string Title { get; set; } = "";
+    [Parameter] public string Label { get; set; } = "Name";
+    [Parameter] public string? Hint { get; set; }
+    [Parameter] public string InitialValue { get; set; } = "";
+    [Parameter] public string ConfirmText { get; set; } = "Save";
+    [Parameter] public string? Error { get; set; }
+    [Parameter] public bool Busy { get; set; }
+    [Parameter] public EventCallback<string> OnSubmit { get; set; }
+    [Parameter] public EventCallback OnCancel { get; set; }
+
+    private string _value = "";
+    private bool _wasOpen;
+    private bool _focusPending;
+
+    protected override void OnParametersSet()
+    {
+        if (this.IsOpen && !this._wasOpen)
+        {
+            this._value = this.InitialValue;
+            this._focusPending = true;
+        }
+        this._wasOpen = this.IsOpen;
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!this._focusPending) return;
+        this._focusPending = false;
+        try
+        {
+            await this.JS.InvokeVoidAsync("cssp.focusElement", "name-dialog-input");
+        }
+        catch (JSDisconnectedException)
+        {
+        }
+    }
+
+    private async Task SubmitAsync()
+    {
+        if (this.Busy || string.IsNullOrWhiteSpace(this._value)) return;
+        await this.OnSubmit.InvokeAsync(this._value);
+    }
+
+    private Task CancelAsync() => this.Busy ? Task.CompletedTask : this.OnCancel.InvokeAsync();
+
+    private Task OnKeyDownAsync(KeyboardEventArgs e) => e.Key == "Escape" ? this.CancelAsync() : Task.CompletedTask;
+}

@@ -1,0 +1,69 @@
+@page "/help"
+@attribute [Authorize]
+
+<PageTitle>Help — Advanced Cloud Self Service</PageTitle>
+
+<div class="page-head">
+    <div>
+        <h1 class="page-title">Help</h1>
+        <p class="page-subtitle">Signing in, what you can do with your files, and who to contact.</p>
+    </div>
+</div>
+
+<div class="help">
+    <section class="card help__section" data-testid="help-signin">
+        <h2 class="card__title">Signing in</h2>
+        <ol class="help__list">
+            <li>Advanced sends an invitation email from Microsoft to the work address we registered for you.</li>
+            <li>Open that email and select <strong>Accept invitation</strong>. You only need to do this once; it links your
+                own organisation's account to Advanced.</li>
+            <li>From then on, choose <strong>Sign in with Microsoft</strong> on the sign-in page and use your own
+                organisation's work account — the same one you use for email. You don't need a separate password for this
+                portal.</li>
+        </ol>
+        <p class="help__note u-muted">If the invitation has expired or you can't find it, contact Advanced support and we
+            will send a new one. Your organisation's IT team may need to allow sign-ins to Advanced first.</p>
+    </section>
+
+    <section class="card help__section" data-testid="help-levels">
+        <h2 class="card__title">What each access level allows</h2>
+        <p class="help__note u-muted">Each share or container is given to your organisation at one level, and that level
+            applies to everyone in your organisation.</p>
+        <div class="table-wrap">
+            <table class="table">
+                <thead>
+                    <tr><th scope="col">Level</th><th scope="col">You can</th></tr>
+                </thead>
+                <tbody>
+                    <tr><td><span class="badge badge--muted">Read</span></td><td>Browse folders and download files.</td></tr>
+                    <tr><td><span class="badge badge--info">Contribute</span></td><td>Everything in Read, plus upload files
+                        (including replacing an existing file, after you confirm), create folders, and rename or move files
+                        and folders within the same share or container.</td></tr>
+                    <tr><td><span class="badge badge--accent">Full</span></td><td>Everything in Contribute, plus delete files
+                        and folders. Deleting a folder deletes everything in it.</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <section class="card help__section" data-testid="help-uploads">
+        <h2 class="card__title">Large uploads</h2>
+        <ul class="help__list">
+            <li>Choose <strong>Upload</strong>, or drag files onto the file list. Files of many gigabytes are fine: they
+                are sent in small pieces, and each piece is checked on arrival.</li>
+            <li>If your connection drops, the upload pauses. Select <strong>Resume</strong>, or, if you closed the page,
+                go back to the same folder and select the same file again — it carries on from where it stopped rather
+                than starting over.</li>
+            <li>An unfinished upload is kept for 24 hours. After that, start it again.</li>
+            <li>Keep this page open while an upload is running. Leaving it stops the upload until you select the file
+                again.</li>
+        </ul>
+    </section>
+
+    <section class="card help__section" data-testid="help-support">
+        <h2 class="card__title">Contacting Advanced support</h2>
+        <p class="help__note">Contact Advanced support through your usual support channel if you can't sign in, can't see
+            a share you expected, need a different access level, or an upload keeps failing. Tell us the email address you
+            sign in with, the share and folder, and the time it happened, so we can find it in our logs.</p>
+    </section>
+</div>

@@ -67,6 +67,8 @@ builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton(SessionLifetime.FromConfiguration(builder.Configuration));
 builder.Services.AddSingleton(new OwnerConfig(DevSignIn.EffectiveOwners(builder.Environment, builder.Configuration)));
 builder.Services.AddScoped<CurrentUser>();
+builder.Services.AddHttpContextAccessor();
+builder.Services.AddScoped<CloudSelfService.Services.Files.PageAuditContext>();
 builder.Services.AddSingleton<IdentityResolver>();
 builder.Services.AddSingleton<IAuthorizationHandler, AppRoleHandler>();
 builder.Services.AddCascadingAuthenticationState();

@@ -1,0 +1,51 @@
+/* Files home. Every colour reads a token. Icon is a child component, so the card icon colour goes through ::deep. */
+
+.home__filter { min-width: 240px; }
+
+.home__group { margin-bottom: 22px; }
+
+.home__group-title {
+    font-family: var(--font-display);
+    font-size: 14px;
+    font-weight: var(--weight-bold);
+    color: var(--text-primary);
+    margin: 0 0 10px;
+}
+
+.home__card {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    color: var(--text-primary);
+    text-decoration: none;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.home__card:hover { border-color: var(--accent); text-decoration: none; color: var(--text-primary); }
+.home__card:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); }
+
+.home__card-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 34px;
+    height: 34px;
+    flex: none;
+    border-radius: var(--radius-md);
+    background: var(--accent-soft);
+}
+
+.home__card-icon ::deep .icon { color: var(--accent); }
+
+.home__card-body { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+
+.home__card-name { font-weight: var(--weight-bold); overflow-wrap: anywhere; }
+
+.home__card-badges { gap: 6px; }
+
+.home__empty { display: flex; align-items: center; gap: 12px; color: var(--text-secondary); }
+.home__empty p { margin: 0; }
+
+@media (max-width: 640px) {
+    .home__filter { min-width: 0; width: 100%; }
+}

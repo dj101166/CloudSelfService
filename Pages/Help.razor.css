@@ -1,0 +1,9 @@
+/* The help page. Every colour reads a token. */
+
+.help { display: flex; flex-direction: column; gap: 14px; max-width: 860px; }
+
+.help__list { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 8px; color: var(--text-primary); line-height: 1.5; }
+
+.help__note { margin: 10px 0 0; line-height: 1.5; }
+
+.help__section .table { margin-top: 10px; }

@@ -1,6 +1,148 @@
 @page "/"
 @attribute [Authorize]
+@inject StorageAccessService Access
+@inject CurrentUser CurrentUser
+@inject ILogger<Index> Logger
+@using CloudSelfService.Models
+@using CloudSelfService.Services.Access
+@using CloudSelfService.Services.Files
+@using CloudSelfService.Services.Identity
+
+@*
+    Files home: every share and container this user can reach. Customers see their own as a flat set of cards; staff
+    see every customer's, grouped by customer, with targets that belong to no customer under "Advanced internal".
+*@
 
 <PageTitle>Files — Advanced Cloud Self Service</PageTitle>
 
-<h1 class="page-title-main">Files</h1>
+<div class="page-head">
+    <div>
+        <h1 class="page-title">Files</h1>
+        <p class="page-subtitle">@this.Subtitle</p>
+    </div>
+    @if (this._isStaff && this._targets.Count > 0)
+    {
+        <div class="page-head__filters">
+            <label class="u-sr-only" for="target-filter">Filter by customer or storage name</label>
+            <input id="target-filter" class="input home__filter" type="search" placeholder="Filter by customer or name"
+                   autocomplete="off" data-testid="target-filter" @bind="this._filter" @bind:event="oninput" />
+        </div>
+    }
+</div>
+
+@if (this._error is not null)
+{
+    <div class="alert alert--warning" role="alert" data-testid="alert">@this._error</div>
+}
+else if (!this._loaded)
+{
+    <div class="loading"><span class="spinner spinner--lg"></span> Loading…</div>
+}
+else if (this._targets.Count == 0)
+{
+    <div class="card home__empty" data-testid="home-empty">
+        <Icon Name="folder" />
+        <p>@EmptyMessage</p>
+    </div>
+}
+else
+{
+    var groups = this.Groups().ToList();
+    @if (groups.Count == 0)
+    {
+        <p class="u-muted" data-testid="home-no-match">Nothing matches “@this._filter”.</p>
+    }
+    @foreach (var group in groups)
+    {
+        <section class="home__group" data-testid="target-group">
+            @if (this._isStaff)
+            {
+                <h2 class="home__group-title">@group.Heading</h2>
+            }
+            <div class="card-grid">
+                @foreach (var r in group.Targets)
+                {
+                    <a class="card home__card" href="@FileDisplay.BrowseHref(r.Target.Id, "")" data-testid="target-card"
+                       data-target-id="@r.Target.Id">
+                        <span class="home__card-icon"><Icon Name="@(r.Target.Kind == StorageKind.FileShare ? "folder" : "database")" /></span>
+                        <span class="home__card-body">
+                            <span class="home__card-name">@StoragePath.DisplayName(r.Target.DisplayName)</span>
+                            <span class="u-row u-row--wrap home__card-badges">
+                                <span class="badge badge--muted">@(r.Target.Kind == StorageKind.FileShare ? "File share" : "Blob container")</span>
+                                <span class="badge @LevelBadge(r.Level)">@r.Level</span>
+                            </span>
+                        </span>
+                    </a>
+                }
+            </div>
+        </section>
+    }
+}
+
+@code {
+    public const string EmptyMessage =
+        "No storage has been shared with you yet. Contact Advanced support if you expected to see something here.";
+    public const string InternalHeading = "Advanced internal";
+
+    private IReadOnlyList<ReachableTarget> _targets = Array.Empty<ReachableTarget>();
+    private bool _isStaff;
+    private bool _loaded;
+    private string? _error;
+    private string _filter = "";
+
+    private sealed record Group(string Heading, IReadOnlyList<ReachableTarget> Targets);
+
+    private string Subtitle => this._isStaff
+        ? "Every customer's shares and containers. Choose one to browse it."
+        : "The shares and containers Advanced hosts for you. Choose one to browse it.";
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            var user = await this.CurrentUser.GetAsync();
+            if (user is null) return;
+            this._isStaff = user.Kind == UserKind.Staff;
+            this._targets = await this.Access.ListReachableTargetsAsync(user.Id);
+            this._loaded = true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            this.Logger.LogError(ex, "Listing reachable targets failed.");
+            this._error = "The service is temporarily unavailable.";
+        }
+    }
+
+    private IEnumerable<Group> Groups()
+    {
+        var filter = this._filter.Trim();
+        var visible = filter.Length == 0
+            ? this._targets
+            : this._targets.Where(r => Matches(r.Target.DisplayName, filter) || Matches(r.Customer?.Name, filter)
+                                       || (r.Customer is null && Matches(InternalHeading, filter)));
+        if (!this._isStaff)
+        {
+            var all = visible.ToList();
+            if (all.Count > 0) yield return new Group("", all);
+            yield break;
+        }
+
+        // Customers alphabetically, then the internal group last.
+        foreach (var g in visible.Where(r => r.Customer is not null)
+                     .GroupBy(r => r.Customer!.Id)
+                     .OrderBy(g => g.First().Customer!.Name, StringComparer.OrdinalIgnoreCase))
+            yield return new Group(StoragePath.DisplayName(g.First().Customer!.Name), g.ToList());
+        var internalTargets = visible.Where(r => r.Customer is null).ToList();
+        if (internalTargets.Count > 0) yield return new Group(InternalHeading, internalTargets);
+    }
+
+    private static bool Matches(string? text, string filter) =>
+        text is not null && text.Contains(filter, StringComparison.OrdinalIgnoreCase);
+
+    private static string LevelBadge(AccessLevel level) => level switch
+    {
+        AccessLevel.Full => "badge--accent",
+        AccessLevel.Contribute => "badge--info",
+        _ => "badge--muted",
+    };
+}

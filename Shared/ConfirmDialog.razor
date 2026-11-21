@@ -1,0 +1,94 @@
+@inject IJSRuntime JS
+
+@*
+    A yes/no question. With RequireText set, the confirm button stays disabled until that exact text is typed - used
+    before deleting a folder, which takes everything inside it too.
+*@
+@if (this.IsOpen)
+{
+    <div class="modal__scrim" @onclick="this.CancelAsync">
+        <div class="modal" role="alertdialog" aria-modal="true" aria-labelledby="confirm-dialog-title"
+             aria-describedby="confirm-dialog-message" data-testid="confirm-dialog"
+             @onclick:stopPropagation="true" @onkeydown="this.OnKeyDownAsync">
+            <form class="dialog__form" @onsubmit="this.ConfirmAsync">
+                <div class="modal__head">
+                    <h2 class="modal__title" id="confirm-dialog-title">@this.Title</h2>
+                </div>
+                <div class="modal__body">
+                    <p class="dialog__message" id="confirm-dialog-message" data-testid="confirm-message">@this.Message</p>
+                    @if (this.RequireText is not null)
+                    {
+                        <div class="field">
+                            <label class="label" for="confirm-dialog-input">Type <strong>@this.RequireText</strong> to confirm</label>
+                            <input id="confirm-dialog-input" class="input" data-testid="confirm-input" autocomplete="off"
+                                   spellcheck="false" @bind="this._typed" @bind:event="oninput" />
+                        </div>
+                    }
+                    @if (!string.IsNullOrEmpty(this.Error))
+                    {
+                        <p class="field-error" role="alert" data-testid="confirm-error">@this.Error</p>
+                    }
+                </div>
+                <div class="modal__actions">
+                    <button type="button" class="btn btn--secondary" data-testid="confirm-cancel" @onclick="this.CancelAsync">Cancel</button>
+                    <button type="submit" id="confirm-dialog-ok"
+                            class="btn @(this.Danger ? "btn--danger" : "btn--primary")" data-testid="confirm-ok"
+                            disabled="@(this.Busy || !this.Confirmable)">@this.ConfirmText</button>
+                </div>
+            </form>
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public bool IsOpen { get; set; }
+    [Parameter] public string Title { get; set; } = "";
+    [Parameter] public string Message { get; set; } = "";
+    [Parameter] public string ConfirmText { get; set; } = "OK";
+    [Parameter] public bool Danger { get; set; }
+    [Parameter] public string? RequireText { get; set; }
+    [Parameter] public string? Error { get; set; }
+    [Parameter] public bool Busy { get; set; }
+    [Parameter] public EventCallback OnConfirm { get; set; }
+    [Parameter] public EventCallback OnCancel { get; set; }
+
+    private string _typed = "";
+    private bool _wasOpen;
+    private bool _focusPending;
+
+    private bool Confirmable => this.RequireText is null || string.Equals(this._typed.Trim(), this.RequireText, StringComparison.Ordinal);
+
+    protected override void OnParametersSet()
+    {
+        if (this.IsOpen && !this._wasOpen)
+        {
+            this._typed = "";
+            this._focusPending = true;
+        }
+        this._wasOpen = this.IsOpen;
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!this._focusPending) return;
+        this._focusPending = false;
+        try
+        {
+            await this.JS.InvokeVoidAsync("cssp.focusElement",
+                this.RequireText is null ? "confirm-dialog-ok" : "confirm-dialog-input");
+        }
+        catch (JSDisconnectedException)
+        {
+        }
+    }
+
+    private async Task ConfirmAsync()
+    {
+        if (this.Busy || !this.Confirmable) return;
+        await this.OnConfirm.InvokeAsync();
+    }
+
+    private Task CancelAsync() => this.Busy ? Task.CompletedTask : this.OnCancel.InvokeAsync();
+
+    private Task OnKeyDownAsync(KeyboardEventArgs e) => e.Key == "Escape" ? this.CancelAsync() : Task.CompletedTask;
+}

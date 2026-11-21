@@ -1,0 +1,272 @@
+@implements IAsyncDisposable
+@inject IJSRuntime JS
+@inject NavigationManager Nav
+@using CloudSelfService.Services.Access
+@using CloudSelfService.Services.Files
+
+@*
+    The upload queue for the file browser. The bytes go from the browser straight to /api/uploads through
+    wwwroot/js/uploader.js; this component only shows what that script reports. The page owns the file input and
+    calls StartAsync when files are chosen or dropped.
+
+    Leaving the Files pages stops the uploads (the server keeps them for 24 hours, so choosing the same file again
+    resumes), which is why a navigation away with uploads running asks first.
+*@
+<NavigationLock ConfirmExternalNavigation="this.HasActive" OnBeforeInternalNavigation="this.OnBeforeNavigationAsync" />
+
+@if (this._items.Count > 0)
+{
+    <section class="card upload-panel" data-testid="upload-panel" aria-label="Uploads">
+        <div class="upload-panel__head">
+            <h2 class="card__title upload-panel__title">Uploads</h2>
+            @if (this._items.Any(i => i.IsFinished))
+            {
+                <button type="button" class="btn btn--link btn--sm" data-testid="upload-clear" @onclick="this.ClearFinishedAsync">
+                    Clear finished
+                </button>
+            }
+        </div>
+        <ul class="upload-panel__list">
+            @foreach (var item in this._items)
+            {
+                <li class="upload-panel__item" data-testid="upload-item" data-status="@item.Status" @key="item.Id">
+                    <div class="upload-panel__row">
+                        <Icon Name="file" />
+                        <span class="upload-panel__name" title="@StoragePath.DisplayName(item.Name)">@StoragePath.DisplayName(item.Name)</span>
+                        <span class="upload-panel__size u-subtle">@FileDisplay.Size(item.Sent) of @FileDisplay.Size(item.Size)</span>
+                        <span class="upload-panel__actions">
+                            @if (item.IsActive)
+                            {
+                                <button type="button" class="btn btn--secondary btn--sm" data-testid="upload-pause"
+                                        @onclick="() => this.PauseAsync(item)">Pause</button>
+                            }
+                            @if (item.CanResume)
+                            {
+                                <button type="button" class="btn btn--secondary btn--sm" data-testid="upload-resume"
+                                        @onclick="() => this.ResumeAsync(item)">Resume</button>
+                            }
+                            @if (item.Status == UploadStatusNames.Conflict)
+                            {
+                                <button type="button" class="btn btn--secondary btn--sm" data-testid="upload-replace"
+                                        @onclick="() => this.AskOverwrite(item)">Replace…</button>
+                            }
+                            @if (!item.IsFinished)
+                            {
+                                <button type="button" class="btn btn--icon btn--sm" data-testid="upload-cancel"
+                                        aria-label="Cancel upload of @StoragePath.DisplayName(item.Name)" title="Cancel"
+                                        @onclick="() => this.CancelAsync(item)">
+                                    <Icon Name="close" />
+                                </button>
+                            }
+                        </span>
+                    </div>
+                    <div class="upload-panel__track" role="progressbar" aria-valuemin="0" aria-valuemax="100"
+                         aria-valuenow="@item.Percent" aria-label="@StoragePath.DisplayName(item.Name)">
+                        <div class="upload-panel__fill @FillModifier(item)" style="width: @(item.Percent)%"></div>
+                    </div>
+                    <p class="upload-panel__status @StatusModifier(item)" data-testid="upload-status">@UploadStatusNames.Label(item)</p>
+                </li>
+            }
+        </ul>
+    </section>
+}
+
+<ConfirmDialog IsOpen="this._conflict is not null"
+               Title="Replace file?"
+               Message="@($"{StoragePath.DisplayName(this._conflict?.Name ?? "")} already exists. Replace it?")"
+               ConfirmText="Replace"
+               Danger="true"
+               OnConfirm="this.ConfirmOverwriteAsync"
+               OnCancel="this.SkipOverwriteAsync" />
+
+@code {
+    public const string SkippedMessage = "Not uploaded: a file with that name already exists.";
+    public const string LeaveWarning = "Uploads are still running. Leaving this page stops them; select the same files again later to carry on. Leave anyway?";
+
+    /// <summary>Raised when a file finishes uploading, so the page can refresh the folder it landed in.</summary>
+    [Parameter] public EventCallback<UploadItem> OnUploaded { get; set; }
+
+    /// <summary>Raised when the server refuses an upload as not allowed, so the page can re-read the access level.</summary>
+    [Parameter] public EventCallback OnAccessDenied { get; set; }
+
+    private readonly List<UploadItem> _items = new();
+    private readonly Queue<UploadItem> _conflicts = new();
+    private UploadItem? _conflict;
+    private DotNetObjectReference<UploadPanel>? _ref;
+    private readonly string _owner = Guid.NewGuid().ToString("N");
+
+    private bool HasActive => this._items.Any(i => i.IsActive);
+
+    /// <summary>Hands the files chosen in <paramref name="inputElementId"/> to uploader.js.</summary>
+    public async Task StartAsync(Guid targetId, string folder, string inputElementId)
+    {
+        this._ref ??= DotNetObjectReference.Create(this);
+        var started = await this.JS.InvokeAsync<UploadStart[]>("csspUploader.start", this._ref, targetId.ToString(), folder,
+            inputElementId, false, this._owner);
+        foreach (var s in started ?? Array.Empty<UploadStart>())
+        {
+            var item = this._items.FirstOrDefault(i => i.Id == s.Id);
+            if (item is null)
+            {
+                this._items.Add(new UploadItem(s.Id, s.Name, targetId, folder, s.Size));
+            }
+            else
+            {
+                item.Message = null;
+            }
+        }
+        this.StateHasChanged();
+    }
+
+    [JSInvokable]
+    public Task OnProgress(string id, string fileName, long sent, long total) => this.UpdateAsync(id, item =>
+    {
+        item.Sent = sent;
+        item.Size = total;
+    });
+
+    [JSInvokable]
+    public Task OnStatus(string id, string status, string? message) => this.UpdateAsync(id, item =>
+    {
+        item.Status = status;
+        item.Message = message;
+    });
+
+    [JSInvokable]
+    public async Task OnFileDone(string id, string fileName, bool ok, string? message)
+    {
+        var item = this.Find(id);
+        if (item is null) return;
+        item.Status = ok ? UploadStatusNames.Done : UploadStatusNames.Failed;
+        item.Message = message;
+        if (ok) item.Sent = item.Size;
+        await this.InvokeAsync(this.StateHasChanged);
+        if (ok) await this.OnUploaded.InvokeAsync(item);
+    }
+
+    [JSInvokable]
+    public Task OnConflict(string id, string fileName)
+    {
+        var item = this.Find(id);
+        if (item is null) return Task.CompletedTask;
+        item.Status = UploadStatusNames.Conflict;
+        this.AskOverwrite(item);
+        return this.InvokeAsync(this.StateHasChanged);
+    }
+
+    [JSInvokable]
+    public Task OnDenied(string id) => this.OnAccessDenied.InvokeAsync();
+
+    private UploadItem? Find(string id) => this._items.FirstOrDefault(i => i.Id == id);
+
+    private Task UpdateAsync(string id, Action<UploadItem> change)
+    {
+        var item = this.Find(id);
+        if (item is null) return Task.CompletedTask;
+        change(item);
+        return this.InvokeAsync(this.StateHasChanged);
+    }
+
+    private void AskOverwrite(UploadItem item)
+    {
+        if (this._conflict is null) this._conflict = item;
+        else if (this._conflict != item && !this._conflicts.Contains(item)) this._conflicts.Enqueue(item);
+    }
+
+    private void NextConflict() =>
+        this._conflict = this._conflicts.Count > 0 ? this._conflicts.Dequeue() : null;
+
+    private async Task ConfirmOverwriteAsync()
+    {
+        var item = this._conflict;
+        this.NextConflict();
+        if (item is null) return;
+        item.Message = null;
+        await this.CallAsync("csspUploader.overwrite", item.Id);
+    }
+
+    private async Task SkipOverwriteAsync()
+    {
+        var item = this._conflict;
+        this.NextConflict();
+        if (item is null) return;
+        item.Status = UploadStatusNames.Failed;
+        item.Message = SkippedMessage;
+        await this.CallAsync("csspUploader.forget", item.Id);
+    }
+
+    private Task PauseAsync(UploadItem item) => this.CallAsync("csspUploader.pause", item.Id);
+
+    private Task ResumeAsync(UploadItem item) => this.CallAsync("csspUploader.resume", item.Id);
+
+    private async Task CancelAsync(UploadItem item)
+    {
+        this._items.Remove(item);
+        if (this._conflict == item) this.NextConflict();
+        await this.CallAsync("csspUploader.cancel", item.Id);
+    }
+
+    private async Task ClearFinishedAsync()
+    {
+        foreach (var item in this._items.Where(i => i.IsFinished).ToList())
+        {
+            this._items.Remove(item);
+            await this.CallAsync("csspUploader.forget", item.Id);
+        }
+    }
+
+    private async Task CallAsync(string identifier, string id)
+    {
+        try
+        {
+            await this.JS.InvokeVoidAsync(identifier, id);
+        }
+        catch (JSDisconnectedException)
+        {
+        }
+    }
+
+    private async Task OnBeforeNavigationAsync(LocationChangingContext context)
+    {
+        if (!this.HasActive) return;
+        var relative = this.Nav.ToBaseRelativePath(context.TargetLocation);
+        if (relative.StartsWith("files/", StringComparison.OrdinalIgnoreCase)) return;
+        try
+        {
+            if (!await this.JS.InvokeAsync<bool>("confirm", LeaveWarning))
+                context.PreventNavigation();
+        }
+        catch (JSDisconnectedException)
+        {
+        }
+    }
+
+    private static string FillModifier(UploadItem item) => item.Status switch
+    {
+        UploadStatusNames.Done => "upload-panel__fill--done",
+        UploadStatusNames.Failed or UploadStatusNames.Conflict => "upload-panel__fill--failed",
+        UploadStatusNames.Paused or UploadStatusNames.Interrupted or UploadStatusNames.Waiting => "upload-panel__fill--held",
+        _ => "",
+    };
+
+    private static string StatusModifier(UploadItem item) => item.Status switch
+    {
+        UploadStatusNames.Done => "upload-panel__status--done",
+        UploadStatusNames.Failed or UploadStatusNames.Conflict => "upload-panel__status--failed",
+        UploadStatusNames.Interrupted or UploadStatusNames.Waiting => "upload-panel__status--held",
+        _ => "",
+    };
+
+    public async ValueTask DisposeAsync()
+    {
+        if (this._ref is null) return;
+        try
+        {
+            await this.JS.InvokeVoidAsync("csspUploader.detach", this._owner);
+        }
+        catch (JSDisconnectedException)
+        {
+        }
+        this._ref.Dispose();
+    }
+}

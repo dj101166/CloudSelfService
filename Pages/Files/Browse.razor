@@ -1,0 +1,560 @@
+@page "/files/{TargetId:guid}/{*Path}"
+@attribute [Authorize]
+@inject StorageAccessService Access
+@inject CurrentUser CurrentUser
+@inject PageAuditContext Audit
+@inject IJSRuntime JS
+@inject ILogger<Browse> Logger
+@using CloudSelfService.Models
+@using CloudSelfService.Services.Access
+@using CloudSelfService.Services.Files
+@using CloudSelfService.Services.Identity
+@using CloudSelfService.Services.Storage
+
+@*
+    One folder of one share or container. Every action goes through StorageAccessService, which re-checks access on
+    the call; the level held here only decides which buttons to show. A target this user cannot reach renders Access
+    Denied in place - never a navigation, which after an await crashes the host (see NotAuthorizedRouting).
+
+    Downloads are plain links to /api/files/.../download and uploads go to /api/uploads from uploader.js, so file
+    bytes never pass through the circuit.
+*@
+
+<PageTitle>@this.TitleText — Advanced Cloud Self Service</PageTitle>
+
+@if (this._denied)
+{
+    <AccessDeniedContent />
+}
+else if (this._target is null)
+{
+    @if (this._alert is not null)
+    {
+        <h1 class="page-title">Files</h1>
+        <div class="alert @this._alert.Css" role="alert" data-testid="alert">@this._alert.Text</div>
+    }
+}
+else
+{
+    <div class="page-head">
+        <div class="browse__heading">
+            <nav class="browse__crumbs" aria-label="Folder path" data-testid="browse-breadcrumb">
+                <a class="browse__crumb" href="">Files</a>
+                <span class="browse__sep" aria-hidden="true">›</span>
+                @if (this._folder.Length == 0)
+                {
+                    <span class="browse__crumb browse__crumb--current" aria-current="page">@this.TargetName</span>
+                }
+                else
+                {
+                    <a class="browse__crumb" href="@FileDisplay.BrowseHref(this.TargetId, "")">@this.TargetName</a>
+                }
+                @{ var crumbs = FileDisplay.Breadcrumbs(this._folder); }
+                @for (var i = 0; i < crumbs.Count; i++)
+                {
+                    var crumb = crumbs[i];
+                    <span class="browse__sep" aria-hidden="true">›</span>
+                    @if (i == crumbs.Count - 1)
+                    {
+                        <span class="browse__crumb browse__crumb--current" aria-current="page">@crumb.Label</span>
+                    }
+                    else
+                    {
+                        <a class="browse__crumb" href="@FileDisplay.BrowseHref(this.TargetId, crumb.Path)">@crumb.Label</a>
+                    }
+                }
+            </nav>
+            <h1 class="page-title browse__title">@this.FolderName</h1>
+            <div class="u-row u-row--wrap browse__badges">
+                <span class="badge badge--muted">@KindLabel(this._target.Kind)</span>
+                <span class="badge @LevelBadge(this._level)" data-testid="browse-level">@this._level</span>
+            </div>
+        </div>
+        <div class="page-head__actions" data-testid="browse-actions">
+            <button type="button" class="btn btn--icon" data-testid="action-refresh" title="Refresh" aria-label="Refresh"
+                    disabled="@this._loading" @onclick="this.RefreshAsync">
+                <Icon Name="refresh" />
+            </button>
+            @if (this.CanContribute)
+            {
+                <button type="button" class="btn btn--secondary" data-testid="action-new-folder" @onclick="this.OpenNewFolder">
+                    <Icon Name="plus" /> New folder
+                </button>
+                <span class="browse__upload">
+                    <input type="file" multiple id="@UploadInputId" class="browse__file-input" data-testid="upload-input"
+                           aria-label="Choose files to upload" @onchange="this.OnFilesChosenAsync" />
+                    <label for="@UploadInputId" class="btn btn--primary" data-testid="action-upload">
+                        <Icon Name="upload" /> Upload
+                    </label>
+                </span>
+            }
+        </div>
+    </div>
+
+    @if (this._alert is not null)
+    {
+        <div class="alert @this._alert.Css browse__alert" role="@(this._alert.IsError ? "alert" : "status")" data-testid="alert">
+            <span>@this._alert.Text</span>
+            <button type="button" class="btn btn--icon btn--sm browse__alert-close" aria-label="Dismiss" data-testid="alert-dismiss"
+                    @onclick="() => this._alert = null">
+                <Icon Name="close" />
+            </button>
+        </div>
+    }
+
+    <UploadPanel @ref="this._uploads" OnUploaded="this.OnUploadedAsync" OnAccessDenied="this.OnUploadDeniedAsync" />
+
+    <div id="@DropZoneId" class="card browse__table-card @(this.CanContribute ? "browse__drop" : "")" data-testid="browse-table">
+        @if (this.CanContribute)
+        {
+            <p class="browse__drop-hint u-subtle u-small">Drop files here to upload them to this folder.</p>
+        }
+        <div class="table-wrap">
+            <table class="table browse__table">
+                <thead>
+                    <tr>
+                        <th scope="col">Name</th>
+                        <th scope="col" class="table__num browse__col-size">Size</th>
+                        <th scope="col" class="browse__col-modified">Modified</th>
+                        <th scope="col" class="browse__col-actions"><span class="u-sr-only">Actions</span></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @if (this._loading && this._items.Count == 0)
+                    {
+                        <tr><td colspan="4" class="table__empty"><span class="spinner spinner--sm"></span> Loading…</td></tr>
+                    }
+                    else if (this._items.Count == 0)
+                    {
+                        <tr><td colspan="4" class="table__empty" data-testid="browse-empty">This folder is empty.</td></tr>
+                    }
+                    @foreach (var item in this._items)
+                    {
+                        var shown = StoragePath.DisplayName(item.Name);
+                        <tr data-testid="browse-row" data-kind="@(item.IsFolder ? "folder" : "file")" data-name="@shown" @key="item.Path">
+                            <td class="browse__name">
+                                @if (item.IsFolder)
+                                {
+                                    <a class="browse__link" href="@FileDisplay.BrowseHref(this.TargetId, item.Path)" data-testid="browse-folder">
+                                        <Icon Name="folder" />
+                                        <span class="browse__label">@shown</span>
+                                    </a>
+                                }
+                                else
+                                {
+                                    <span class="browse__file">
+                                        <Icon Name="file" />
+                                        <span class="browse__label">@shown</span>
+                                    </span>
+                                }
+                            </td>
+                            <td class="table__num browse__col-size u-nowrap">@FileDisplay.Size(item.Size)</td>
+                            <td class="browse__col-modified u-nowrap u-muted">@FileDisplay.Modified(item.LastModified, this._zone)</td>
+                            <td class="browse__col-actions">
+                                <span class="browse__actions">
+                                    @if (!item.IsFolder)
+                                    {
+                                        <a class="btn btn--icon btn--sm" href="@FileDisplay.DownloadHref(this.TargetId, item.Path)" download
+                                           data-testid="action-download" title="Download" aria-label="Download @shown">
+                                            <Icon Name="download" />
+                                        </a>
+                                    }
+                                    @if (this.CanContribute)
+                                    {
+                                        <button type="button" class="btn btn--icon btn--sm" data-testid="action-rename"
+                                                title="Rename or move" aria-label="Rename or move @shown" @onclick="() => this.OpenMove(item)">
+                                            <Icon Name="pencil" />
+                                        </button>
+                                    }
+                                    @if (this.CanDelete)
+                                    {
+                                        <button type="button" class="btn btn--icon btn--sm browse__delete" data-testid="action-delete"
+                                                title="Delete" aria-label="Delete @shown" @onclick="() => this.OpenDelete(item)">
+                                            <Icon Name="trash" />
+                                        </button>
+                                    }
+                                </span>
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+        @if (this._continuation is not null)
+        {
+            <div class="browse__more">
+                <button type="button" class="btn btn--secondary" data-testid="load-more" disabled="@this._loading" @onclick="this.LoadMoreAsync">
+                    @if (this._loading)
+                    {
+                        <span class="spinner spinner--sm"></span>
+                    }
+                    Load more
+                </button>
+            </div>
+        }
+    </div>
+}
+
+<NameDialog IsOpen="this._nameMode != NameMode.None"
+            Title="@(this._nameMode == NameMode.NewFolder ? "New folder" : "Rename or move")"
+            Label="@(this._nameMode == NameMode.NewFolder ? "Folder name" : "New path")"
+            Hint="@(this._nameMode == NameMode.Move ? MoveHint : null)"
+            InitialValue="@(this._nameMode == NameMode.Move ? this._subject?.Path ?? "" : "")"
+            ConfirmText="@(this._nameMode == NameMode.NewFolder ? "Create" : "Save")"
+            Error="@this._dialogError"
+            Busy="this._busy"
+            OnSubmit="this.SubmitNameAsync"
+            OnCancel="this.CloseDialogs" />
+
+<ConfirmDialog IsOpen="this._deleting is not null"
+               Title="@(this._deleting?.IsFolder == true ? "Delete folder" : "Delete file")"
+               Message="@this.DeleteMessage"
+               ConfirmText="Delete"
+               Danger="true"
+               RequireText="@(this._deleting?.IsFolder == true ? StoragePath.DisplayName(this._deleting.Name) : null)"
+               Error="@this._dialogError"
+               Busy="this._busy"
+               OnConfirm="this.ConfirmDeleteAsync"
+               OnCancel="this.CloseDialogs" />
+
+@code {
+    public const string StoreUnavailableMessage = "The service is temporarily unavailable.";
+    private const string UploadInputId = "upload-input";
+    private const string DropZoneId = "browse-drop";
+    private const string MoveHint = "The path from the top of the share. Change only the name to rename it; change the folders to move it. Folders that don't exist yet are created.";
+
+    [Parameter] public Guid TargetId { get; set; }
+    [Parameter] public string? Path { get; set; }
+
+    private enum NameMode { None, NewFolder, Move }
+
+    private sealed record Alert(string Text, string Css, bool IsError)
+    {
+        public static Alert For(AccessOutcome outcome, string? message) => outcome switch
+        {
+            AccessOutcome.Ok => new(message ?? "Done.", "alert--success", false),
+            AccessOutcome.Unavailable or AccessOutcome.Busy or AccessOutcome.Conflict =>
+                new(message ?? StorageErrorMapper.UnreachableMessage, "alert--warning", true),
+            _ => new(message ?? "That didn't work.", "alert--danger", true),
+        };
+
+        public static Alert StoreDown() => new(StoreUnavailableMessage, "alert--warning", true);
+    }
+
+    private UploadPanel? _uploads;
+    private StorageTarget? _target;
+    private AccessLevel _level;
+    private bool _denied;
+    private string _folder = "";
+    private (Guid Target, string? Path)? _loadedFor;
+    private readonly List<StorageItem> _items = new();
+    private string? _continuation;
+    private bool _loading;
+    private bool _busy;
+    private Alert? _alert;
+    private TimeZoneInfo? _zone;
+    private bool _dropAttached;
+
+    private NameMode _nameMode;
+    private StorageItem? _subject;
+    private StorageItem? _deleting;
+    private string? _dialogError;
+
+    private bool CanContribute => this._level >= AccessLevel.Contribute;
+    private bool CanDelete => this._level >= AccessLevel.Full;
+
+    private string TargetName => StoragePath.DisplayName(this._target?.DisplayName ?? "");
+
+    private string FolderName => this._folder.Length == 0 ? this.TargetName : StoragePath.DisplayName(StoragePath.Leaf(this._folder));
+
+    private string TitleText => this._target is null ? "Files" : this.FolderName;
+
+    private string DeleteMessage => this._deleting is null
+        ? ""
+        : this._deleting.IsFolder
+            ? $"Delete the folder {StoragePath.DisplayName(this._deleting.Name)} and everything in it? This can't be undone."
+            : $"Delete {StoragePath.DisplayName(this._deleting.Name)}? This can't be undone.";
+
+    private static string KindLabel(StorageKind kind) => kind == StorageKind.FileShare ? "File share" : "Blob container";
+
+    private static string LevelBadge(AccessLevel level) => level switch
+    {
+        AccessLevel.Full => "badge--accent",
+        AccessLevel.Contribute => "badge--info",
+        _ => "badge--muted",
+    };
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (this._loadedFor == (this.TargetId, this.Path)) return;
+        var targetChanged = this._loadedFor?.Target != this.TargetId;
+        this._loadedFor = (this.TargetId, this.Path);
+        this._alert = null;
+        this.CloseDialogs();
+        if (!StoragePath.TryNormalizePath(this.Path, out var folder, out var error))
+        {
+            this._items.Clear();
+            this._continuation = null;
+            this._alert = new Alert(error ?? "That path isn't valid.", "alert--danger", true);
+            return;
+        }
+        this._folder = folder;
+        if (targetChanged || this._target is null)
+        {
+            this._target = null;
+            this._denied = false;
+        }
+        await this.LoadAsync(reset: true);
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            try
+            {
+                var tz = await this.JS.InvokeAsync<BrowserTimeZone>("cssp.timeZone");
+                this._zone = FileDisplay.ResolveZone(tz.Id, tz.Offset);
+                this.StateHasChanged();
+            }
+            catch (JSDisconnectedException)
+            {
+            }
+            catch (JSException ex)
+            {
+                this.Logger.LogDebug(ex, "Could not read the browser time zone; showing UTC.");
+            }
+        }
+
+        if (this.CanContribute && this._target is not null && !this._dropAttached)
+        {
+            this._dropAttached = true;
+            try
+            {
+                await this.JS.InvokeVoidAsync("csspUploader.attachDropZone", DropZoneId, UploadInputId);
+            }
+            catch (JSDisconnectedException)
+            {
+            }
+        }
+        else if (!this.CanContribute || this._target is null)
+        {
+            // The zone element is re-created when the action set comes back, so it needs its listeners again.
+            this._dropAttached = false;
+        }
+    }
+
+    /// <summary>The first page (reset) or the next one. Store failures show an alert; they never end the circuit.</summary>
+    private async Task LoadAsync(bool reset)
+    {
+        this._loading = true;
+        try
+        {
+            var user = await this.CurrentUser.GetAsync();
+            if (user is null) return;
+
+            var result = await this.Access.ListAsync(user.Id, this.TargetId, this._folder, reset ? null : this._continuation,
+                this.Audit.Next());
+            if (result.Outcome == AccessOutcome.Denied)
+            {
+                await this.RefreshLevelAsync(user.Id);
+                if (this._level == AccessLevel.None) return;
+                this._alert = Alert.For(result.Outcome, result.Message);
+                return;
+            }
+            if (this._target is null)
+            {
+                await this.RefreshLevelAsync(user.Id);
+                if (this._denied) return;
+            }
+            if (result.Outcome != AccessOutcome.Ok)
+            {
+                if (reset)
+                {
+                    this._items.Clear();
+                    this._continuation = null;
+                }
+                this._alert = Alert.For(result.Outcome, result.Message);
+                return;
+            }
+
+            if (reset) this._items.Clear();
+            var listing = result.Value!;
+            var known = this._items.Select(i => i.Path).ToHashSet(StringComparer.Ordinal);
+            this._items.AddRange(listing.Items.Where(i => known.Add(i.Path)));
+            var sorted = StoragePaths.SortPage(this._items);
+            this._items.Clear();
+            this._items.AddRange(sorted);
+            this._continuation = listing.ContinuationToken;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            this.Logger.LogError(ex, "Listing target {TargetId} folder {Folder} failed.", this.TargetId, this._folder);
+            this._alert = Alert.StoreDown();
+        }
+        finally
+        {
+            this._loading = false;
+        }
+    }
+
+    /// <summary>Re-reads what this user may do here. No reachable level renders Access Denied in place.</summary>
+    private async Task RefreshLevelAsync(Guid userId)
+    {
+        var reachable = (await this.Access.ListReachableTargetsAsync(userId)).FirstOrDefault(r => r.Target.Id == this.TargetId);
+        if (reachable is null)
+        {
+            this._denied = true;
+            this._target = null;
+            this._level = AccessLevel.None;
+            this._items.Clear();
+            this._continuation = null;
+            this.CloseDialogs();
+            return;
+        }
+        this._denied = false;
+        this._target = reachable.Target;
+        this._level = reachable.Level;
+    }
+
+    private Task RefreshAsync()
+    {
+        this._alert = null;
+        return this.LoadAsync(reset: true);
+    }
+
+    private Task LoadMoreAsync() => this._continuation is null ? Task.CompletedTask : this.LoadAsync(reset: false);
+
+    private void OpenNewFolder()
+    {
+        this._dialogError = null;
+        this._subject = null;
+        this._nameMode = NameMode.NewFolder;
+    }
+
+    private void OpenMove(StorageItem item)
+    {
+        this._dialogError = null;
+        this._subject = item;
+        this._nameMode = NameMode.Move;
+    }
+
+    private void OpenDelete(StorageItem item)
+    {
+        this._dialogError = null;
+        this._deleting = item;
+    }
+
+    private void CloseDialogs()
+    {
+        if (this._busy) return;
+        this._nameMode = NameMode.None;
+        this._subject = null;
+        this._deleting = null;
+        this._dialogError = null;
+    }
+
+    private async Task SubmitNameAsync(string value)
+    {
+        if (this._nameMode == NameMode.NewFolder)
+        {
+            var name = value.Trim();
+            await this.RunAsync((user, ctx) => this.Access.CreateFolderAsync(user, this.TargetId, this._folder, name, ctx),
+                $"Created folder {StoragePath.DisplayName(name)}.");
+        }
+        else if (this._nameMode == NameMode.Move && this._subject is { } item)
+        {
+            var to = FileDisplay.CleanTypedPath(value);
+            var done = FileDisplay.IsRename(item.Path, to)
+                ? $"Renamed {StoragePath.DisplayName(item.Name)} to {StoragePath.DisplayName(StoragePath.Leaf(to))}."
+                : $"Moved {StoragePath.DisplayName(item.Name)} to {StoragePath.DisplayName(to)}.";
+            await this.RunAsync((user, ctx) => this.Access.MoveAsync(user, this.TargetId, item.Path, to, ctx), done);
+        }
+    }
+
+    private async Task ConfirmDeleteAsync()
+    {
+        if (this._deleting is not { } item) return;
+        await this.RunAsync((user, ctx) => this.Access.DeleteAsync(user, this.TargetId, item.Path, ctx),
+            $"Deleted {StoragePath.DisplayName(item.Name)}.");
+    }
+
+    /// <summary>
+    /// Runs one change. Ok closes the dialog, reloads and confirms; a refusal the user can fix (a bad or taken name)
+    /// keeps the dialog open with the message; anything else closes it and shows the alert.
+    /// </summary>
+    private async Task RunAsync(Func<Guid, AuditContext, Task<AccessResult>> action, string successText)
+    {
+        if (this._busy) return;
+        this._busy = true;
+        this._dialogError = null;
+        this._alert = null;
+        AccessResult? result = null;
+        try
+        {
+            var user = await this.CurrentUser.GetAsync();
+            if (user is null) return;
+            result = await action(user.Id, this.Audit.Next());
+            if (result.Outcome == AccessOutcome.Denied)
+                await this.RefreshLevelAsync(user.Id);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            this.Logger.LogError(ex, "A file action on target {TargetId} failed.", this.TargetId);
+            this._busy = false;
+            this.CloseDialogs();
+            this._alert = Alert.StoreDown();
+            return;
+        }
+        finally
+        {
+            this._busy = false;
+        }
+
+        if (result is null) return;
+        if (result.Outcome is AccessOutcome.Invalid or AccessOutcome.AlreadyExists)
+        {
+            this._dialogError = result.Message;
+            return;
+        }
+
+        this.CloseDialogs();
+        this._alert = Alert.For(result.Outcome, result.Outcome == AccessOutcome.Ok ? successText : result.Message);
+        if (!this._denied)
+            await this.LoadAsync(reset: true);
+    }
+
+    private async Task OnFilesChosenAsync(ChangeEventArgs _)
+    {
+        if (this._uploads is null || !this.CanContribute) return;
+        try
+        {
+            await this._uploads.StartAsync(this.TargetId, this._folder, UploadInputId);
+        }
+        catch (JSDisconnectedException)
+        {
+        }
+    }
+
+    private async Task OnUploadedAsync(UploadItem item)
+    {
+        if (item.TargetId == this.TargetId && item.Folder == this._folder && !this._loading)
+            await this.LoadAsync(reset: true);
+        this.StateHasChanged();
+    }
+
+    private async Task OnUploadDeniedAsync()
+    {
+        try
+        {
+            var user = await this.CurrentUser.GetAsync();
+            if (user is not null) await this.RefreshLevelAsync(user.Id);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            this.Logger.LogError(ex, "Re-reading the access level for target {TargetId} failed.", this.TargetId);
+            this._alert = Alert.StoreDown();
+        }
+        this.StateHasChanged();
+    }
+}

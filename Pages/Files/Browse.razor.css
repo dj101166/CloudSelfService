@@ -1,0 +1,109 @@
+/*
+ * The file browser. Every colour reads a token.
+ *
+ * Icon is a child component, so its <svg> carries Icon's scope attribute rather than this file's; rules reaching it go
+ * through ::deep from an element this component owns.
+ */
+
+/* A basis wide enough that on a phone the actions wrap below the heading instead of squeezing it to a word per line. */
+.browse__heading { min-width: 0; flex: 1 1 280px; }
+
+.browse__crumbs {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 6px;
+    font-size: 12.5px;
+    color: var(--text-tertiary);
+    margin-bottom: 4px;
+    min-width: 0;
+}
+
+.browse__crumb {
+    color: var(--text-secondary);
+    max-width: 28ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+a.browse__crumb:hover { color: var(--accent-hover); }
+
+.browse__crumb--current { color: var(--text-primary); font-weight: var(--weight-strong); }
+
+.browse__sep { color: var(--text-tertiary); }
+
+.browse__title { overflow-wrap: anywhere; }
+
+.browse__badges { gap: 6px; margin-top: 6px; }
+
+/*
+ * The file input is visually hidden but stays in the tab order, so a keyboard user reaches Upload; its <label> is the
+ * visible button and borrows the input's focus ring.
+ */
+.browse__upload { position: relative; display: inline-flex; }
+
+.browse__file-input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+}
+
+.browse__file-input:focus-visible + .btn { box-shadow: 0 0 0 3px var(--primary-ring); }
+
+.browse__alert { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+
+.browse__alert-close { color: inherit; border-color: transparent; }
+
+.browse__table-card { padding: 0; overflow: hidden; }
+
+.browse__drop { transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease; }
+
+.browse__drop.is-dragover {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+    box-shadow: 0 0 0 3px var(--accent-ring);
+}
+
+.browse__drop-hint { margin: 0; padding: 10px 14px; border-bottom: 1px dashed var(--border); }
+
+.browse__table td { vertical-align: middle; }
+
+.browse__name { min-width: 180px; }
+
+.browse__link,
+.browse__file {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    max-width: 100%;
+}
+
+.browse__link { color: var(--text-primary); font-weight: var(--weight-strong); }
+.browse__link:hover { color: var(--accent); }
+
+.browse__link ::deep .icon { color: var(--accent); }
+.browse__file ::deep .icon { color: var(--text-tertiary); }
+
+.browse__label { overflow-wrap: anywhere; }
+
+.browse__col-size { width: 1%; }
+.browse__col-modified { width: 1%; }
+.browse__col-actions { width: 1%; text-align: right; }
+
+.browse__actions { display: inline-flex; align-items: center; gap: 6px; justify-content: flex-end; }
+
+.browse__delete:hover:not(:disabled) { color: var(--danger); border-color: var(--danger); background: var(--danger-soft); }
+
+.browse__more { display: flex; justify-content: center; padding: 12px; border-top: 1px solid var(--border-subtle); }
+
+/* On a phone the modified column goes first; name, size and actions still fit without a sideways scroll. */
+@media (max-width: 640px) {
+    .browse__col-modified { display: none; }
+    .browse__name { min-width: 0; }
+    .browse__crumb { max-width: 16ch; }
+}

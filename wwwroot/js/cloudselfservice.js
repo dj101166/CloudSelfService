@@ -71,6 +71,19 @@ window.cssp = {
             ? (delta > 0 ? 0 : items.length - 1)
             : (current + delta + items.length) % items.length;
         items[next].focus();
+    },
+
+    // The browser's zone, so the file list can show modified times in local time. Offset is minutes EAST of UTC
+    // (the opposite sign to getTimezoneOffset), matching TimeSpan.
+    timeZone: function () {
+        var id = null;
+        try { id = Intl.DateTimeFormat().resolvedOptions().timeZone || null; } catch (e) { /* old browser */ }
+        return { id: id, offset: -new Date().getTimezoneOffset() };
+    },
+
+    openFilePicker: function (id) {
+        var el = document.getElementById(id);
+        if (el) { el.click(); }
     }
 };
 

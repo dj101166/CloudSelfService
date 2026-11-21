@@ -723,6 +723,12 @@ a.btn:hover { text-decoration: none; }
 
 .modal__actions { display: flex; justify-content: flex-end; gap: 8px; }
 
+/* ConfirmDialog and NameDialog wrap head, body and actions in one <form> so Enter submits; the form keeps the
+   .modal column layout rather than collapsing it into a block. */
+.dialog__form { display: flex; flex-direction: column; min-height: 0; }
+
+.dialog__message { margin: 0 0 12px; color: var(--text-primary); overflow-wrap: anywhere; }
+
 /* ---------- Spinner and loading ---------- */
 
 .spinner {
