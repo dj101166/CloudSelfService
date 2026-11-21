@@ -39,7 +39,7 @@ else
     <div class="page-head">
         <div class="browse__heading">
             <nav class="browse__crumbs" aria-label="Folder path" data-testid="browse-breadcrumb">
-                <a class="browse__crumb" href="">Files</a>
+                <a class="browse__crumb" href="" data-testid="browse-crumb">Files</a>
                 <span class="browse__sep" aria-hidden="true">›</span>
                 @if (this._folder.Length == 0)
                 {
@@ -47,7 +47,7 @@ else
                 }
                 else
                 {
-                    <a class="browse__crumb" href="@FileDisplay.BrowseHref(this.TargetId, "")">@this.TargetName</a>
+                    <a class="browse__crumb" href="@FileDisplay.BrowseHref(this.TargetId, "")" data-testid="browse-crumb">@this.TargetName</a>
                 }
                 @{ var crumbs = FileDisplay.Breadcrumbs(this._folder); }
                 @for (var i = 0; i < crumbs.Count; i++)
@@ -60,7 +60,7 @@ else
                     }
                     else
                     {
-                        <a class="browse__crumb" href="@FileDisplay.BrowseHref(this.TargetId, crumb.Path)">@crumb.Label</a>
+                        <a class="browse__crumb" href="@FileDisplay.BrowseHref(this.TargetId, crumb.Path)" data-testid="browse-crumb">@crumb.Label</a>
                     }
                 }
             </nav>
@@ -102,7 +102,8 @@ else
         </div>
     }
 
-    <UploadPanel @ref="this._uploads" OnUploaded="this.OnUploadedAsync" OnAccessDenied="this.OnUploadDeniedAsync" />
+    <UploadPanel @ref="this._uploads" OnUploaded="this.OnUploadedAsync" OnAccessDenied="this.OnUploadDeniedAsync"
+             OnScriptFailed="this.OnUploadScriptFailed" />
 
     <div id="@DropZoneId" class="card browse__table-card @(this.CanContribute ? "browse__drop" : "")" data-testid="browse-table">
         @if (this.CanContribute)
@@ -199,6 +200,7 @@ else
             Title="@(this._nameMode == NameMode.NewFolder ? "New folder" : "Rename or move")"
             Label="@(this._nameMode == NameMode.NewFolder ? "Folder name" : "New path")"
             Hint="@(this._nameMode == NameMode.Move ? MoveHint : null)"
+            ShownAs="@(this._nameMode == NameMode.Move ? this._subject?.Path : null)"
             InitialValue="@(this._nameMode == NameMode.Move ? this._subject?.Path ?? "" : "")"
             ConfirmText="@(this._nameMode == NameMode.NewFolder ? "Create" : "Save")"
             Error="@this._dialogError"
@@ -219,6 +221,7 @@ else
 
 @code {
     public const string StoreUnavailableMessage = "The service is temporarily unavailable.";
+    public const string UploaderFailedMessage = "The upload component failed to load. Refresh the page and try again.";
     private const string UploadInputId = "upload-input";
     private const string DropZoneId = "browse-drop";
     private const string MoveHint = "The path from the top of the share. Change only the name to rename it; change the folders to move it. Folders that don't exist yet are created.";
@@ -249,6 +252,7 @@ else
     private (Guid Target, string? Path)? _loadedFor;
     private readonly List<StorageItem> _items = new();
     private string? _continuation;
+    private int _pagesLoaded;
     private bool _loading;
     private bool _busy;
     private Alert? _alert;
@@ -336,12 +340,29 @@ else
             catch (JSDisconnectedException)
             {
             }
+            catch (Exception ex) when (ex is JSException or TaskCanceledException)
+            {
+                this.UploaderFailed(ex);
+                this.StateHasChanged();
+            }
         }
         else if (!this.CanContribute || this._target is null)
         {
             // The zone element is re-created when the action set comes back, so it needs its listeners again.
             this._dropAttached = false;
         }
+    }
+
+    /// <summary>
+    /// Re-reads the folder up to as many pages as the user had loaded, so a finished upload appears wherever it sorts
+    /// without collapsing the list back to page 1.
+    /// </summary>
+    private async Task ReloadLoadedPagesAsync()
+    {
+        var pages = Math.Max(1, this._pagesLoaded);
+        await this.LoadAsync(reset: true);
+        while (--pages > 0 && this._continuation is not null && this._alert is null && !this._denied)
+            await this.LoadAsync(reset: false);
     }
 
     /// <summary>The first page (reset) or the next one. Store failures show an alert; they never end the circuit.</summary>
@@ -351,12 +372,21 @@ else
         try
         {
             var user = await this.CurrentUser.GetAsync();
-            if (user is null) return;
+            if (user is null)
+            {
+                this._alert = Alert.StoreDown();
+                return;
+            }
 
             var result = await this.Access.ListAsync(user.Id, this.TargetId, this._folder, reset ? null : this._continuation,
                 this.Audit.Next());
             if (result.Outcome == AccessOutcome.Denied)
             {
+                if (reset)
+                {
+                    this._items.Clear();
+                    this._continuation = null;
+                }
                 await this.RefreshLevelAsync(user.Id);
                 if (this._level == AccessLevel.None) return;
                 this._alert = Alert.For(result.Outcome, result.Message);
@@ -386,6 +416,7 @@ else
             this._items.Clear();
             this._items.AddRange(sorted);
             this._continuation = listing.ContinuationToken;
+            this._pagesLoaded = reset ? 1 : this._pagesLoaded + 1;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -493,7 +524,13 @@ else
         try
         {
             var user = await this.CurrentUser.GetAsync();
-            if (user is null) return;
+            if (user is null)
+            {
+                this._busy = false;
+                this.CloseDialogs();
+                this._alert = Alert.StoreDown();
+                return;
+            }
             result = await action(user.Id, this.Audit.Next());
             if (result.Outcome == AccessOutcome.Denied)
                 await this.RefreshLevelAsync(user.Id);
@@ -534,14 +571,27 @@ else
         catch (JSDisconnectedException)
         {
         }
+        catch (Exception ex) when (ex is JSException or TaskCanceledException)
+        {
+            this.UploaderFailed(ex);
+        }
+    }
+
+    private void UploaderFailed(Exception ex)
+    {
+        this.Logger.LogWarning(ex, "The upload script failed on target {TargetId}.", this.TargetId);
+        this._alert = new Alert(UploaderFailedMessage, "alert--warning", true);
     }
 
     private async Task OnUploadedAsync(UploadItem item)
     {
         if (item.TargetId == this.TargetId && item.Folder == this._folder && !this._loading)
-            await this.LoadAsync(reset: true);
+            await this.ReloadLoadedPagesAsync();
         this.StateHasChanged();
     }
+
+    private void OnUploadScriptFailed() =>
+        this._alert = new Alert(UploaderFailedMessage, "alert--warning", true);
 
     private async Task OnUploadDeniedAsync()
     {

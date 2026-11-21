@@ -1,5 +1,6 @@
 @page "/help"
 @attribute [Authorize]
+@inject IConfiguration Config
 
 <PageTitle>Help — Advanced Cloud Self Service</PageTitle>
 
@@ -62,8 +63,15 @@
 
     <section class="card help__section" data-testid="help-support">
         <h2 class="card__title">Contacting Advanced support</h2>
-        <p class="help__note">Contact Advanced support through your usual support channel if you can't sign in, can't see
-            a share you expected, need a different access level, or an upload keeps failing. Tell us the email address you
-            sign in with, the share and folder, and the time it happened, so we can find it in our logs.</p>
+        <p class="help__note">Contact <strong data-testid="support-contact">@this.SupportContact</strong> if you can't sign
+            in, can't see a share you expected, need a different access level, or an upload keeps failing. Tell us the email
+            address you sign in with, the share and folder, and the time it happened, so we can find it in our logs.</p>
     </section>
 </div>
+
+@code {
+    public const string DefaultSupportContact = "your Advanced account team";
+
+    private string SupportContact =>
+        this.Config["Support:Contact"] is { Length: > 0 } contact && !string.IsNullOrWhiteSpace(contact) ? contact : DefaultSupportContact;
+}

@@ -1,5 +1,6 @@
 @inject IConfiguration Config
 @inject IWebHostEnvironment Env
+@inject CloudSelfService.Services.Files.PageAuditContext PageAudit
 
 <!DOCTYPE html>
 <html lang="en">
@@ -93,6 +94,10 @@
     // still work when the circuit is broken.
     [CascadingParameter]
     private HttpContext? HttpContext { get; set; }
+
+    // Runs during the page request, the only place the client's address is visible; the value reaches the circuit as
+    // persisted component state (see PageAuditContext).
+    protected override void OnInitialized() => this.PageAudit.Capture(this.HttpContext);
 
     private IComponentRenderMode? RenderModeForPage =>
         HttpContext?.AcceptsInteractiveRouting() == true ? InteractiveServer : null;

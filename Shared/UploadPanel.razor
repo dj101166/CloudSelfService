@@ -1,6 +1,7 @@
 @implements IAsyncDisposable
 @inject IJSRuntime JS
 @inject NavigationManager Nav
+@inject ILogger<UploadPanel> Logger
 @using CloudSelfService.Services.Access
 @using CloudSelfService.Services.Files
 
@@ -86,6 +87,9 @@
     /// <summary>Raised when a file finishes uploading, so the page can refresh the folder it landed in.</summary>
     [Parameter] public EventCallback<UploadItem> OnUploaded { get; set; }
 
+    /// <summary>Raised when a call into uploader.js fails, so the page can say the upload component is broken.</summary>
+    [Parameter] public EventCallback OnScriptFailed { get; set; }
+
     /// <summary>Raised when the server refuses an upload as not allowed, so the page can re-read the access level.</summary>
     [Parameter] public EventCallback OnAccessDenied { get; set; }
 
@@ -102,7 +106,7 @@
     {
         this._ref ??= DotNetObjectReference.Create(this);
         var started = await this.JS.InvokeAsync<UploadStart[]>("csspUploader.start", this._ref, targetId.ToString(), folder,
-            inputElementId, false, this._owner);
+            inputElementId, false, this._owner, CloudSelfService.Endpoints.UploadEndpoints.AntiforgeryMessage);
         foreach (var s in started ?? Array.Empty<UploadStart>())
         {
             var item = this._items.FirstOrDefault(i => i.Id == s.Id);
@@ -224,6 +228,11 @@
         catch (JSDisconnectedException)
         {
         }
+        catch (Exception ex) when (ex is JSException or TaskCanceledException)
+        {
+            this.Logger.LogWarning(ex, "Upload script call {Identifier} failed.", identifier);
+            await this.OnScriptFailed.InvokeAsync();
+        }
     }
 
     private async Task OnBeforeNavigationAsync(LocationChangingContext context)
@@ -238,6 +247,10 @@
         }
         catch (JSDisconnectedException)
         {
+        }
+        catch (Exception ex) when (ex is JSException or TaskCanceledException)
+        {
+            this.Logger.LogWarning(ex, "The leave-page confirmation failed; navigating anyway.");
         }
     }
 

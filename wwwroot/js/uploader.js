@@ -11,6 +11,7 @@
     var DEFAULT_RETRY_AFTER_SECONDS = 5;
     var MAX_RESTARTS = 3;
     var PROGRESS_INTERVAL_MS = 250;
+    var ACTIVITY_INTERVAL_MS = 60000;
 
     var SESSION_EXPIRED = 'Your session has expired. Sign in again, then select the file again to resume.';
     var INTERRUPTED = 'The connection dropped. Select Resume, or select the same file again, to carry on where it stopped.';
@@ -24,6 +25,8 @@
     var tokenPromise = null;
     var dirty = {};
     var flushTimer = null;
+    var lastActivity = 0;
+    var antiforgeryMessage = null;
 
     function UploadError(kind, message, code, retryAfter) {
         this.kind = kind;
@@ -73,6 +76,17 @@
         notify(u, 'OnStatus', status, message || null);
     }
 
+    // session-guard.js signs out after a stretch with no mouse or keyboard input, which a multi-hour upload can outlast.
+    // While pieces are landing this counts as activity, at most once a minute. session-guard.js is shared by the whole
+    // suite and has no public hook, so this raises one of the events it already listens for; its handler resets the idle
+    // timer and slides the cookie through /keepalive.
+    function markActivity() {
+        var now = Date.now();
+        if (now - lastActivity < ACTIVITY_INTERVAL_MS) { return; }
+        lastActivity = now;
+        document.dispatchEvent(new Event('scroll'));
+    }
+
     function getToken() {
         if (!tokenPromise) {
             tokenPromise = fetch('/api/antiforgery', { credentials: 'same-origin', redirect: 'manual', cache: 'no-store' })
@@ -93,7 +107,19 @@
     }
 
     // Every API call goes through here, so each failure arrives as one UploadError whose kind says what to do next.
+    // A token the server no longer accepts (the antiforgery cookie was rotated, e.g. by signing in again in another tab)
+    // is fetched afresh and the call tried once more.
     function api(method, url, options, signal) {
+        return apiOnce(method, url, options, signal).catch(function (e) {
+            if (e instanceof UploadError && e.code === 'invalid' && antiforgeryMessage && e.message === antiforgeryMessage) {
+                tokenPromise = null;
+                return apiOnce(method, url, options, signal);
+            }
+            throw e;
+        });
+    }
+
+    function apiOnce(method, url, options, signal) {
         return getToken().then(function (token) {
             var headers = {};
             headers[token.header] = token.value;
@@ -206,6 +232,7 @@
             });
         }, signal).then(function () {
             u.sent += chunkLength(u, index);
+            markActivity();
             scheduleProgress(u);
         });
     }
@@ -370,8 +397,10 @@
 
     // ownerKey identifies the calling component across calls: Blazor hands JS a fresh wrapper for the same
     // DotNetObjectReference on every interop call, so the reference itself cannot be compared.
-    function start(dotnetRef, targetId, folder, inputElementId, overwrite, ownerKey) {
+    // antiforgeryRejectedMessage is UploadEndpoints.AntiforgeryMessage, so a stale token is told apart from other 400s.
+    function start(dotnetRef, targetId, folder, inputElementId, overwrite, ownerKey, antiforgeryRejectedMessage) {
         var owner = ownerKey || '';
+        if (antiforgeryRejectedMessage) { antiforgeryMessage = antiforgeryRejectedMessage; }
         var input = document.getElementById(inputElementId);
         if (!input || !input.files) { return []; }
         var files = Array.prototype.slice.call(input.files);

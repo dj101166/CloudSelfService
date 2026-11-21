@@ -58,6 +58,28 @@ public class UploaderScriptTests
     }
 
     [Fact]
+    public void Uploader_SignalsActivityToSessionGuard_AtMostOncePerMinute()
+    {
+        var js = Script();
+        Assert.Contains("ACTIVITY_INTERVAL_MS = 60000", js);
+        Assert.Contains("markActivity();", js);
+        // The event must be one session-guard.js listens for, or the idle timer never hears it.
+        var guard = File.ReadAllText(Path.Combine(Root(), "wwwroot", "js", "session-guard.js"));
+        Assert.Contains("new Event('scroll')", js);
+        Assert.Contains("\"scroll\"", guard);
+    }
+
+    [Fact]
+    public void Uploader_RefreshesAStaleAntiforgeryTokenOnce()
+    {
+        var js = Script();
+        Assert.Contains("e.message === antiforgeryMessage", js);
+        Assert.Contains("tokenPromise = null;", js);
+        var panel = File.ReadAllText(Path.Combine(Root(), "Shared", "UploadPanel.razor"));
+        Assert.Contains("UploadEndpoints.AntiforgeryMessage", panel);
+    }
+
+    [Fact]
     public void SparkMd5_IsVendoredWithItsLicence()
     {
         var lib = Path.Combine(Root(), "wwwroot", "lib", "spark-md5");

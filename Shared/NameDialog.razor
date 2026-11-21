@@ -18,6 +18,10 @@
                         <label class="label" for="name-dialog-input">@this.Label</label>
                         <input id="name-dialog-input" class="input" data-testid="name-input" autocomplete="off"
                                spellcheck="false" @bind="this._value" @bind:event="oninput" />
+                        @if (this.ShownAs is { } raw && CloudSelfService.Services.Access.StoragePath.DisplayName(raw) != raw)
+                        {
+                            <p class="hint" data-testid="name-shown-as">Currently shown as: @CloudSelfService.Services.Access.StoragePath.DisplayName(raw). This path contains invisible or direction-changing characters, shown as "_".</p>
+                        }
                         @if (!string.IsNullOrEmpty(this.Hint))
                         {
                             <p class="hint">@this.Hint</p>
@@ -43,6 +47,9 @@
     [Parameter] public string Title { get; set; } = "";
     [Parameter] public string Label { get; set; } = "Name";
     [Parameter] public string? Hint { get; set; }
+
+    /// <summary>The raw value being edited. When its sanitised form differs, the dialog shows that form so hidden characters are visible.</summary>
+    [Parameter] public string? ShownAs { get; set; }
     [Parameter] public string InitialValue { get; set; } = "";
     [Parameter] public string ConfirmText { get; set; } = "Save";
     [Parameter] public string? Error { get; set; }

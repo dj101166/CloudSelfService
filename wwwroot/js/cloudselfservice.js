@@ -79,11 +79,6 @@ window.cssp = {
         var id = null;
         try { id = Intl.DateTimeFormat().resolvedOptions().timeZone || null; } catch (e) { /* old browser */ }
         return { id: id, offset: -new Date().getTimezoneOffset() };
-    },
-
-    openFilePicker: function (id) {
-        var el = document.getElementById(id);
-        if (el) { el.click(); }
     }
 };
 

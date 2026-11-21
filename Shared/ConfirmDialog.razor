@@ -56,7 +56,11 @@
     private bool _wasOpen;
     private bool _focusPending;
 
-    private bool Confirmable => this.RequireText is null || string.Equals(this._typed.Trim(), this.RequireText, StringComparison.Ordinal);
+    private bool Confirmable => IsConfirmed(this.RequireText, this._typed);
+
+    /// <summary>Exact match, untrimmed: a name with leading or trailing spaces must be typed with them.</summary>
+    public static bool IsConfirmed(string? requireText, string? typed) =>
+        requireText is null || string.Equals(typed, requireText, StringComparison.Ordinal);
 
     protected override void OnParametersSet()
     {

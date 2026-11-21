@@ -12,6 +12,7 @@ using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authentication.OpenIdConnect;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Components.Authorization;
+using Microsoft.AspNetCore.Components.Web;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.IdentityModel.Protocols.OpenIdConnect;
 
@@ -22,7 +23,8 @@ var usCulture = new System.Globalization.CultureInfo("en-US");
 System.Globalization.CultureInfo.DefaultThreadCurrentCulture   = usCulture;
 System.Globalization.CultureInfo.DefaultThreadCurrentUICulture = usCulture;
 
-builder.Services.AddRazorComponents().AddInteractiveServerComponents();
+builder.Services.AddRazorComponents().AddInteractiveServerComponents()
+    .RegisterPersistentService<CloudSelfService.Services.Files.PageAuditContext>(RenderMode.InteractiveServer);
 builder.Services.AddSingleton<AppVersionService>();
 builder.Services.AddSingleton<PgsqlContext>();
 if (!string.IsNullOrWhiteSpace(builder.Configuration.GetConnectionString("Default")))
@@ -67,7 +69,6 @@ builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton(SessionLifetime.FromConfiguration(builder.Configuration));
 builder.Services.AddSingleton(new OwnerConfig(DevSignIn.EffectiveOwners(builder.Environment, builder.Configuration)));
 builder.Services.AddScoped<CurrentUser>();
-builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<CloudSelfService.Services.Files.PageAuditContext>();
 builder.Services.AddSingleton<IdentityResolver>();
 builder.Services.AddSingleton<IAuthorizationHandler, AppRoleHandler>();

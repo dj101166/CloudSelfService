@@ -1,7 +1,10 @@
 using System.Net;
+using System.Text.RegularExpressions;
 using CloudSelfService.Models;
+using CloudSelfService.Services.Access;
 using CloudSelfService.Services.Data;
 using CloudSelfService.Tests.Infrastructure;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Xunit;
@@ -61,7 +64,7 @@ public sealed class BrowseRouteTests : IDisposable
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Contains("Demo share (Read)", html);
         Assert.DoesNotContain("Demo share (Full)", html);
-        Assert.Single(System.Text.RegularExpressions.Regex.Matches(html, "data-testid=\"target-card\""));
+        Assert.Single(Regex.Matches(html, "data-testid=\"target-card\""));
     }
 
     [Fact]
@@ -129,6 +132,80 @@ public sealed class BrowseRouteTests : IDisposable
         var html = await (await owner.GetAsync("/")).Content.ReadAsStringAsync();
 
         Assert.Contains("No storage has been shared with you yet. Contact Advanced support if you expected to see something here.", html);
+    }
+
+    [Fact]
+    public async Task Browse_FolderLargerThanOnePage_OffersLoadMore()
+    {
+        var reader = await _factory.CreateClientAs("customer-read");
+        var own = await _factory.DemoTargetAsync("Read");
+        for (var i = 0; i < 250; i++)
+            await _factory.SeedFileAsync(own, $"Big/f{i:D3}.txt", new byte[] { 1 });
+
+        var html = await (await reader.GetAsync($"/files/{own.Id}/Big")).Content.ReadAsStringAsync();
+
+        Assert.Contains("data-testid=\"load-more\"", html);
+        Assert.Equal(StorageAccessService.PageSize, Regex.Matches(html, "data-testid=\"browse-row\"").Count);
+    }
+
+    [Fact]
+    public async Task Browse_FolderOfOnePage_HasNoLoadMore()
+    {
+        var reader = await _factory.CreateClientAs("customer-read");
+        var own = await _factory.DemoTargetAsync("Read");
+
+        var html = await (await reader.GetAsync($"/files/{own.Id}")).Content.ReadAsStringAsync();
+
+        Assert.DoesNotContain("data-testid=\"load-more\"", html);
+    }
+
+    [Fact]
+    public async Task Browse_GrantRevoked_ListDeniedRefreshesLevel_RendersAccessDenied()
+    {
+        var reader = await _factory.CreateClientAs("customer-read");
+        var own = await _factory.DemoTargetAsync("Read");
+        await _factory.Services.GetRequiredService<IGrantStore>().RemoveAsync(own.CustomerId!.Value, own.Id);
+
+        var response = await reader.GetAsync($"/files/{own.Id}");
+        var html = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("data-testid=\"access-denied\"", html);
+        Assert.DoesNotContain("Welcome.txt", html);
+    }
+
+    [Fact]
+    public async Task Browse_BreadcrumbAnchors_CarryTestIds()
+    {
+        var reader = await _factory.CreateClientAs("customer-read");
+        var own = await _factory.DemoTargetAsync("Read");
+
+        var html = await (await reader.GetAsync($"/files/{own.Id}/Reports/2026")).Content.ReadAsStringAsync();
+
+        // Files, the target and Reports are links; the current folder (2026) is not.
+        Assert.Equal(3, Regex.Matches(html, "data-testid=\"browse-crumb\"").Count);
+    }
+
+    [Fact]
+    public async Task Help_SupportContact_ComesFromConfig()
+    {
+        using var configured = _factory.WithWebHostBuilder(b => b.UseSetting("Support:Contact", "the Example service desk"));
+        var client = configured.CreateClient(new() { AllowAutoRedirect = false, HandleCookies = true });
+        await client.GetAsync("/dev/signin?as=customer-read");
+
+        var html = await (await client.GetAsync("/help")).Content.ReadAsStringAsync();
+
+        Assert.Contains("the Example service desk", html);
+    }
+
+    [Fact]
+    public async Task Help_SupportContact_DefaultsToAccountTeam()
+    {
+        var reader = await _factory.CreateClientAs("customer-read");
+
+        var html = await (await reader.GetAsync("/help")).Content.ReadAsStringAsync();
+
+        Assert.Contains("your Advanced account team", html);
     }
 
     private sealed class ThrowingTargetStore : ITargetStore
