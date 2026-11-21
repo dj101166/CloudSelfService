@@ -67,7 +67,7 @@ public sealed partial class AdminService
         nameof(StorageOperation.List), nameof(StorageOperation.Download), nameof(StorageOperation.Upload),
         nameof(StorageOperation.Overwrite), nameof(StorageOperation.CreateFolder), nameof(StorageOperation.Move),
         nameof(StorageOperation.Delete), "UploadBegin", "SignIn",
-        SaveCustomerOp, AddCustomerUserOp, SetUserActiveOp, SaveTargetOp, TestTargetOp, SetGrantOp, SetStaffRoleOp,
+        SaveCustomerOp, AddCustomerUserOp, SetUserActiveOp, SaveTargetOp, TestTargetOp, SetGrantOp, SetStaffRoleOp, ExportAuditOp,
     };
 
     [GeneratedRegex(@"^[a-z0-9]{3,24}$")]
@@ -89,9 +89,13 @@ public sealed partial class AdminService
         if (name.Length is 0 or > 200) return new(AccessOutcome.Invalid, null, "Customer name is required (up to 200 characters).");
         var notes = c.Notes?.Trim() ?? "";
         if (notes.Length > 2000) return new(AccessOutcome.Invalid, null, "Notes are limited to 2,000 characters.");
-        var tenant = string.IsNullOrWhiteSpace(c.HomeTenantId) ? null : c.HomeTenantId.Trim();
-        if (tenant is not null && !Guid.TryParse(tenant, out _))
-            return new(AccessOutcome.Invalid, null, "The home tenant ID must be a GUID.");
+        string? tenant = null;
+        if (!string.IsNullOrWhiteSpace(c.HomeTenantId))
+        {
+            if (!Guid.TryParse(c.HomeTenantId.Trim(), out var tenantGuid))
+                return new(AccessOutcome.Invalid, null, "The home tenant ID must be a GUID.");
+            tenant = tenantGuid.ToString("D");
+        }
         if (!Enum.IsDefined(c.Cloud) || !Enum.IsDefined(c.CrossTenantStatus))
             return new(AccessOutcome.Invalid, null, "That cloud or status isn't valid.");
 
@@ -111,6 +115,25 @@ public sealed partial class AdminService
         return new(AccessOutcome.Ok, saved);
     }
 
+    /// <summary>
+    /// Exactly one '@' with text each side, no whitespace or control/format characters anywhere (they would make two
+    /// accounts look identical, or a name look different from what is stored), and neither side starting with a
+    /// character a spreadsheet reads as a formula.
+    /// </summary>
+    public static bool IsValidUpn(string name, out int at)
+    {
+        at = name.IndexOf('@');
+        if (at < 1 || at == name.Length - 1 || name.Length > 320 || name.IndexOf('@', at + 1) >= 0) return false;
+        foreach (var rune in name.EnumerateRunes())
+        {
+            if (Rune.IsWhiteSpace(rune) || Rune.IsControl(rune)
+                || Rune.GetUnicodeCategory(rune) is UnicodeCategory.Format or UnicodeCategory.LineSeparator
+                    or UnicodeCategory.ParagraphSeparator or UnicodeCategory.OtherNotAssigned or UnicodeCategory.Surrogate)
+                return false;
+        }
+        return !(name[0] is '=' or '+' or '-' or '@') && !(name[at + 1] is '=' or '+' or '-' or '@');
+    }
+
     public async Task<AccessResult<AppUser>> AddCustomerUserAsync(Guid actorId, Guid customerId, string upn, string displayName,
         AuditContext? ctx = null, CancellationToken ct = default)
     {
@@ -121,8 +144,7 @@ public sealed partial class AdminService
         if (customer is null) return new(AccessOutcome.NotFound, null, "That customer no longer exists.");
 
         var name = (upn ?? "").Trim();
-        var at = name.IndexOf('@');
-        if (at < 1 || at == name.Length - 1 || name.Contains(' ') || name.IndexOf('@', at + 1) >= 0 || name.Length > 320)
+        if (!IsValidUpn(name, out var at))
             return new(AccessOutcome.Invalid, null, "Enter the user's UPN, like name@customer.example.");
         if (name.EndsWith("@" + _staffDomain, StringComparison.OrdinalIgnoreCase))
             return new(AccessOutcome.Invalid, null, StaffUpnMessage);
@@ -162,8 +184,12 @@ public sealed partial class AdminService
             if (_owners.IsOwner(user.Upn)) return new(AccessOutcome.Invalid, OwnersFromConfigMessage);
         }
 
-        if (user.Active != active)
-            await _users.UpsertAsync(user with { Active = active }, ct);
+        try
+        {
+            if (user.Active != active)
+                await _users.UpsertAsync(user with { Active = active }, ct);
+        }
+        catch (InvalidOperationException ex) { return new(AccessOutcome.Invalid, ex.Message); }
         await RecordAsync(actor, SetUserActiveOp, user.CustomerId, null, $"{user.Upn} = {(active ? "active" : "inactive")}", ctx);
         return new(AccessOutcome.Ok);
     }
@@ -175,7 +201,7 @@ public sealed partial class AdminService
         if (actor is null) return new(AccessOutcome.Denied, null, StorageAccessService.DeniedMessage);
 
         var display = t.DisplayName?.Trim() ?? "";
-        var sub = t.SubscriptionId?.Trim() ?? "";
+        var sub = Guid.TryParse(t.SubscriptionId?.Trim(), out var subGuid) ? subGuid.ToString("D") : "";
         var rg = t.ResourceGroup?.Trim() ?? "";
         var account = t.AccountName?.Trim() ?? "";
         var container = t.ContainerName?.Trim() ?? "";
@@ -199,6 +225,12 @@ public sealed partial class AdminService
         if (existing?.CustomerId is { } oldOwner && oldOwner != t.CustomerId
             && (await _grants.ListForCustomerAsync(oldOwner, ct)).Any(g => g.TargetId == existing.Id))
             return new(AccessOutcome.Invalid, null, "Remove this target's grants before moving it to another customer.");
+
+        if (existing?.CustomerId is { } owner
+            && (existing.AccountName != account || existing.ContainerName != container || existing.Kind != t.Kind
+                || !string.Equals(existing.EndpointSuffix, suffix, StringComparison.OrdinalIgnoreCase))
+            && (await _grants.ListForCustomerAsync(owner, ct)).Any(g => g.TargetId == existing.Id))
+            return new(AccessOutcome.Invalid, null, "Remove this target's grants before pointing it at different storage.");
 
         var saved = t with
         {
@@ -280,7 +312,8 @@ public sealed partial class AdminService
         if (user is not { Kind: UserKind.Staff }) return new(AccessOutcome.NotFound, "That staff user no longer exists.");
         if (_owners.IsOwner(user.Upn)) return new(AccessOutcome.Invalid, OwnersFromConfigMessage);
 
-        await _users.UpsertAsync(user with { StaffRole = role }, ct);
+        try { await _users.UpsertAsync(user with { StaffRole = role }, ct); }
+        catch (InvalidOperationException ex) { return new(AccessOutcome.Invalid, ex.Message); }
         await RecordAsync(actor, SetStaffRoleOp, null, null, $"{user.Upn} = {role}", ctx);
         return new(AccessOutcome.Ok);
     }
@@ -303,6 +336,13 @@ public sealed partial class AdminService
         AuditResult result = AuditResult.Success, string error = "") =>
         _audit.RecordAsync(new AuditEvent(Guid.NewGuid(), _time.GetUtcNow(), actor.Id, actor.Upn, customerId, targetId, operation,
             path, null, result, error, SourceIp(ctx), Correlation(ctx)), CancellationToken.None);
+
+    public const string ExportAuditOp = "Admin.ExportAudit";
+
+    /// <summary>Audits a CSV export by a user the endpoint has already authorised: path is the filter summary, bytes the row count.</summary>
+    public Task RecordExportAsync(Guid actorId, string actorUpn, string filterSummary, int rows, AuditContext? ctx) =>
+        _audit.RecordAsync(new AuditEvent(Guid.NewGuid(), _time.GetUtcNow(), actorId, actorUpn, null, null, ExportAuditOp,
+            filterSummary, rows, AuditResult.Success, "", SourceIp(ctx), Correlation(ctx)), CancellationToken.None);
 
     private static string SourceIp(AuditContext? ctx) => ctx?.SourceIp ?? "";
 

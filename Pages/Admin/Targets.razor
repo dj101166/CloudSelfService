@@ -16,6 +16,8 @@
 
 <PageTitle>Storage targets — Advanced Cloud Self Service</PageTitle>
 
+<AdminGate Denied="this.Denied" SessionEnded="this.SessionEnded">
+
 <div class="page-head">
     <div>
         <h1 class="page-title">Storage targets</h1>
@@ -167,6 +169,8 @@ else
     </section>
 }
 
+</AdminGate>
+
 @code {
     private List<StorageTarget> _targets = new();
     private List<Customer> _customers = new();
@@ -180,12 +184,26 @@ else
     private string _account = "";
     private StorageKind _kind = StorageKind.FileShare;
     private string _container = "";
-    private string _suffix = AdminService.DefaultEndpointSuffix;
+    private string _suffix = "";
     private bool _active = true;
+
+    private string DefaultSuffix => this.SuffixChoices.Contains(AdminService.DefaultEndpointSuffix) ? AdminService.DefaultEndpointSuffix : this.SuffixChoices[0];
+
+    protected override void ClearData()
+    {
+        base.ClearData();
+        this._targets = new();
+        this._customers = new();
+        this._testResults.Clear();
+    }
 
     private IReadOnlyList<string> SuffixChoices => this.Admin.AllowedEndpointSuffixes;
 
-    protected override Task OnInitializedAsync() => this.LoadGuardedAsync(this.LoadAsync);
+    protected override Task OnInitializedAsync()
+    {
+        this._suffix = this.DefaultSuffix;
+        return this.LoadGuardedAsync(this.LoadAsync);
+    }
 
     private async Task LoadAsync()
     {
@@ -221,7 +239,7 @@ else
         this._account = "";
         this._kind = StorageKind.FileShare;
         this._container = "";
-        this._suffix = AdminService.DefaultEndpointSuffix;
+        this._suffix = this.DefaultSuffix;
         this._active = true;
     }
 

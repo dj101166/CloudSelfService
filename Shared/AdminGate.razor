@@ -1,0 +1,24 @@
+@*
+    Wraps an admin page's body. When the page's role check fails after it was already open, Access Denied is rendered in
+    place; when the session has ended, the same notice MainLayout shows. Never a navigation: after an await that crashes
+    the host (see NotAuthorizedRouting).
+*@
+@if (this.SessionEnded)
+{
+    <h1 class="page-title-main" data-testid="session-ended">Session ended</h1>
+    <p class="u-muted">Your session is no longer valid. <a href="/logout">Sign in again</a>.</p>
+}
+else if (this.Denied)
+{
+    <AccessDeniedContent />
+}
+else
+{
+    @this.ChildContent
+}
+
+@code {
+    [Parameter] public bool Denied { get; set; }
+    [Parameter] public bool SessionEnded { get; set; }
+    [Parameter] public RenderFragment? ChildContent { get; set; }
+}

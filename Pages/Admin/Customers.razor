@@ -16,6 +16,8 @@
 
 <PageTitle>Customers — Advanced Cloud Self Service</PageTitle>
 
+<AdminGate Denied="this.Denied" SessionEnded="this.SessionEnded">
+
 <div class="page-head">
     <div>
         <h1 class="page-title">Customers</h1>
@@ -102,6 +104,8 @@ else
         </div>
     </section>
 }
+
+</AdminGate>
 
 @code {
     private sealed record Row(Customer Customer, int Users, int Targets);

@@ -39,6 +39,20 @@ public sealed class AdminEndpointTests : IDisposable
     }
 
     [Fact]
+    public async Task AuditCsv_Export_IsAudited_WithFilterAndRowCount()
+    {
+        var client = await _factory.CreateClientAs("staff-owner");
+        await SeedAsync("someone@x.example", "keep.txt");
+
+        await client.GetAsync("/api/admin/audit.csv?operation=Download");
+
+        var rows = await _factory.Services.GetRequiredService<IAuditStore>().QueryAsync(new AuditQuery(Operation: "Admin.ExportAudit"));
+        var row = Assert.Single(rows);
+        Assert.Equal("operation=Download", row.Path);
+        Assert.Equal(1, row.Bytes);
+    }
+
+    [Fact]
     public async Task AuditCsv_FiltersApply()
     {
         var client = await _factory.CreateClientAs("staff-owner");

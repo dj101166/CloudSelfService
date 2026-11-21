@@ -17,6 +17,8 @@
 
 <PageTitle>Staff — Advanced Cloud Self Service</PageTitle>
 
+<AdminGate Denied="this.Denied" SessionEnded="this.SessionEnded">
+
 <div class="page-head">
     <div>
         <h1 class="page-title">Staff</h1>
@@ -74,7 +76,7 @@ else
                                 else
                                 {
                                     <label class="u-sr-only" for="role-@user.Id">Role for @StoragePath.DisplayName(user.Upn)</label>
-                                    <select id="role-@user.Id" class="select select--sm admin__level" data-testid="admin-staff-role"
+                                    <select @key="(user.Id, this.Version)" id="role-@user.Id" class="select select--sm admin__level" data-testid="admin-staff-role"
                                             disabled="@this.Busy" value="@EditableRole(user)"
                                             @onchange="e => this.SetRoleAsync(user, e.Value?.ToString())">
                                         @foreach (var role in Roles)
@@ -122,11 +124,21 @@ else
     </section>
 }
 
+</AdminGate>
+
 @code {
+    protected override StaffRole RequiredRole => StaffRole.Owner;
+
     private static readonly StaffRole[] Roles = { StaffRole.None, StaffRole.Staff, StaffRole.StaffAdmin };
 
     private List<AppUser> _staff = new();
     private Guid _selfId;
+
+    protected override void ClearData()
+    {
+        base.ClearData();
+        this._staff = new();
+    }
 
     protected override Task OnInitializedAsync() => this.LoadGuardedAsync(this.LoadAsync);
 

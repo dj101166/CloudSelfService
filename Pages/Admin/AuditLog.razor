@@ -17,6 +17,8 @@
 
 <PageTitle>Audit log — Advanced Cloud Self Service</PageTitle>
 
+<AdminGate Denied="this.Denied" SessionEnded="this.SessionEnded">
+
 <div class="page-head">
     <div>
         <h1 class="page-title">Audit log</h1>
@@ -153,6 +155,8 @@ else
     </div>
 }
 
+</AdminGate>
+
 @code {
     private List<AuditEvent> _events = new();
     private List<AppUser> _users = new();
@@ -173,7 +177,21 @@ else
 
     private void OnTo(ChangeEventArgs e) => this._to = e.Value?.ToString() ?? "";
 
-    private string CsvHref => "api/admin/audit.csv" + this.QueryString();
+    private string _appliedQuery = "";
+
+    private string CsvHref => "api/admin/audit.csv" + this._appliedQuery;
+
+    protected override void ClearData()
+    {
+        base.ClearData();
+        this._events = new();
+        this._users = new();
+        this._customers = new();
+        this._targets = new();
+        this._customerNames = new();
+        this._targetNames = new();
+        this._appliedQuery = "";
+    }
 
     protected override Task OnInitializedAsync() => this.LoadGuardedAsync(async () =>
     {
@@ -212,6 +230,7 @@ else
             return;
         }
         this._events = (await this.Audit.QueryAsync(query)).ToList();
+        this._appliedQuery = this.QueryString();
     }
 
     private static Guid? OrNull(Guid id) => id == Guid.Empty ? null : id;
@@ -223,12 +242,7 @@ else
         this.Alert = null;
         try
         {
-            await this.QueryAsync();
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            this.Loggers.CreateLogger<AuditLog>().LogError(ex, "Querying the audit log failed.");
-            this.Alert = AdminAlert.StoreDown();
+            await this.RunGuardedAsync(this.QueryAsync);
         }
         finally
         {

@@ -500,4 +500,121 @@ public class AdminServiceTests
         Assert.Null(AuditFilters.ToQuery(null, null, null, null, null, "11/01/2026", null, 500));
         Assert.NotNull(AuditFilters.ToQuery(null, null, null, null, "", "", "", 500));
     }
+
+    private AdminService WithOwners(string owners) =>
+        new(_users, _customers, _targets, _grants, _fake, new AuditService(_audit, NullLogger<AuditService>.Instance),
+            new OwnerConfig(owners), new AppRoleHandlerTests.FixedTime(Now), new ConfigurationBuilder().Build());
+
+    [Theory]
+    [InlineData("a\u0000b@x.example")]
+    [InlineData("a​b@x.example")]
+    [InlineData("a\u0085b@x.example")]
+    [InlineData("a\tb@x.example")]
+    [InlineData("a b@x.example")]
+    [InlineData("=a@x.example")]
+    [InlineData("+a@x.example")]
+    [InlineData("a@=x.example")]
+    [InlineData("a@-x.example")]
+    public async Task AddCustomerUser_HiddenOrFormulaCharacters_Invalid(string upn)
+    {
+        var result = await _svc.AddCustomerUserAsync(_admin.Id, _alpha.Id, upn, "", Ctx);
+
+        Assert.Equal(AccessOutcome.Invalid, result.Outcome);
+    }
+
+    [Fact]
+    public async Task AddCustomerUser_UpnOfExistingStaffRecordInOtherDomain_Invalid()
+    {
+        await _users.UpsertAsync(Staff("contractor@partner.example", StaffRole.Staff));
+
+        var result = await _svc.AddCustomerUserAsync(_admin.Id, _alpha.Id, "Contractor@Partner.example", "", Ctx);
+
+        Assert.Equal(AccessOutcome.Invalid, result.Outcome);
+        Assert.Equal(UserKind.Staff, (await _users.FindByUpnAsync("contractor@partner.example"))!.Kind);
+    }
+
+    [Fact]
+    public async Task SetStaffRole_ConfigOwnerTarget_Refused()
+    {
+        var second = Staff("owner2@advancedutility.com", StaffRole.Owner);
+        await _users.UpsertAsync(second);
+
+        var result = await WithOwners(OwnerUpn + ",owner2@advancedutility.com").SetStaffRoleAsync(_owner.Id, second.Id, StaffRole.Staff, Ctx);
+
+        Assert.Equal(AccessOutcome.Invalid, result.Outcome);
+        Assert.Equal(StaffRole.Owner, (await _users.GetAsync(second.Id))!.StaffRole);
+    }
+
+    [Fact]
+    public async Task SetUserActive_ConfigOwnerTarget_Refused()
+    {
+        var second = Staff("owner2@advancedutility.com", StaffRole.Owner);
+        await _users.UpsertAsync(second);
+
+        var result = await WithOwners(OwnerUpn + ",owner2@advancedutility.com").SetUserActiveAsync(_owner.Id, second.Id, false, Ctx);
+
+        Assert.Equal(AccessOutcome.Invalid, result.Outcome);
+        Assert.True((await _users.GetAsync(second.Id))!.Active);
+    }
+
+    [Fact]
+    public async Task SaveTarget_RepointStorageWithGrants_Invalid()
+    {
+        await _grants.SetAsync(new Grant(_alpha.Id, _alphaTarget.Id, AccessLevel.Read, "x", Now));
+
+        foreach (var changed in new[]
+                 {
+                     _alphaTarget with { AccountName = "otheraccount" },
+                     _alphaTarget with { ContainerName = "other-share" },
+                     _alphaTarget with { Kind = StorageKind.BlobContainer },
+                     _alphaTarget with { EndpointSuffix = "core.usgovcloudapi.net" },
+                 })
+        {
+            var result = await _svc.SaveTargetAsync(_admin.Id, changed, Ctx);
+            Assert.Equal(AccessOutcome.Invalid, result.Outcome);
+            Assert.Equal("Remove this target's grants before pointing it at different storage.", result.Message);
+        }
+        Assert.Equal("alphastore", (await _targets.GetAsync(_alphaTarget.Id))!.AccountName);
+    }
+
+    [Fact]
+    public async Task SaveTarget_RenameWithGrants_Ok()
+    {
+        await _grants.SetAsync(new Grant(_alpha.Id, _alphaTarget.Id, AccessLevel.Read, "x", Now));
+
+        var result = await _svc.SaveTargetAsync(_admin.Id, _alphaTarget with { DisplayName = "Renamed", Active = false }, Ctx);
+
+        Assert.Equal(AccessOutcome.Ok, result.Outcome);
+    }
+
+    [Fact]
+    public async Task SaveTargetAndCustomer_StoreGuidsInDForm()
+    {
+        var sub = Guid.NewGuid();
+        var target = await _svc.SaveTargetAsync(_admin.Id,
+            Target(_alpha.Id, "G", "gstore", "g-one") with { SubscriptionId = sub.ToString("N").ToUpperInvariant() }, Ctx);
+        var tenant = Guid.NewGuid();
+        var customer = await _svc.SaveCustomerAsync(_admin.Id, _alpha with { HomeTenantId = tenant.ToString("N").ToUpperInvariant() }, Ctx);
+
+        Assert.Equal(sub.ToString("D"), target.Value!.SubscriptionId);
+        Assert.Equal(tenant.ToString("D"), customer.Value!.HomeTenantId);
+    }
+
+    [Fact]
+    public async Task RecordExportAsync_WritesRowWithFilterAndCount()
+    {
+        await _svc.RecordExportAsync(_admin.Id, _admin.Upn, "operation=Download", 7, Ctx);
+
+        var row = Assert.Single(await AuditAsync(AdminService.ExportAuditOp));
+        Assert.Equal("operation=Download", row.Path);
+        Assert.Equal(7, row.Bytes);
+        Assert.Equal(_admin.Upn, row.UserDisplay);
+    }
+
+    [Fact]
+    public void AuditCsv_EmbeddedLineBreakWithFormulaPrefix_QuotedAndPrefixed()
+    {
+        Assert.Equal("\"'=a\r\nb\"", CsvCell.Escape("=a\r\nb"));
+        Assert.Equal("\"'@x\nsecond\"", CsvCell.Escape("@x\nsecond"));
+    }
 }

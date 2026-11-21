@@ -19,13 +19,15 @@
 
 <PageTitle>@(this._customer is null ? "Customer" : StoragePath.DisplayName(this._customer.Name)) — Advanced Cloud Self Service</PageTitle>
 
+<AdminGate Denied="this.Denied" SessionEnded="this.SessionEnded">
+
 @if (this._customer is null)
 {
     <h1 class="page-title">Customer</h1>
     <AdminAlertBox Alert="this.Alert" />
     @if (this.Loaded)
     {
-        <div class="alert alert--danger" role="alert" data-testid="admin-customer-missing">That customer doesn't exist. <a href="admin/customers">Back to customers</a></div>
+        <div class="alert alert--danger" role="alert" data-testid="admin-customer-missing">That customer doesn't exist. <a href="admin/customers" data-testid="admin-back-to-customers">Back to customers</a></div>
     }
     else if (this.Alert is null)
     {
@@ -36,7 +38,7 @@ else
 {
     <div class="page-head">
         <div>
-            <nav class="admin__crumbs" aria-label="Breadcrumb"><a href="admin/customers">Customers</a></nav>
+            <nav class="admin__crumbs" aria-label="Breadcrumb" data-testid="admin-breadcrumb"><a href="admin/customers" data-testid="admin-breadcrumb-customers">Customers</a></nav>
             <h1 class="page-title" data-testid="admin-customer-title">@StoragePath.DisplayName(this._customer.Name)</h1>
             <div class="u-row u-row--wrap admin__badges">
                 <span class="badge badge--muted">@(this._customer.Cloud == CustomerCloud.AzureGov ? "Azure Government" : "Commercial")</span>
@@ -162,7 +164,7 @@ else
                     <tbody>
                         @if (this._targets.Count == 0)
                         {
-                            <tr><td colspan="3" class="table__empty" data-testid="admin-storage-empty">This customer has no storage registered. <a href="admin/targets">Register it under Storage targets</a>, owned by this customer.</td></tr>
+                            <tr><td colspan="3" class="table__empty" data-testid="admin-storage-empty">This customer has no storage registered. <a href="admin/targets" data-testid="admin-register-target-link">Register it under Storage targets</a>, owned by this customer.</td></tr>
                         }
                         @foreach (var target in this._targets)
                         {
@@ -174,7 +176,7 @@ else
                                 <td>@(target.Kind == StorageKind.FileShare ? "File share" : "Blob container")</td>
                                 <td>
                                     <label class="u-sr-only" for="level-@target.Id">Access level for @StoragePath.DisplayName(target.DisplayName)</label>
-                                    <select id="level-@target.Id" class="select select--sm admin__level" data-testid="admin-grant-level"
+                                    <select @key="(target.Id, this.Version)" id="level-@target.Id" class="select select--sm admin__level" data-testid="admin-grant-level"
                                             disabled="@this.Busy" value="@LevelOf(target.Id)"
                                             @onchange="e => this.SetGrantAsync(target, e.Value?.ToString())">
                                         @foreach (var level in Levels)
@@ -230,10 +232,21 @@ else
     }
 }
 
+</AdminGate>
+
 @code {
     private static readonly AccessLevel[] Levels = { AccessLevel.None, AccessLevel.Read, AccessLevel.Contribute, AccessLevel.Full };
 
     [Parameter] public Guid Id { get; set; }
+
+    protected override void ClearData()
+    {
+        base.ClearData();
+        this._customer = null;
+        this._users = new();
+        this._targets = new();
+        this._grants = new();
+    }
 
     private Customer? _customer;
     private List<AppUser> _users = new();
