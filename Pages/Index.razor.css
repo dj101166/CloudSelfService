@@ -46,6 +46,12 @@
 .home__empty { display: flex; align-items: center; gap: 12px; color: var(--text-secondary); }
 .home__empty p { margin: 0; }
 
+.home__unfinished { margin-bottom: 22px; }
+
+.home__unfinished-name { font-weight: var(--weight-bold); overflow-wrap: anywhere; }
+
+.home__unfinished-actions { justify-content: flex-end; gap: 6px; }
+
 @media (max-width: 640px) {
     .home__filter { min-width: 0; width: 100%; }
 }

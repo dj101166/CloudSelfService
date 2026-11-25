@@ -71,6 +71,9 @@ public interface IUploadSessionStore
     /// <summary>Open sessions of this user on this exact target and final path (any size, expired or not).</summary>
     Task<IReadOnlyList<UploadSession>> ListOpenForUserPathAsync(Guid userId, Guid targetId, string finalPath, CancellationToken ct = default);
 
+    /// <summary>This user's Open, unexpired sessions on any target, most recent activity (or creation) first.</summary>
+    Task<IReadOnlyList<UploadSession>> ListOpenForUserAsync(Guid userId, DateTimeOffset now, CancellationToken ct = default);
+
     /// <summary>Sessions still Completing whose claim is older than <paramref name="claimedBefore"/>.</summary>
     Task<IReadOnlyList<UploadSession>> ListStuckCompletingAsync(DateTimeOffset claimedBefore, CancellationToken ct = default);
     Task SetOverwriteAsync(Guid id, bool overwrite, bool existedAtBegin, CancellationToken ct = default);
@@ -211,6 +214,15 @@ public sealed class InMemoryUploadSessionStore : IUploadSessionStore
         lock (_lock)
             return Task.FromResult<IReadOnlyList<UploadSession>>(_sessions.Values
                 .Where(s => s.UserId == userId && s.TargetId == targetId && s.FinalPath == finalPath && s.Status == UploadStatus.Open)
+                .ToList());
+    }
+
+    public Task<IReadOnlyList<UploadSession>> ListOpenForUserAsync(Guid userId, DateTimeOffset now, CancellationToken ct = default)
+    {
+        lock (_lock)
+            return Task.FromResult<IReadOnlyList<UploadSession>>(_sessions.Values
+                .Where(s => s.UserId == userId && s.Status == UploadStatus.Open && s.ExpiresAt > now)
+                .OrderByDescending(s => s.LastActivityAt ?? s.CreatedAt)
                 .ToList());
     }
 
@@ -484,6 +496,19 @@ public sealed class PgUploadSessionStore : IUploadSessionStore
         cmd.Parameters.AddWithValue("uid", userId);
         cmd.Parameters.AddWithValue("tid", targetId);
         cmd.Parameters.AddWithValue("final", finalPath);
+        return await cmd.ReadAllAsync(Map, ct);
+    }
+
+    public async Task<IReadOnlyList<UploadSession>> ListOpenForUserAsync(Guid userId, DateTimeOffset now, CancellationToken ct = default)
+    {
+        await using var conn = await _db.DataSource.OpenConnectionAsync(ct);
+        await using var cmd = new NpgsqlCommand($"""
+            SELECT {Cols} FROM upload_sessions
+            WHERE user_id = @uid AND status = 'Open' AND expires_at > @now
+            ORDER BY COALESCE(last_activity_at, created_at) DESC
+            """, conn);
+        cmd.Parameters.AddWithValue("uid", userId);
+        cmd.Parameters.AddWithValue("now", now.ToUniversalTime());
         return await cmd.ReadAllAsync(Map, ct);
     }
 

@@ -2,15 +2,20 @@
 @attribute [Authorize]
 @inject StorageAccessService Access
 @inject CurrentUser CurrentUser
+@inject UploadSessionService Uploads
+@inject PageAuditContext Audit
+@inject IJSRuntime JS
 @inject ILogger<Index> Logger
 @using CloudSelfService.Models
 @using CloudSelfService.Services.Access
 @using CloudSelfService.Services.Files
 @using CloudSelfService.Services.Identity
+@using CloudSelfService.Services.Transfers
 
 @*
     Files home: every share and container this user can reach. Customers see their own as a flat set of cards; staff
     see every customer's, grouped by customer, with targets that belong to no customer under "Advanced internal".
+    Above them, the user's own unfinished uploads (if any), so an upload cut short by a sign-out can be found again.
 *@
 
 <PageTitle>Files — Advanced Cloud Self Service</PageTitle>
@@ -47,6 +52,55 @@ else if (this._targets.Count == 0)
 }
 else
 {
+    @if (this._discardFailed)
+    {
+        <div class="alert alert--warning" role="alert" data-testid="alert">@UnavailableMessage</div>
+    }
+    @if (this._unfinished.Count > 0)
+    {
+        <section class="card home__unfinished" aria-labelledby="unfinished-title" data-testid="unfinished-uploads">
+            <div class="card__head">
+                <h2 class="card__title" id="unfinished-title">Unfinished uploads</h2>
+                <p class="card__desc">Choose the same file again in its folder to carry on where it stopped.</p>
+            </div>
+            <div class="table-wrap">
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th scope="col">File</th>
+                            <th scope="col">Progress</th>
+                            <th scope="col">Last activity</th>
+                            <th scope="col"><span class="u-sr-only">Actions</span></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var u in this._unfinished)
+                        {
+                            <tr data-testid="unfinished-upload" data-session-id="@u.SessionId" @key="u.SessionId">
+                                <td>
+                                    <div class="home__unfinished-name">@StoragePath.DisplayName(u.FileName)</div>
+                                    <div class="u-subtle u-small">@LocationText(u)</div>
+                                </td>
+                                <td class="u-nowrap">@ReceivedText(u)</td>
+                                <td>
+                                    <div class="u-nowrap">@FileDisplay.Modified(u.LastActivity, this._zone)</div>
+                                    <div class="u-subtle u-small u-nowrap">Discarded after @FileDisplay.Modified(u.ExpiresAt, this._zone)</div>
+                                </td>
+                                <td class="table__num">
+                                    <span class="u-row home__unfinished-actions">
+                                        <a class="btn btn--secondary btn--sm" href="@FileDisplay.BrowseHref(u.TargetId, u.Folder)"
+                                           data-testid="unfinished-open">Open folder</a>
+                                        <button type="button" class="btn btn--danger btn--sm" data-testid="unfinished-discard"
+                                                disabled="@this._busy" @onclick="() => this.AskDiscard(u)">Discard</button>
+                                    </span>
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    }
     var groups = this.Groups().ToList();
     @if (groups.Count == 0)
     {
@@ -79,6 +133,15 @@ else
     }
 }
 
+<ConfirmDialog IsOpen="this._discarding is not null"
+               Title="Discard upload"
+               Message="@this.DiscardMessage"
+               ConfirmText="Discard"
+               Danger="true"
+               Busy="this._busy"
+               OnConfirm="this.ConfirmDiscardAsync"
+               OnCancel="this.CloseDiscard" />
+
 @code {
     public const string EmptyMessage =
         "No storage has been shared with you yet. Contact Advanced support if you expected to see something here.";
@@ -90,6 +153,12 @@ else
     private bool _loaded;
     private string? _error;
     private string _filter = "";
+    private IReadOnlyList<UnfinishedUpload> _unfinished = Array.Empty<UnfinishedUpload>();
+    private UnfinishedUpload? _discarding;
+    private bool _busy;
+    private bool _discardFailed;
+    private TimeZoneInfo? _zone;
+    private Guid _userId;
 
     private sealed record Group(string Heading, IReadOnlyList<ReachableTarget> Targets);
 
@@ -108,6 +177,7 @@ else
                 return;
             }
             this._isStaff = user.Kind == UserKind.Staff;
+            this._userId = user.Id;
             this._targets = await this.Access.ListReachableTargetsAsync(user.Id);
             this._loaded = true;
         }
@@ -115,7 +185,92 @@ else
         {
             this.Logger.LogError(ex, "Listing reachable targets failed.");
             this._error = UnavailableMessage;
+            return;
         }
+        await this.LoadUnfinishedAsync();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender) return;
+        try
+        {
+            var tz = await this.JS.InvokeAsync<BrowserTimeZone>("cssp.timeZone");
+            this._zone = FileDisplay.ResolveZone(tz.Id, tz.Offset);
+            this.StateHasChanged();
+        }
+        catch (JSDisconnectedException)
+        {
+        }
+        catch (JSException ex)
+        {
+            this.Logger.LogDebug(ex, "Could not read the browser time zone; showing UTC.");
+        }
+    }
+
+    /// <summary>
+    /// The card is secondary to the target list: a failure here is logged and the card left out, so the page's
+    /// unavailable message never hides storage the user can still reach.
+    /// </summary>
+    private async Task LoadUnfinishedAsync()
+    {
+        try
+        {
+            this._unfinished = await this.Uploads.ListUnfinishedAsync(this._userId);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            this.Logger.LogError(ex, "Listing unfinished uploads failed.");
+            this._unfinished = Array.Empty<UnfinishedUpload>();
+        }
+    }
+
+    private string DiscardMessage => this._discarding is null
+        ? ""
+        : $"Discard the unfinished upload of {StoragePath.DisplayName(this._discarding.FileName)}? What was sent so far is deleted.";
+
+    private static string LocationText(UnfinishedUpload u) =>
+        u.Folder.Length == 0
+            ? StoragePath.DisplayName(u.TargetName)
+            : $"{StoragePath.DisplayName(u.TargetName)} / {StoragePath.DisplayName(u.Folder)}";
+
+    private static string ReceivedText(UnfinishedUpload u) =>
+        $"{(u.Size == 0 ? 0 : u.ReceivedBytes * 100 / u.Size)}% received";
+
+    private void AskDiscard(UnfinishedUpload u)
+    {
+        if (this._busy) return;
+        this._discarding = u;
+    }
+
+    private void CloseDiscard()
+    {
+        if (this._busy) return;
+        this._discarding = null;
+    }
+
+    private async Task ConfirmDiscardAsync()
+    {
+        if (this._busy || this._discarding is not { } u) return;
+        this._busy = true;
+        this._discardFailed = false;
+        try
+        {
+            // NotFound or Denied mean the upload is already gone or no longer the user's to finish; the reload hides it.
+            var result = await this.Uploads.AbortAsync(this._userId, u.SessionId, this.Audit.Next());
+            this._discardFailed = result.Outcome is not (AccessOutcome.Ok or AccessOutcome.NotFound or AccessOutcome.Denied);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            this.Logger.LogError(ex, "Discarding unfinished upload {SessionId} failed.", u.SessionId);
+            this._discardFailed = true;
+        }
+        finally
+        {
+            this._busy = false;
+            this._discarding = null;
+        }
+        await this.LoadUnfinishedAsync();
     }
 
     private IEnumerable<Group> Groups()

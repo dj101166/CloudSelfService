@@ -124,6 +124,38 @@ public abstract class UploadSessionStoreContract
         Assert.Equal(new[] { 0 }, await store.ReceivedChunksAsync(s.Id));
         Assert.Equal(Now.AddHours(1), after.LastActivityAt);
     }
+
+    protected async Task OnlyOwnOpenUnexpired()
+    {
+        var store = await CreateStoreAsync();
+        var user = Guid.NewGuid();
+        var open = Session(user);
+        await store.CreateAsync(open);
+        await store.CreateAsync(Session(user, expires: Now.AddMinutes(-1)));
+        await store.CreateAsync(Session(user, UploadStatus.Completed));
+        await store.CreateAsync(Session(Guid.NewGuid()));
+
+        var listed = await store.ListOpenForUserAsync(user, Now);
+
+        Assert.Equal(new[] { open.Id }, listed.Select(s => s.Id));
+    }
+
+    protected async Task NewestActivityFirst()
+    {
+        var store = await CreateStoreAsync();
+        var user = Guid.NewGuid();
+        var older = Session(user) with { CreatedAt = Now.AddHours(-3) };
+        var newer = Session(user) with { CreatedAt = Now.AddHours(-2) };
+        var active = Session(user) with { CreatedAt = Now.AddHours(-4) };
+        await store.CreateAsync(older);
+        await store.CreateAsync(newer);
+        await store.CreateAsync(active);
+        await store.MarkChunkAsync(active.Id, 0, Now.AddHours(-1), Now.AddHours(24));
+
+        var listed = await store.ListOpenForUserAsync(user, Now);
+
+        Assert.Equal(new[] { active.Id, newer.Id, older.Id }, listed.Select(s => s.Id));
+    }
 }
 
 public class InMemoryUploadSessionStoreContractTests : UploadSessionStoreContract
@@ -150,6 +182,12 @@ public class InMemoryUploadSessionStoreContractTests : UploadSessionStoreContrac
 
     [Fact]
     public Task MarkChunk_NonOpenSession_ExpiryUnchanged() => NonOpenSession_ExpiryUnchanged();
+
+    [Fact]
+    public Task ListOpenForUser_ReturnsOnlyOwnOpenUnexpired() => OnlyOwnOpenUnexpired();
+
+    [Fact]
+    public Task ListOpenForUser_NewestActivityFirst() => NewestActivityFirst();
 }
 
 public class PgUploadSessionStoreContractTests : UploadSessionStoreContract
@@ -183,4 +221,10 @@ public class PgUploadSessionStoreContractTests : UploadSessionStoreContract
 
     [PgFact]
     public Task MarkChunk_NonOpenSession_ExpiryUnchanged() => NonOpenSession_ExpiryUnchanged();
+
+    [PgFact]
+    public Task ListOpenForUser_ReturnsOnlyOwnOpenUnexpired() => OnlyOwnOpenUnexpired();
+
+    [PgFact]
+    public Task ListOpenForUser_NewestActivityFirst() => NewestActivityFirst();
 }

@@ -3009,6 +3009,125 @@ public class UploadSessionServiceTests
         }
     }
 
+    private async Task<UploadSession> OpenSession(AppUser user, StorageTarget target, string finalPath, long size = 10 * Mi,
+        int pieceSize = ChunkMath.MinPieceSize, bool overwrite = false)
+    {
+        var id = Guid.NewGuid();
+        var staging = target.Kind == StorageKind.FileShare ? UploadSessionService.StagingPathFor(finalPath, id) : finalPath;
+        var session = new UploadSession(id, user.Id, target.Id, finalPath, staging, size, pieceSize, overwrite, _time.Now,
+            _time.Now.AddHours(24), UploadStatus.Open, TargetKind: target.Kind);
+        await _sessions.CreateAsync(session);
+        return session;
+    }
+
+    [Fact]
+    public async Task ListUnfinished_OtherUsersSessions_NotReturned()
+    {
+        var svc = Service();
+        var mine = await OpenSession(_contrib, _share, "Docs/mine.bin");
+        await OpenSession(_colleague, _share, "Docs/theirs.bin");
+
+        var listed = await svc.ListUnfinishedAsync(_contrib.Id);
+
+        var only = Assert.Single(listed);
+        Assert.Equal(mine.Id, only.SessionId);
+        Assert.Equal("Share", only.TargetName);
+        Assert.Equal("Docs", only.Folder);
+        Assert.Equal("mine.bin", only.FileName);
+        Assert.False(only.Overwrite);
+    }
+
+    [Fact]
+    public async Task ListUnfinished_GrantRevoked_Omitted()
+    {
+        var svc = Service();
+        await OpenSession(_contrib, _share, "Docs/a.bin");
+        await _grants.RemoveAsync(_custA.Id, _share.Id);
+
+        Assert.Empty(await svc.ListUnfinishedAsync(_contrib.Id));
+    }
+
+    [Fact]
+    public async Task ListUnfinished_DowngradedToRead_Omitted()
+    {
+        var svc = Service();
+        await OpenSession(_contrib, _share, "Docs/a.bin");
+        await OpenSession(_contrib, _blob, "Docs/b.bin");
+        await _grants.SetAsync(new Grant(_custA.Id, _share.Id, AccessLevel.Read, "admin", Start));
+
+        var only = Assert.Single(await svc.ListUnfinishedAsync(_contrib.Id));
+        Assert.Equal(_blob.Id, only.TargetId);
+    }
+
+    [Fact]
+    public async Task ListUnfinished_OverwriteSession_ReportsOverwrite()
+    {
+        var svc = Service();
+        await OpenSession(_contrib, _share, "Docs/a.bin", overwrite: true);
+
+        Assert.True(Assert.Single(await svc.ListUnfinishedAsync(_contrib.Id)).Overwrite);
+    }
+
+    [Fact]
+    public async Task ListUnfinished_ReportsReceivedBytes()
+    {
+        var svc = Service();
+        var session = await OpenSession(_contrib, _blob, "Big/file.bin", size: 20 * Mi, pieceSize: 8 * Mi);
+        var activity = Start.AddMinutes(30);
+        await _sessions.MarkChunkAsync(session.Id, 0, activity, Start.AddHours(25));
+        await _sessions.MarkChunkAsync(session.Id, 2, activity, Start.AddHours(25));
+
+        var only = Assert.Single(await svc.ListUnfinishedAsync(_contrib.Id));
+
+        Assert.Equal(8L * Mi + 4L * Mi, only.ReceivedBytes);
+        Assert.Equal(20L * Mi, only.Size);
+        Assert.Equal(8 * Mi, only.ChunkSize);
+        Assert.Equal(activity, only.LastActivity);
+        Assert.Equal(Start.AddHours(25), only.ExpiresAt);
+    }
+
+    [Fact]
+    public async Task ListUnfinished_NoPieceYet_LastActivityIsCreatedAt()
+    {
+        var svc = Service();
+        await OpenSession(_contrib, _share, "a.bin");
+
+        var only = Assert.Single(await svc.ListUnfinishedAsync(_contrib.Id));
+
+        Assert.Equal(0, only.ReceivedBytes);
+        Assert.Equal(Start, only.LastActivity);
+        Assert.Equal("", only.Folder);
+    }
+
+    [Fact]
+    public async Task ListUnfinished_FolderFilter_OnlyThatFolder()
+    {
+        var svc = Service();
+        var inDocs = await OpenSession(_contrib, _share, "Docs/a.bin");
+        await OpenSession(_contrib, _share, "Docs/Sub/b.bin");
+        await OpenSession(_contrib, _share, "c.bin");
+        await OpenSession(_contrib, _blob, "Docs/d.bin");
+
+        var listed = await svc.ListUnfinishedAsync(_contrib.Id, _share.Id, "Docs");
+
+        Assert.Equal(new[] { inDocs.Id }, listed.Select(u => u.SessionId));
+        Assert.Equal(new[] { "c.bin" }, (await svc.ListUnfinishedAsync(_contrib.Id, folder: "")).Select(u => u.FileName));
+        Assert.Equal(new[] { "d.bin" }, (await svc.ListUnfinishedAsync(_contrib.Id, _blob.Id)).Select(u => u.FileName));
+    }
+
+    [Fact]
+    public async Task ListUnfinished_MakesNoStorageCalls()
+    {
+        var svc = Service();
+        await OpenSession(_contrib, _share, "Docs/a.bin");
+        await OpenSession(_contrib, _blob, "Docs/b.bin");
+        var before = _fake.Calls.Count;
+
+        Assert.Equal(2, (await svc.ListUnfinishedAsync(_contrib.Id)).Count);
+
+        Assert.Equal(before, _fake.Calls.Count);
+    }
+
     /// <summary>Like Kestrel's request body: no seeking, no length; optionally fails part-way like a dropped connection.</summary>
     private sealed class NonSeekableStream(byte[] data, int? failAfter = null) : Stream
     {

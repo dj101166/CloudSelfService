@@ -13,6 +13,10 @@ public sealed record BeginUploadRequest(Guid TargetId, string Folder, string Fil
 
 public sealed record BeginUploadResponse(Guid SessionId, int ChunkSize, int ChunkCount, int ParallelChunks, IReadOnlyList<int> Received);
 
+/// <summary>One of the caller's own open uploads, for resuming or discarding it. Folder is the final path's parent.</summary>
+public sealed record UnfinishedUpload(Guid SessionId, Guid TargetId, string TargetName, string Folder, string FileName, long Size,
+    int ChunkSize, long ReceivedBytes, DateTimeOffset LastActivity, DateTimeOffset ExpiresAt, bool Overwrite);
+
 /// <summary>
 /// Chunked, resumable uploads. Every call re-reads the session and goes back through
 /// <see cref="StorageAccessService.AuthorizeAsync"/>, so a revoked grant or a deactivated user stops the very next
@@ -538,6 +542,38 @@ public sealed class UploadSessionService
         else
             _logger.LogWarning("Upload {SessionId} committed but was already settled by cleanup; no second audit row written.", session.Id);
         return new(AccessOutcome.Ok);
+    }
+
+    /// <summary>
+    /// The caller's own open uploads, newest activity first, optionally only those on <paramref name="targetId"/> and in
+    /// exactly <paramref name="folder"/>. Each is shown only while the caller's current level still allows finishing it,
+    /// so a revoked grant or a downgrade hides it. Reads the database only; storage is never asked.
+    /// </summary>
+    public async Task<IReadOnlyList<UnfinishedUpload>> ListUnfinishedAsync(Guid userId, Guid? targetId = null, string? folder = null,
+        CancellationToken ct = default)
+    {
+        var open = (await _sessions.ListOpenForUserAsync(userId, _time.GetUtcNow(), ct))
+            .Where(s => (targetId is null || s.TargetId == targetId) && (folder is null || StoragePath.Parent(s.FinalPath) == folder))
+            .ToList();
+        if (open.Count == 0)
+            return Array.Empty<UnfinishedUpload>();
+
+        var names = (await _access.ListReachableTargetsAsync(userId, ct)).ToDictionary(r => r.Target.Id, r => r.Target.DisplayName);
+        var unfinished = new List<UnfinishedUpload>(open.Count);
+        foreach (var session in open)
+        {
+            if (!names.TryGetValue(session.TargetId, out var targetName)
+                || !AccessPolicy.Allows(await _access.GetLevelAsync(userId, session.TargetId, ct), OperationOf(session)))
+                continue;
+            var count = ChunkMath.ChunkCount(session.Size, session.ChunkSize);
+            var received = (await _sessions.ReceivedChunksAsync(session.Id, ct))
+                .Where(i => i >= 0 && i < count).Distinct()
+                .Sum(i => ChunkMath.ExpectedLength(session.Size, session.ChunkSize, i));
+            unfinished.Add(new UnfinishedUpload(session.Id, session.TargetId, targetName, StoragePath.Parent(session.FinalPath),
+                StoragePath.Leaf(session.FinalPath), session.Size, session.ChunkSize, received,
+                session.LastActivityAt ?? session.CreatedAt, session.ExpiresAt, session.Overwrite));
+        }
+        return unfinished;
     }
 
     public async Task<AccessResult> AbortAsync(Guid userId, Guid sessionId, AuditContext ctx, CancellationToken ct = default)

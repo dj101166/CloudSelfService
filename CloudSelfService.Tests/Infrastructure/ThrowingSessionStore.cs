@@ -24,6 +24,8 @@ internal sealed class ThrowingSessionStore : IUploadSessionStore
         CancellationToken ct = default) => throw Down();
     public Task<IReadOnlyList<UploadSession>> ListOpenForUserPathAsync(Guid userId, Guid targetId, string finalPath,
         CancellationToken ct = default) => throw Down();
+    public Task<IReadOnlyList<UploadSession>> ListOpenForUserAsync(Guid userId, DateTimeOffset now, CancellationToken ct = default) =>
+        throw Down();
     public Task<IReadOnlyList<UploadSession>> ListStuckCompletingAsync(DateTimeOffset claimedBefore, CancellationToken ct = default) => None();
     public Task SetOverwriteAsync(Guid id, bool overwrite, bool existedAtBegin, CancellationToken ct = default) => throw Down();
     public Task<IReadOnlyList<UploadSession>> ListSweepableOpenAsync(DateTimeOffset now, DateTimeOffset idleBefore,
