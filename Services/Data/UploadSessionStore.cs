@@ -26,7 +26,7 @@ public static class UploadStatus
 /// session's full size (R32, R34).
 /// CleanupRefused is set when cleanup refused to touch storage for this session (target gone or changed kind, or a
 /// staging path that isn't the session's own); the refusal is logged once and the sweep stops retrying it.
-/// FirstPieceMd5 is the base64 MD5 of piece 0 the client declared at Begin, so a different file of the same name and size
+/// FirstPieceMd5 is the base64 MD5 of the first 4 MiB the client declared at Begin, so a different file of the same name and size
 /// is not resumed into this session; null when the client sent none (or the file is empty).
 /// </summary>
 public sealed record UploadSession(Guid Id, Guid UserId, Guid TargetId, string FinalPath, string StagingPath,

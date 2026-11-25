@@ -26,18 +26,24 @@ public static class ChunkMath
     public static int ChunkCount(long size, int pieceSize)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(size);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(pieceSize);
         return (int)((size + pieceSize - 1) / pieceSize);
     }
 
     public static long ExpectedLength(long size, int pieceSize, int index)
     {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(pieceSize);
         var count = ChunkCount(size, pieceSize);
         ArgumentOutOfRangeException.ThrowIfNegative(index);
         ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(index, count);
         return index < count - 1 ? pieceSize : size - (long)pieceSize * (count - 1);
     }
 
-    public static long Offset(int index, int pieceSize) => (long)index * pieceSize;
+    public static long Offset(int index, int pieceSize)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(pieceSize);
+        return (long)index * pieceSize;
+    }
 
     // Azure requires every block ID in a blob to be the same length.
     public static string BlockId(Guid sessionId, int index) =>

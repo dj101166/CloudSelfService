@@ -18,12 +18,12 @@ public static class UploadEndpoints
     public const string CrossSiteMessage = "Cross-site upload requests are not allowed.";
     public const string AntiforgeryMessage = "The request is missing a valid antiforgery token. Reload the page and try again.";
     public const string BadBodyMessage = "The request body is not a valid upload request.";
-    public const string TooLargeMessage = "An upload piece is larger than the 4 MiB piece size.";
+    public const string TooLargeMessage = "An upload piece is larger than the 32 MiB maximum piece size.";
     public const string ControlBodyTooLargeMessage = "The request body is too large.";
     public const string JsonRequiredMessage = "Send this request as application/json.";
     /// <summary>Begin's JSON is a few hundred bytes; every non-chunk upload route gets this body cap.</summary>
     public const long ControlBodyLimit = 16 * 1024;
-    public const int DefaultMinChunkBytesPerSecond = 64 * 1024;
+    public const int DefaultMinChunkBytesPerSecond = UploadSessionService.DefaultMinChunkBytesPerSecond;
 
     public static void MapUploadEndpoints(this WebApplication app)
     {
@@ -43,12 +43,12 @@ public static class UploadEndpoints
         var isChunk = HttpMethods.IsPut(ctx.Request.Method);
         // Limits are set before antiforgery, which may read a form body. The chunk PUT is the group's only PUT.
         if (ctx.Features.Get<IHttpMaxRequestBodySizeFeature>() is { IsReadOnly: false } limit)
-            limit.MaxRequestBodySize = isChunk ? ChunkMath.MinPieceSize : ControlBodyLimit;
+            limit.MaxRequestBodySize = isChunk ? ChunkMath.MaxBlobPieceSize : ControlBodyLimit;
         if (isChunk)
             ApplyMinDataRate(ctx, ctx.RequestServices.GetRequiredService<IConfiguration>());
         if (ctx.Request.Headers["Sec-Fetch-Site"].ToString() is "cross-site" or "same-site")
             return Error(StatusCodes.Status403Forbidden, CrossSiteMessage, UploadErrorCodes.Denied);
-        if (ctx.Request.ContentLength > (isChunk ? ChunkMath.MinPieceSize : ControlBodyLimit))
+        if (ctx.Request.ContentLength > (isChunk ? ChunkMath.MaxBlobPieceSize : ControlBodyLimit))
             return isChunk
                 ? Error(StatusCodes.Status413PayloadTooLarge, TooLargeMessage, UploadErrorCodes.TooLarge)
                 : Error(StatusCodes.Status413PayloadTooLarge, ControlBodyTooLargeMessage, UploadErrorCodes.TooLarge);
@@ -132,7 +132,8 @@ public static class UploadEndpoints
         RunAsync(ctx, loggers, "chunk", async (userId, audit, ct) =>
         {
             // Format checks (length, MD5 header) run inside the service before any database call. A declared length
-            // over the piece size was refused by the guard; Kestrel's body limit is the backstop.
+            // over the largest piece size was refused by the guard; Kestrel's body limit is the backstop, and the
+            // service holds each piece to its own session's size.
             var result = await uploads.PutChunkAsync(userId, id, index, ctx.Request.Body, ctx.Request.ContentLength,
                 ctx.Request.Headers["Content-MD5"].ToString(), audit, ct);
             return result.Outcome == AccessOutcome.Ok ? Results.NoContent() : ErrorFor(result.Outcome, result.Message, result.Code);

@@ -193,7 +193,7 @@ if (StartupChecks.OwnersWarning(app.Environment.IsDevelopment(), app.Services.Ge
     app.Logger.LogWarning("{Warning}", ownersWarning);
 var (maxUploadBytes, configuredMaxUploadBytes) = UploadSessionService.MaxUploadBytesFrom(builder.Configuration);
 if (configuredMaxUploadBytes > maxUploadBytes)
-    app.Logger.LogWarning("Transfers:MaxUploadBytes {Configured} exceeds the {Limit}-byte ceiling set by Azure's 50,000 blocks per blob; using the ceiling.",
+    app.Logger.LogWarning("Transfers:MaxUploadBytes {Configured} exceeds the {Limit}-byte ceiling (Azure's 50,000 blocks per blob at the 32 MiB largest piece size); using the ceiling.",
         configuredMaxUploadBytes, maxUploadBytes);
 
 var pg = app.Services.GetRequiredService<PgsqlContext>();

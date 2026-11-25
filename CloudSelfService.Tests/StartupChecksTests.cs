@@ -76,6 +76,8 @@ public class StartupChecksTests
     [InlineData(null, UploadSessionService.DefaultMaxUploadBytes, UploadSessionService.DefaultMaxUploadBytes)]
     [InlineData("1000", 1000L, 1000L)]
     [InlineData("-5", 0L, 0L)]
+    [InlineData("209715200001", 209_715_200_001L, 209_715_200_001L)]
+    [InlineData("1677721600000", 1_677_721_600_000L, 1_677_721_600_000L)]
     public void MaxUploadBytesFrom_WithinCeiling_Unchanged(string? configured, long effective, long reported)
     {
         var (e, c) = UploadSessionService.MaxUploadBytesFrom(Config(configured));
@@ -87,11 +89,11 @@ public class StartupChecksTests
     [Fact]
     public void MaxUploadBytesFrom_AboveCeiling_Clamped()
     {
-        var over = (long)ChunkMath.MinPieceSize * ChunkMath.MaxBlocksPerBlob + 1;
+        var over = ChunkMath.MaxBlobBytes + 1;
 
         var (e, c) = UploadSessionService.MaxUploadBytesFrom(Config(over.ToString()));
 
-        Assert.Equal((long)ChunkMath.MinPieceSize * ChunkMath.MaxBlocksPerBlob, e);
+        Assert.Equal(ChunkMath.MaxBlobBytes, e);
         Assert.Equal(over, c);
     }
 

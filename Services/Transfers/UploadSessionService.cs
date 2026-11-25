@@ -8,7 +8,7 @@ using CloudSelfService.Services.Storage;
 
 namespace CloudSelfService.Services.Transfers;
 
-/// <summary>FirstPieceMd5 (optional): base64 MD5 of piece 0, so a different file with the same name and size starts afresh.</summary>
+/// <summary>FirstPieceMd5 (optional): base64 MD5 of the file's first 4 MiB (ChunkMath.FingerprintBytes) whatever the piece size, so a different file with the same name and size starts afresh.</summary>
 public sealed record BeginUploadRequest(Guid TargetId, string Folder, string FileName, long Size, bool Overwrite,
     string? FirstPieceMd5 = null);
 
@@ -27,6 +27,7 @@ public sealed class UploadSessionService
     public const int DefaultSessionHours = 24;
     public const int DefaultBlobLockMinutes = 15;
     public const int DefaultMaxOpenSessionsPerUser = 8;
+    public const int DefaultMinChunkBytesPerSecond = 64 * 1024;
     public static readonly TimeSpan DefaultPieceReadTimeout = TimeSpan.FromSeconds(120);
     public static readonly TimeSpan DefaultGrowTimeout = TimeSpan.FromSeconds(30);
     public const string BeginOperation = "UploadBegin";
@@ -59,9 +60,17 @@ public sealed class UploadSessionService
     private readonly TimeSpan _lifetime;
     private readonly TimeSpan _blobLock;
     private readonly int _maxOpenSessions;
+    private readonly int _minChunkBytesPerSecond;
 
     /// <summary>How long one piece may take to arrive before the read is abandoned. Settable for tests.</summary>
     internal TimeSpan PieceReadTimeout { get; set; } = DefaultPieceReadTimeout;
+
+    /// <summary>A piece of <paramref name="length"/> bytes may take as long as it would at the minimum data rate, never less than <see cref="PieceReadTimeout"/>.</summary>
+    internal TimeSpan PieceReadTimeoutFor(long length)
+    {
+        var atMinRate = TimeSpan.FromSeconds((double)length / _minChunkBytesPerSecond);
+        return atMinRate > PieceReadTimeout ? atMinRate : PieceReadTimeout;
+    }
 
     /// <summary>
     /// How long growing the staging file may take. The grow runs inside a database row lock, so an SDK retrying for minutes
@@ -83,13 +92,14 @@ public sealed class UploadSessionService
         _lifetime = TimeSpan.FromHours(Math.Max(1, config.GetValue<int?>("Transfers:SessionHours") ?? DefaultSessionHours));
         _blobLock = TimeSpan.FromMinutes(Math.Max(1, config.GetValue<int?>("Transfers:BlobLockMinutes") ?? DefaultBlobLockMinutes));
         _maxOpenSessions = Math.Max(1, config.GetValue<int?>("Transfers:MaxOpenSessionsPerUser") ?? DefaultMaxOpenSessionsPerUser);
+        _minChunkBytesPerSecond = Math.Max(1, config.GetValue<int?>("Transfers:MinChunkBytesPerSecond") ?? DefaultMinChunkBytesPerSecond);
     }
 
-    /// <summary>The configured upload limit and the one in force, clamped to Azure's block ceiling. Program warns once at startup when they differ.</summary>
+    /// <summary>The configured upload limit and the one in force, clamped to the largest blob the portal can stage. Program warns once at startup when they differ.</summary>
     public static (long Effective, long Configured) MaxUploadBytesFrom(IConfiguration config)
     {
         var configured = Math.Max(0, config.GetValue<long?>("Transfers:MaxUploadBytes") ?? DefaultMaxUploadBytes);
-        return (Math.Min(configured, (long)ChunkMath.MinPieceSize * ChunkMath.MaxBlocksPerBlob), configured);
+        return (Math.Min(configured, ChunkMath.MaxBlobBytes), configured);
     }
 
     public static string TooLargeMessage(long maxBytes) =>
@@ -116,7 +126,7 @@ public sealed class UploadSessionService
     {
         if (index < 0)
             return new(AccessOutcome.Invalid, $"Piece {index} is out of range.");
-        if (contentLength is not { } length || length < 0 || length > ChunkMath.MinPieceSize)
+        if (contentLength is not { } length || length < 0 || length > ChunkMath.MaxBlobPieceSize)
             return new(AccessOutcome.Invalid, "Each piece needs a Content-Length of at most one piece size.");
         if (!TryParseMd5(contentMd5Base64, out _))
             return new(AccessOutcome.Invalid, Md5RequiredMessage);
@@ -215,7 +225,7 @@ public sealed class UploadSessionService
             if (resumable.Overwrite != req.Overwrite || resumable.ExistedAtBegin != existed)
                 await _sessions.SetOverwriteAsync(resumable.Id, req.Overwrite, existed, ct);
             var received = await _sessions.ReceivedChunksAsync(resumable.Id, ct);
-            return new(AccessOutcome.Ok, Response(resumable.Id, req.Size, received), null, auth.UserUpn);
+            return new(AccessOutcome.Ok, Response(resumable.Id, req.Size, resumable.ChunkSize, received), null, auth.UserUpn);
         }
 
         // The same file at a different size, or with a different first piece, is a new upload of it: the older session
@@ -231,8 +241,9 @@ public sealed class UploadSessionService
 
         var id = Guid.NewGuid();
         var staging = target.Kind == StorageKind.FileShare ? StagingPathFor(finalPath, id) : finalPath;
+        var pieceSize = ChunkMath.PieceSizeFor(target.Kind, req.Size);
         // The row is written first so the expiry sweep can always find (and remove) whatever storage was prepared.
-        var session = new UploadSession(id, userId, target.Id, finalPath, staging, req.Size, ChunkMath.MinPieceSize,
+        var session = new UploadSession(id, userId, target.Id, finalPath, staging, req.Size, pieceSize,
             req.Overwrite, now, now + _lifetime, UploadStatus.Open, TargetKind: target.Kind, ExistedAtBegin: existed,
             StagingRemoved: target.Kind == StorageKind.BlobContainer, FirstPieceMd5: firstPieceMd5);
         await _sessions.CreateAsync(session, ct);
@@ -259,7 +270,7 @@ public sealed class UploadSessionService
         await _audit.RecordAsync(new AuditEvent(Guid.NewGuid(), _time.GetUtcNow(), userId, auth.UserUpn ?? "", target.CustomerId,
             target.Id, BeginOperation, finalPath, req.Size, AuditResult.Success, req.Overwrite ? "overwrite" : "", ctx.SourceIp,
             ctx.CorrelationId), CancellationToken.None);
-        return new(AccessOutcome.Ok, Response(id, req.Size, Array.Empty<int>()), null, auth.UserUpn);
+        return new(AccessOutcome.Ok, Response(id, req.Size, pieceSize, Array.Empty<int>()), null, auth.UserUpn);
     }
 
     public async Task<AccessResult<IReadOnlyList<int>>> StatusAsync(Guid userId, Guid sessionId, CancellationToken ct = default)
@@ -284,10 +295,10 @@ public sealed class UploadSessionService
         if (session is null)
             return new(AccessOutcome.NotFound, StorageErrorMapper.NotFoundMessage);
 
-        var count = ChunkMath.ChunkCount(session.Size, ChunkMath.MinPieceSize);
+        var count = ChunkMath.ChunkCount(session.Size, session.ChunkSize);
         if (index >= count)
             return new(AccessOutcome.Invalid, $"Piece {index} is out of range; this upload has {count}.");
-        var expected = ChunkMath.ExpectedLength(session.Size, ChunkMath.MinPieceSize, index);
+        var expected = ChunkMath.ExpectedLength(session.Size, session.ChunkSize, index);
         if (contentLength != expected)
             return new(AccessOutcome.Invalid, $"Piece {index} must be exactly {expected} bytes.");
 
@@ -297,8 +308,8 @@ public sealed class UploadSessionService
         var target = auth.Value!;
 
         // The Azure SDKs need a seekable stream of known length and Kestrel's request body is neither, so the piece is
-        // buffered (at most ChunkSize; the Chunks rate limits bound how many at once) and checked here before storage
-        // sees it. Storage still verifies the same MD5 end to end.
+        // buffered (the session's piece size, at most MaxBlobPieceSize; the Chunks rate limits bound how many at once)
+        // and checked here before storage sees it. Storage still verifies the same MD5 end to end.
         var length = (int)expected;
         var buffer = ArrayPool<byte>.Shared.Rent(Math.Max(1, length));
         try
@@ -310,7 +321,7 @@ public sealed class UploadSessionService
                 return new(AccessOutcome.Invalid, ChunkCorruptedMessage, UploadErrorCodes.Retry);
 
             var backend = _backends.For(target);
-            var offset = (long)index * ChunkMath.MinPieceSize;
+            var offset = ChunkMath.Offset(index, session.ChunkSize);
             // Files quota is charged on logical size, so the full size is reserved only when the first piece arrives
             // (bounded by the per-user byte cap). It is always grown to exactly session.Size, never offset + length: a
             // timed-out grow that Azure applies late then sets the same size again instead of truncating pieces another
@@ -365,12 +376,12 @@ public sealed class UploadSessionService
         return new(AccessOutcome.Ok);
     }
 
-    /// <summary>Reads exactly <paramref name="length"/> bytes within <see cref="PieceReadTimeout"/> and confirms nothing follows.</summary>
+    /// <summary>Reads exactly <paramref name="length"/> bytes within <see cref="PieceReadTimeoutFor"/> and confirms nothing follows.</summary>
     private async Task<AccessResult> ReadPieceAsync(Stream body, byte[] buffer, int length, Guid targetId, string path,
         AuditContext ctx, CancellationToken ct)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        timeout.CancelAfter(PieceReadTimeout);
+        timeout.CancelAfter(PieceReadTimeoutFor(length));
         try
         {
             var total = 0;
@@ -402,7 +413,7 @@ public sealed class UploadSessionService
         if (session is null)
             return new(AccessOutcome.NotFound, StorageErrorMapper.NotFoundMessage);
 
-        var count = ChunkMath.ChunkCount(session.Size, ChunkMath.MinPieceSize);
+        var count = ChunkMath.ChunkCount(session.Size, session.ChunkSize);
         var received = (await _sessions.ReceivedChunksAsync(session.Id, ct)).Where(i => i >= 0 && i < count).Distinct().Count();
         if (received < count)
             return new(AccessOutcome.Invalid, MissingPiecesMessage(count - received));
@@ -587,8 +598,13 @@ public sealed class UploadSessionService
             : null;
     }
 
-    private BeginUploadResponse Response(Guid id, long size, IReadOnlyList<int> received) =>
-        new(id, ChunkMath.MinPieceSize, ChunkMath.ChunkCount(size, ChunkMath.MinPieceSize), _parallel, received);
+    private BeginUploadResponse Response(Guid id, long size, int pieceSize, IReadOnlyList<int> received) =>
+        new(id, pieceSize, ChunkMath.ChunkCount(size, pieceSize), ParallelFor(pieceSize), received);
+
+    // Larger pieces keep about 16 MiB in flight per upload, as four 4 MiB pieces do, but never fewer than two. Not
+    // Math.Clamp: it throws when ParallelChunks is configured as 1, which must stay the ceiling.
+    private int ParallelFor(int pieceSize) =>
+        pieceSize == ChunkMath.MinPieceSize ? _parallel : Math.Min(_parallel, Math.Max(2, 16 * 1024 * 1024 / pieceSize));
 
     private bool HoldsBlobName(UploadSession s, DateTimeOffset now) =>
         s.Status == UploadStatus.Completing || now - s.CreatedAt < _blobLock

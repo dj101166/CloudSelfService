@@ -43,6 +43,16 @@ public class ChunkMathTests
     public void ExpectedLength_ZeroSize_Throws() =>
         Assert.Throws<ArgumentOutOfRangeException>(() => ChunkMath.ExpectedLength(0, ChunkMath.MinPieceSize, 0));
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void PieceArithmetic_NonPositivePieceSize_Throws(int pieceSize)
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => ChunkMath.ChunkCount(EightMiB, pieceSize));
+        Assert.Throws<ArgumentOutOfRangeException>(() => ChunkMath.ExpectedLength(EightMiB, pieceSize, 0));
+        Assert.Throws<ArgumentOutOfRangeException>(() => ChunkMath.Offset(0, pieceSize));
+    }
+
     [Fact]
     public void BlockId_AllIndicesSameLength()
     {

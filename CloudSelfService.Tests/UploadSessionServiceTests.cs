@@ -67,16 +67,18 @@ public class UploadSessionServiceTests
     }
 
     private UploadSessionService Service(long? maxBytes = null, IUploadSessionStore? sessions = null, int? maxOpen = null,
-        ILogger<UploadSessionService>? logger = null)
+        ILogger<UploadSessionService>? logger = null, IStorageBackendResolver? backends = null, int parallel = 6,
+        int? minChunkBytesPerSecond = null)
     {
-        var settings = new Dictionary<string, string?> { ["Transfers:ParallelChunks"] = "6" };
+        var settings = new Dictionary<string, string?> { ["Transfers:ParallelChunks"] = parallel.ToString() };
         if (maxBytes is not null) settings["Transfers:MaxUploadBytes"] = maxBytes.ToString();
         if (maxOpen is not null) settings["Transfers:MaxOpenSessionsPerUser"] = maxOpen.ToString();
+        if (minChunkBytesPerSecond is not null) settings["Transfers:MinChunkBytesPerSecond"] = minChunkBytesPerSecond.ToString();
         var config = new ConfigurationBuilder().AddInMemoryCollection(settings).Build();
         var audit = new AuditService(_audit, NullLogger<AuditService>.Instance);
         var access = new StorageAccessService(_users, _customers, _targets, _grants, _fake, audit, new OwnerConfig(""),
             _time, NullLogger<StorageAccessService>.Instance);
-        return new UploadSessionService(access, sessions ?? _sessions, _fake, audit, _time, config,
+        return new UploadSessionService(access, sessions ?? _sessions, backends ?? _fake, audit, _time, config,
             logger ?? NullLogger<UploadSessionService>.Instance);
     }
 
@@ -1727,7 +1729,7 @@ public class UploadSessionServiceTests
     [Theory]
     [InlineData(-1, 10L, "AAAAAAAAAAAAAAAAAAAAAA==")]
     [InlineData(0, null, "AAAAAAAAAAAAAAAAAAAAAA==")]
-    [InlineData(0, 4L * 1024 * 1024 + 1, "AAAAAAAAAAAAAAAAAAAAAA==")]
+    [InlineData(0, 32L * 1024 * 1024 + 1, "AAAAAAAAAAAAAAAAAAAAAA==")]
     [InlineData(0, 10L, null)]
     [InlineData(0, 10L, "short")]
     public async Task PutChunk_MalformedRequest_InvalidWithoutTouchingTheStore(int index, long? length, string? md5)
@@ -2478,15 +2480,174 @@ public class UploadSessionServiceTests
     {
         // The over-ceiling warning is logged once at startup (Program); a scoped service must not repeat it.
         var log = new WarningLogger();
-        var svc = Service(maxBytes: 1L << 40, logger: log);
+        var svc = Service(maxBytes: 1L << 41, logger: log);
 
-        var atCeiling = await svc.BeginAsync(_contrib.Id, new BeginUploadRequest(_share.Id, "", "a.bin", (long)ChunkMath.MinPieceSize * ChunkMath.MaxBlocksPerBlob, false), Ctx);
-        var overCeiling = await svc.BeginAsync(_contrib.Id, new BeginUploadRequest(_share.Id, "", "b.bin", (long)ChunkMath.MinPieceSize * ChunkMath.MaxBlocksPerBlob + 1, false), Ctx);
+        var atCeiling = await svc.BeginAsync(_contrib.Id, new BeginUploadRequest(_blob.Id, "", "a.bin", ChunkMath.MaxBlobBytes, false), Ctx);
+        var overCeiling = await svc.BeginAsync(_contrib.Id, new BeginUploadRequest(_blob.Id, "", "b.bin", ChunkMath.MaxBlobBytes + 1, false), Ctx);
 
         Assert.Equal(0, log.Warnings);
         Assert.Equal(AccessOutcome.Ok, atCeiling.Outcome);
+        Assert.Equal(ChunkMath.MaxBlobPieceSize, atCeiling.Value!.ChunkSize);
+        Assert.Equal(ChunkMath.MaxBlocksPerBlob, atCeiling.Value.ChunkCount);
         Assert.Equal(AccessOutcome.Invalid, overCeiling.Outcome);
-        Assert.Equal(UploadSessionService.TooLargeMessage((long)ChunkMath.MinPieceSize * ChunkMath.MaxBlocksPerBlob), overCeiling.Message);
+        Assert.Equal(UploadSessionService.TooLargeMessage(ChunkMath.MaxBlobBytes), overCeiling.Message);
+    }
+
+    // ---- Per-session piece size ----
+
+    private const long LargeBlobSize = 50_000L * 4 * Mi + 1;
+
+    [Fact]
+    public async Task Begin_LargeBlob_ReturnsLargerPieceSize()
+    {
+        var begin = await BeginOk(Service(maxBytes: LargeBlobSize + 1), _contrib, _blob, "", "big.bin", LargeBlobSize);
+
+        Assert.Equal(8 * Mi, begin.ChunkSize);
+        Assert.Equal(25_001, begin.ChunkCount);
+        Assert.Equal(2, begin.ParallelChunks);
+        Assert.Equal(8 * Mi, (await _sessions.GetAsync(begin.SessionId))!.ChunkSize);
+    }
+
+    [Fact]
+    public async Task Begin_LargeFile_StaysFourMiB()
+    {
+        var begin = await BeginOk(Service(maxBytes: LargeBlobSize + 1), _contrib, _share, "", "big.bin", LargeBlobSize);
+
+        Assert.Equal(4 * Mi, begin.ChunkSize);
+        Assert.Equal(50_001, begin.ChunkCount);
+        Assert.Equal(6, begin.ParallelChunks);
+        Assert.Equal(4 * Mi, (await _sessions.GetAsync(begin.SessionId))!.ChunkSize);
+    }
+
+    [Fact]
+    public async Task Begin_LargePieceWithSingleParallelConfigured_DoesNotRaiseParallelism()
+    {
+        var begin = await BeginOk(Service(maxBytes: LargeBlobSize + 1, parallel: 1), _contrib, _blob, "", "big.bin", LargeBlobSize);
+
+        Assert.Equal(8 * Mi, begin.ChunkSize);
+        Assert.Equal(1, begin.ParallelChunks);
+    }
+
+    [Fact]
+    public async Task Begin_ResumesLegacySession_ReturnsStoredPieceSize()
+    {
+        var legacy = await CreateBlobSession("big.bin", LargeBlobSize, 4 * Mi);
+        await _sessions.MarkChunkAsync(legacy.Id, 3, Start);
+
+        var begin = await BeginOk(Service(maxBytes: LargeBlobSize + 1), _contrib, _blob, "", "big.bin", LargeBlobSize);
+
+        Assert.Equal(legacy.Id, begin.SessionId);
+        Assert.Equal(4 * Mi, begin.ChunkSize);
+        Assert.Equal(50_001, begin.ChunkCount);
+        Assert.Equal(6, begin.ParallelChunks);
+        Assert.Equal(new[] { 3 }, begin.Received);
+    }
+
+    [Fact]
+    public async Task PutChunk_LargePieceSession_AcceptsFullPieceAndWritesAtOffset()
+    {
+        var recorder = new RecordingBackend(_fake);
+        var svc = Service(backends: recorder);
+        var session = await CreateBlobSession("big.bin", 16L * Mi + 10, 8 * Mi);
+        var piece = Bytes(8 * Mi, seed: 3);
+
+        var ok = await svc.PutChunkAsync(_contrib.Id, session.Id, 1, new MemoryStream(piece), piece.Length, Md5(piece), Ctx);
+        var wrongSize = Bytes(4 * Mi);
+        var invalid = await svc.PutChunkAsync(_contrib.Id, session.Id, 1, new MemoryStream(wrongSize), wrongSize.Length,
+            Md5(wrongSize), Ctx);
+
+        Assert.Equal(AccessOutcome.Ok, ok.Outcome);
+        var write = Assert.Single(recorder.Writes);
+        Assert.Equal(ChunkMath.BlockId(session.Id, 1), write.BlockId);
+        Assert.Equal(8L * Mi, write.Offset);
+        Assert.Equal(piece, write.Data);
+        Assert.Equal(AccessOutcome.Invalid, invalid.Outcome);
+        Assert.Equal("Piece 1 must be exactly 8388608 bytes.", invalid.Message);
+    }
+
+    [Fact]
+    public async Task PutChunk_LegacySession_UsesStoredPieceSize()
+    {
+        var recorder = new RecordingBackend(_fake) { CommitWithoutBlocks = true };
+        var svc = Service(backends: recorder);
+        var session = await CreateBlobSession("big.bin", LargeBlobSize, 4 * Mi);
+        for (var i = 0; i < 50_000; i++)
+            await _sessions.MarkChunkAsync(session.Id, i, Start);
+        var last = new byte[] { 42 };
+
+        var put = await svc.PutChunkAsync(_contrib.Id, session.Id, 50_000, new MemoryStream(last), 1, Md5(last), Ctx);
+        var complete = await svc.CompleteAsync(_contrib.Id, session.Id, Ctx);
+
+        Assert.Equal(AccessOutcome.Ok, put.Outcome);
+        Assert.Equal(50_000L * 4 * Mi, Assert.Single(recorder.Writes).Offset);
+        Assert.Equal(AccessOutcome.Ok, complete.Outcome);
+        Assert.Equal(50_001, recorder.CommittedBlockIds!.Count);
+        Assert.Equal(ChunkMath.BlockId(session.Id, 50_000), recorder.CommittedBlockIds[^1]);
+    }
+
+    [Fact]
+    public void PieceReadTimeout_ScalesWithPieceLengthAboveTheFloor()
+    {
+        var svc = Service();
+
+        Assert.Equal(UploadSessionService.DefaultPieceReadTimeout, svc.PieceReadTimeoutFor(ChunkMath.MinPieceSize));
+        Assert.Equal(TimeSpan.FromSeconds(512), svc.PieceReadTimeoutFor(ChunkMath.MaxBlobPieceSize));
+        Assert.Equal(TimeSpan.FromSeconds(8 * Mi / 1000.0), Service(minChunkBytesPerSecond: 1000).PieceReadTimeoutFor(8 * Mi));
+    }
+
+    private async Task<UploadSession> CreateBlobSession(string path, long size, int chunkSize)
+    {
+        var session = new UploadSession(Guid.NewGuid(), _contrib.Id, _blob.Id, path, path, size, chunkSize, false, Start,
+            Start.AddHours(24), UploadStatus.Open, TargetKind: StorageKind.BlobContainer, StagingRemoved: true);
+        await _sessions.CreateAsync(session);
+        await _fake.BeginUploadAsync(_blob, path, size, default, session.Id);
+        return session;
+    }
+
+    /// <summary>Records chunk writes and commits; the 195 GiB legacy case commits without the fake holding every block.</summary>
+    private sealed class RecordingBackend(FakeStorageBackend inner) : IStorageBackend, IStorageBackendResolver
+    {
+        public readonly List<(string BlockId, long Offset, byte[] Data)> Writes = new();
+        public bool CommitWithoutBlocks { get; init; }
+        public IReadOnlyList<string>? CommittedBlockIds { get; private set; }
+
+        public IStorageBackend For(StorageTarget t) => this;
+        public Task<StorageListing> ListAsync(StorageTarget t, string folder, string? continuation, int pageSize, CancellationToken ct) =>
+            inner.ListAsync(t, folder, continuation, pageSize, ct);
+        public Task<StorageItem?> GetItemAsync(StorageTarget t, string path, CancellationToken ct) => inner.GetItemAsync(t, path, ct);
+        public Task<Stream> OpenReadAsync(StorageTarget t, string path, long offset, long? length, CancellationToken ct,
+            string? expectedETag = null) => inner.OpenReadAsync(t, path, offset, length, ct, expectedETag);
+        public Task CreateFolderAsync(StorageTarget t, string path, CancellationToken ct) => inner.CreateFolderAsync(t, path, ct);
+        public Task MoveAsync(StorageTarget t, string from, string to, bool isFolder, CancellationToken ct) =>
+            inner.MoveAsync(t, from, to, isFolder, ct);
+        public Task DeleteAsync(StorageTarget t, string path, bool isFolder, CancellationToken ct) => inner.DeleteAsync(t, path, isFolder, ct);
+        public Task BeginUploadAsync(StorageTarget t, string stagingPath, long size, CancellationToken ct, Guid? uploadSessionId = null) =>
+            inner.BeginUploadAsync(t, stagingPath, size, ct, uploadSessionId);
+        public Task GrowStagingAsync(StorageTarget t, string stagingPath, long size, CancellationToken ct) =>
+            inner.GrowStagingAsync(t, stagingPath, size, ct);
+
+        public async Task WriteChunkAsync(StorageTarget t, string stagingPath, string finalPath, string blockId, long offset,
+            Stream data, long length, byte[] md5, CancellationToken ct)
+        {
+            var copy = new byte[length];
+            data.ReadExactly(copy);
+            lock (Writes) Writes.Add((blockId, offset, copy));
+            await inner.WriteChunkAsync(t, stagingPath, finalPath, blockId, offset, new MemoryStream(copy), length, md5, ct);
+        }
+
+        public Task CompleteUploadAsync(StorageTarget t, string stagingPath, string finalPath, IReadOnlyList<string> blockIds,
+            bool overwrite, CancellationToken ct, Guid? uploadSessionId = null, long? expectedSize = null)
+        {
+            CommittedBlockIds = blockIds;
+            return CommitWithoutBlocks
+                ? Task.CompletedTask
+                : inner.CompleteUploadAsync(t, stagingPath, finalPath, blockIds, overwrite, ct, uploadSessionId, expectedSize);
+        }
+
+        public Task<bool> HasLandedAsync(StorageTarget t, string stagingPath, string finalPath, Guid sessionId, long size,
+            CancellationToken ct) => inner.HasLandedAsync(t, stagingPath, finalPath, sessionId, size, ct);
+        public Task AbortUploadAsync(StorageTarget t, string stagingPath, CancellationToken ct) => inner.AbortUploadAsync(t, stagingPath, ct);
+        public Task ProbeAsync(StorageTarget t, CancellationToken ct) => inner.ProbeAsync(t, ct);
     }
 
     [Fact]

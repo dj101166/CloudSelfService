@@ -163,14 +163,28 @@ public sealed class UploadEndpointTests : IDisposable
     }
 
     [Fact]
-    public async Task PutChunk_BodyLargerThanChunk_413()
+    public async Task PutChunk_BodyLargerThanSessionPiece_400()
     {
         var (client, token, target) = await ContributorAsync();
         var session = await BeginOkAsync(client, token, target, "a.bin", 3L * ChunkMath.MinPieceSize);
 
         var response = await client.SendAsync(Chunk(token, session, 0, Bytes(ChunkMath.MinPieceSize + 1)));
 
-        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, response.StatusCode);
+        await AssertError(response, HttpStatusCode.BadRequest, UploadErrorCodes.Invalid);
+        Assert.DoesNotContain(_factory.Storage.Calls, c => c.StartsWith("WriteChunk"));
+    }
+
+    [Fact]
+    public async Task PutChunk_OverMaxPiece_Returns413()
+    {
+        var (client, token, target) = await ContributorAsync();
+        var session = await BeginOkAsync(client, token, target, "a.bin", 3L * ChunkMath.MinPieceSize);
+
+        var response = await client.SendAsync(Chunk(token, session, 0, Bytes(ChunkMath.MaxBlobPieceSize + 1)));
+
+        await AssertError(response, HttpStatusCode.RequestEntityTooLarge, UploadErrorCodes.TooLarge);
+        Assert.Equal(UploadEndpoints.TooLargeMessage, (await JsonOf(response)).GetProperty("error").GetString());
+        Assert.Equal("An upload piece is larger than the 32 MiB maximum piece size.", UploadEndpoints.TooLargeMessage);
         Assert.DoesNotContain(_factory.Storage.Calls, c => c.StartsWith("WriteChunk"));
     }
 
@@ -624,7 +638,7 @@ public sealed class UploadEndpointTests : IDisposable
         await AssertError(await client.SendAsync(Chunk(token, session, 0, Bytes(9))), HttpStatusCode.BadRequest, UploadErrorCodes.Invalid);
         await AssertError(await client.SendAsync(Chunk(token, session, 5, data)), HttpStatusCode.BadRequest, UploadErrorCodes.Invalid);
         await AssertError(await client.SendAsync(Chunk(token, Guid.NewGuid(), 0, data)), HttpStatusCode.NotFound, UploadErrorCodes.NotFound);
-        await AssertError(await client.SendAsync(Chunk(token, session, 0, Bytes(ChunkMath.MinPieceSize + 1))),
+        await AssertError(await client.SendAsync(Chunk(token, session, 0, Bytes(ChunkMath.MaxBlobPieceSize + 1))),
             HttpStatusCode.RequestEntityTooLarge, UploadErrorCodes.TooLarge);
         _factory.Storage.ThrowUnreachable = true;
         await AssertError(await client.SendAsync(Chunk(token, session, 0, data)), HttpStatusCode.ServiceUnavailable, UploadErrorCodes.Unavailable);

@@ -9,8 +9,9 @@
     var RETRY_DELAYS = [1000, 2000, 4000, 8000, 16000];
     var MAX_BUSY_WAITS = 10;
     var DEFAULT_RETRY_AFTER_SECONDS = 5;
-    // The server's fixed piece size (ChunkMath.ChunkSize); Begin confirms it, but piece 0 is hashed before Begin.
-    var CHUNK_SIZE = 4194304;
+    // The first-piece fingerprint is always the file's first 4 MiB (ChunkMath.FingerprintBytes), whatever piece size
+    // Begin later returns: it is hashed before Begin, and a resumed session must match on the same bytes.
+    var FINGERPRINT_BYTES = 4194304;
     var MAX_RETRY_AFTER_SECONDS = 300;
     var MAX_RESTARTS = 3;
     var PROGRESS_INTERVAL_MS = 250;
@@ -246,7 +247,7 @@
     function firstPieceMd5(u) {
         if (u.firstPieceMd5 !== undefined) { return Promise.resolve(u.firstPieceMd5); }
         if (u.file.size === 0) { u.firstPieceMd5 = null; return Promise.resolve(null); }
-        return u.file.slice(0, Math.min(CHUNK_SIZE, u.file.size)).arrayBuffer().then(function (buffer) {
+        return u.file.slice(0, Math.min(FINGERPRINT_BYTES, u.file.size)).arrayBuffer().then(function (buffer) {
             u.firstPieceMd5 = base64Md5(buffer);
             return u.firstPieceMd5;
         }, function () {
