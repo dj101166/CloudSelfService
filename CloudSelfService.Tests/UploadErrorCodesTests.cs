@@ -17,6 +17,7 @@ public class UploadErrorCodesTests
         Assert.Equal("not_found", UploadErrorCodes.NotFound);
         Assert.Equal("too_large", UploadErrorCodes.TooLarge);
         Assert.Equal("busy", UploadErrorCodes.Busy);
+        Assert.Equal("wait", UploadErrorCodes.Wait);
         Assert.Equal("unavailable", UploadErrorCodes.Unavailable);
     }
 }

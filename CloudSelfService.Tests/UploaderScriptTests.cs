@@ -57,6 +57,15 @@ public class UploaderScriptTests
             Assert.Contains($"'{code}'", js);
     }
 
+    // A piece refused for the memory budget is a wait, never a failure: it must not use up the retry or busy allowance.
+    [Fact]
+    public void Uploader_HandlesWaitCode()
+    {
+        var js = Script();
+        Assert.Contains("'wait'", js);
+        Assert.Contains("e.kind === 'wait'", js);
+    }
+
     [Fact]
     public void Uploader_SignalsActivityToSessionGuard_AtMostOncePerMinute()
     {

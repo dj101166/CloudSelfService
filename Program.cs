@@ -88,6 +88,8 @@ builder.Services.AddScoped<StorageAccessService>();
 builder.Services.AddSingleton<ProbeCooldown>();
 builder.Services.AddScoped<AdminService>();
 builder.Services.AddScoped<UploadSessionService>();
+builder.Services.AddSingleton<PieceMemoryBudget>();
+builder.Services.AddSingleton<ChunkThroughputLimiter>();
 builder.Services.AddHostedService<UploadCleanupService>();
 builder.Services.AddRateLimiter(o => RateLimits.Configure(o, builder.Configuration));
 builder.Services.AddHsts(options => { options.MaxAge = TimeSpan.FromDays(365); });

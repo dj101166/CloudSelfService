@@ -8,10 +8,11 @@ namespace CloudSelfService.Endpoints;
 /// <summary>
 /// Limits for the transfer endpoints. Downloads and the upload control calls share <see cref="Transfers"/> (per user:
 /// concurrency, then a 120/min bucket). Chunk PUTs use <see cref="Chunks"/>, because one large file is thousands of
-/// chunks (a 10 GB file is 2,560): a global concurrency cap, then per-user concurrency, then a per-user bucket of
-/// Transfers:ChunksPerMinute (default 600, about 40 MB/s of 4 MiB pieces). Each in-flight chunk PUT buffers one piece,
-/// so the concurrency caps are the memory bound: ChunkSize (4 MiB) x MaxConcurrentChunksPerUser (16) = 64 MiB per user,
-/// and ChunkSize x MaxConcurrentChunksTotal (64) = 256 MiB for the whole app.
+/// pieces: a global concurrency cap, then per-user concurrency, which guard the request rate and the database pool.
+/// Memory is bounded by <see cref="PieceMemoryBudget"/>, which counts the bytes of buffered pieces, not their number.
+/// Throughput is bounded by <see cref="ChunkThroughputLimiter"/>, a per-user bucket of Transfers:ChunksPerMinute
+/// (default 600) charged in 4 MiB units, so a 32 MiB piece costs 8 and larger pieces never raise the per-user ceiling
+/// above 600 x 4 MiB a minute (about 40 MB/s).
 /// </summary>
 public static class RateLimits
 {
@@ -37,7 +38,6 @@ public static class RateLimits
         var perMinute = Math.Max(1, config.GetValue<int?>("Transfers:RequestsPerMinute") ?? DefaultRequestsPerMinute);
         var concurrent = Math.Max(1, config.GetValue<int?>("Transfers:MaxConcurrentPerUser") ?? DefaultMaxConcurrentPerUser);
         var chunks = Math.Max(1, config.GetValue<int?>("Transfers:MaxConcurrentChunksPerUser") ?? DefaultMaxConcurrentChunksPerUser);
-        var chunksPerMinute = Math.Max(1, config.GetValue<int?>("Transfers:ChunksPerMinute") ?? DefaultChunksPerMinute);
         var chunksTotal = Math.Max(1, config.GetValue<int?>("Transfers:MaxConcurrentChunksTotal") ?? DefaultMaxConcurrentChunksTotal);
         // One limiter instance shared by every partition, so it bounds the whole app rather than each user.
         var globalChunks = new ConcurrencyLimiter(new ConcurrencyLimiterOptions { PermitLimit = chunksTotal, QueueLimit = 0 });
@@ -78,16 +78,7 @@ public static class RateLimits
         }));
         options.AddPolicy<string>(Chunks, ctx => RateLimitPartition.Get(PartitionKey(ctx), _ => new ChainedLimiter(
             new SharedLimiter(globalChunks),
-            new ChainedLimiter(
-                new ConcurrencyLimiter(new ConcurrencyLimiterOptions { PermitLimit = chunks, QueueLimit = 0 }),
-                new TokenBucketRateLimiter(new TokenBucketRateLimiterOptions
-                {
-                    TokenLimit = chunksPerMinute,
-                    TokensPerPeriod = chunksPerMinute,
-                    ReplenishmentPeriod = TimeSpan.FromMinutes(1),
-                    QueueLimit = 0,
-                    AutoReplenishment = true,
-                })))));
+            new ConcurrencyLimiter(new ConcurrencyLimiterOptions { PermitLimit = chunks, QueueLimit = 0 }))));
     }
 
     /// <summary>
@@ -155,4 +146,45 @@ public static class RateLimits
             }
         }
     }
+}
+
+/// <summary>
+/// The per-user chunk bucket. A rate-limiting policy takes one permit per request, so this is charged from the upload
+/// guard instead, after the concurrency limits and the request checks, one permit per started 4 MiB of the piece. The
+/// partitioned limiter disposes idle, full buckets, so users who stop uploading leave nothing behind.
+/// </summary>
+public sealed class ChunkThroughputLimiter : IDisposable
+{
+    private readonly PartitionedRateLimiter<string> _buckets;
+    private readonly int _tokenLimit;
+
+    public ChunkThroughputLimiter(IConfiguration config)
+    {
+        var tokenLimit = Math.Max(1, config.GetValue<int?>("Transfers:ChunksPerMinute") ?? RateLimits.DefaultChunksPerMinute);
+        _tokenLimit = tokenLimit;
+        _buckets = PartitionedRateLimiter.Create<string, string>(key => RateLimitPartition.GetTokenBucketLimiter(key, _ =>
+            new TokenBucketRateLimiterOptions
+            {
+                TokenLimit = tokenLimit,
+                TokensPerPeriod = tokenLimit,
+                ReplenishmentPeriod = TimeSpan.FromMinutes(1),
+                QueueLimit = 0,
+                AutoReplenishment = true,
+            }));
+    }
+
+    public static int PermitsFor(long? contentLength) =>
+        contentLength is { } length && length > 0
+            ? (int)Math.Min(int.MaxValue, (length + ChunkMath.MinPieceSize - 1) / ChunkMath.MinPieceSize)
+            : 1;
+
+    // Capped at the bucket size: a piece costing more than a whole minute's allowance (a low ChunksPerMinute) would
+    // otherwise be refused forever; it empties the bucket instead.
+    public bool TryAcquire(HttpContext ctx, long? contentLength)
+    {
+        using var lease = _buckets.AttemptAcquire(RateLimits.PartitionKey(ctx), Math.Min(PermitsFor(contentLength), _tokenLimit));
+        return lease.IsAcquired;
+    }
+
+    public void Dispose() => _buckets.Dispose();
 }

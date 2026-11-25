@@ -46,14 +46,18 @@ public sealed class UploadSessionService
     public const string StorageSlowMessage = "Storage was slow to respond; the piece will be retried.";
     public const string InterruptedMessage = "Upload was interrupted; please start again.";
     public const string FirstPieceMd5InvalidMessage = "firstPieceMd5 must be the base64 MD5 of the first piece.";
+    public const string WaitMessage = "The server is busy with other large uploads. This piece will be sent again shortly.";
     private const string StagingSuffix = ".cssupload-";
     private const int MaxSegmentLength = 255;
+    // Four 4 MiB pieces in flight is what today's uploads run at; larger pieces send fewer at once to stay near it.
+    private const int InFlightTargetBytes = 16 * 1024 * 1024;
 
     private readonly StorageAccessService _access;
     private readonly IUploadSessionStore _sessions;
     private readonly IStorageBackendResolver _backends;
     private readonly AuditService _audit;
     private readonly TimeProvider _time;
+    private readonly PieceMemoryBudget _budget;
     private readonly ILogger<UploadSessionService> _logger;
     private readonly long _maxBytes;
     private readonly int _parallel;
@@ -79,21 +83,26 @@ public sealed class UploadSessionService
     internal TimeSpan GrowTimeout { get; set; } = DefaultGrowTimeout;
 
     public UploadSessionService(StorageAccessService access, IUploadSessionStore sessions, IStorageBackendResolver backends,
-        AuditService audit, TimeProvider time, IConfiguration config, ILogger<UploadSessionService> logger)
+        AuditService audit, TimeProvider time, IConfiguration config, PieceMemoryBudget budget, ILogger<UploadSessionService> logger)
     {
         _access = access;
         _sessions = sessions;
         _backends = backends;
         _audit = audit;
         _time = time;
+        _budget = budget;
         _logger = logger;
         _maxBytes = MaxUploadBytesFrom(config).Effective;
         _parallel = Math.Clamp(config.GetValue<int?>("Transfers:ParallelChunks") ?? DefaultParallelChunks, 1, 16);
         _lifetime = TimeSpan.FromHours(Math.Max(1, config.GetValue<int?>("Transfers:SessionHours") ?? DefaultSessionHours));
         _blobLock = TimeSpan.FromMinutes(Math.Max(1, config.GetValue<int?>("Transfers:BlobLockMinutes") ?? DefaultBlobLockMinutes));
         _maxOpenSessions = Math.Max(1, config.GetValue<int?>("Transfers:MaxOpenSessionsPerUser") ?? DefaultMaxOpenSessionsPerUser);
-        _minChunkBytesPerSecond = Math.Max(1, config.GetValue<int?>("Transfers:MinChunkBytesPerSecond") ?? DefaultMinChunkBytesPerSecond);
+        _minChunkBytesPerSecond = MinChunkBytesPerSecondFrom(config);
     }
+
+    /// <summary>Transfers:MinChunkBytesPerSecond, at least 1: the floor both Kestrel's body data rate and the piece read timeout use.</summary>
+    public static int MinChunkBytesPerSecondFrom(IConfiguration config) =>
+        Math.Max(1, config.GetValue<int?>("Transfers:MinChunkBytesPerSecond") ?? DefaultMinChunkBytesPerSecond);
 
     /// <summary>The configured upload limit and the one in force, clamped to the largest blob the portal can stage. Program warns once at startup when they differ.</summary>
     public static (long Effective, long Configured) MaxUploadBytesFrom(IConfiguration config)
@@ -308,8 +317,11 @@ public sealed class UploadSessionService
         var target = auth.Value!;
 
         // The Azure SDKs need a seekable stream of known length and Kestrel's request body is neither, so the piece is
-        // buffered (the session's piece size, at most MaxBlobPieceSize; the Chunks rate limits bound how many at once)
-        // and checked here before storage sees it. Storage still verifies the same MD5 end to end.
+        // buffered (the session's piece size, at most MaxBlobPieceSize) and checked here before storage sees it. Storage
+        // still verifies the same MD5 end to end. The byte budget is taken before the buffer exists and held until the
+        // piece is written or has failed.
+        if (!_budget.TryReserve(userId, expected, out var budgetLease))
+            return new(AccessOutcome.Busy, WaitMessage, UploadErrorCodes.Wait);
         var length = (int)expected;
         var buffer = ArrayPool<byte>.Shared.Rent(Math.Max(1, length));
         try
@@ -370,6 +382,7 @@ public sealed class UploadSessionService
         finally
         {
             ArrayPool<byte>.Shared.Return(buffer, clearArray: true);
+            budgetLease.Dispose();
         }
 
         await _sessions.MarkChunkAsync(session.Id, index, _time.GetUtcNow(), ct);
@@ -601,10 +614,9 @@ public sealed class UploadSessionService
     private BeginUploadResponse Response(Guid id, long size, int pieceSize, IReadOnlyList<int> received) =>
         new(id, pieceSize, ChunkMath.ChunkCount(size, pieceSize), ParallelFor(pieceSize), received);
 
-    // Larger pieces keep about 16 MiB in flight per upload, as four 4 MiB pieces do, but never fewer than two. Not
-    // Math.Clamp: it throws when ParallelChunks is configured as 1, which must stay the ceiling.
+    // Never fewer than two. Not Math.Clamp: it throws when ParallelChunks is configured as 1, which must stay the ceiling.
     private int ParallelFor(int pieceSize) =>
-        pieceSize == ChunkMath.MinPieceSize ? _parallel : Math.Min(_parallel, Math.Max(2, 16 * 1024 * 1024 / pieceSize));
+        pieceSize == ChunkMath.MinPieceSize ? _parallel : Math.Min(_parallel, Math.Max(2, InFlightTargetBytes / pieceSize));
 
     private bool HoldsBlobName(UploadSession s, DateTimeOffset now) =>
         s.Status == UploadStatus.Completing || now - s.CreatedAt < _blobLock

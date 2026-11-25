@@ -181,6 +181,7 @@
             case 'retry': return new UploadError('transient', message, code);
             case 'unavailable': return new UploadError('transient', message, code);
             case 'busy': return new UploadError('busy', message, code, retryAfter);
+            case 'wait': return new UploadError('wait', message, code, retryAfter);
             case 'denied': return new UploadError('denied', message, code);
             case 'invalid': return new UploadError('fatal', message, code);
             case 'too_large': return new UploadError('fatal', message, code);
@@ -189,13 +190,18 @@
     }
 
     // Retries transient failures on the agreed backoff. A busy answer waits Retry-After and only starts counting as an
-    // attempt after MAX_BUSY_WAITS of them.
+    // attempt after MAX_BUSY_WAITS of them. A wait answer (the server's memory for large pieces is full) is no failure at
+    // all: it waits Retry-After for as long as it takes, counting nothing, until the piece goes or the upload is aborted.
     function withRetry(u, work, signal) {
         var attempt = 0;
         var busyWaits = 0;
         function run() {
             return work().catch(function (e) {
                 if (!(e instanceof UploadError)) { e = new UploadError('transient', INTERRUPTED, 'network'); }
+                if (e.kind === 'wait') {
+                    setStatus(u, 'waiting', e.message);
+                    return sleep(Math.max(1, e.retryAfter) * 1000, signal).then(resumeStatus).then(run);
+                }
                 if (e.kind === 'busy') {
                     busyWaits++;
                     if (busyWaits > MAX_BUSY_WAITS) {

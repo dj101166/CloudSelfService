@@ -23,7 +23,6 @@ public static class UploadEndpoints
     public const string JsonRequiredMessage = "Send this request as application/json.";
     /// <summary>Begin's JSON is a few hundred bytes; every non-chunk upload route gets this body cap.</summary>
     public const long ControlBodyLimit = 16 * 1024;
-    public const int DefaultMinChunkBytesPerSecond = UploadSessionService.DefaultMinChunkBytesPerSecond;
 
     public static void MapUploadEndpoints(this WebApplication app)
     {
@@ -35,8 +34,9 @@ public static class UploadEndpoints
         uploads.MapDelete("/{id:guid}", AbortAsync).RequireRateLimiting(RateLimits.Transfers);
     }
 
-    // Runs before the handler reads any body: same-origin fetch, body limits, content type, antiforgery, then a user id.
-    private static async ValueTask<object?> GuardAsync(EndpointFilterInvocationContext invocation, EndpointFilterDelegate next)
+    // Runs before the handler reads any body: same-origin fetch, body limits, content type, antiforgery, a user id, then
+    // for a chunk PUT the per-user throughput bucket.
+    internal static async ValueTask<object?> GuardAsync(EndpointFilterInvocationContext invocation, EndpointFilterDelegate next)
     {
         var ctx = invocation.HttpContext;
         ctx.Response.Headers.CacheControl = "no-store";
@@ -72,6 +72,8 @@ public static class UploadEndpoints
         }
         if (AppClaims.UserIdOf(ctx.User) is null)
             return Results.Unauthorized();
+        if (isChunk && !ctx.RequestServices.GetRequiredService<ChunkThroughputLimiter>().TryAcquire(ctx, ctx.Request.ContentLength))
+            return Busy(null, UploadErrorCodes.Busy);
         return await next(invocation);
     }
 
@@ -85,8 +87,7 @@ public static class UploadEndpoints
         if (!HttpProtocol.IsHttp11(ctx.Request.Protocol)
             || ctx.Features.Get<IHttpMinRequestBodyDataRateFeature>() is not { } rate)
             return;
-        var minRate = Math.Max(1, config.GetValue<int?>("Transfers:MinChunkBytesPerSecond") ?? DefaultMinChunkBytesPerSecond);
-        rate.MinDataRate = new MinDataRate(minRate, TimeSpan.FromSeconds(5));
+        rate.MinDataRate = new MinDataRate(UploadSessionService.MinChunkBytesPerSecondFrom(config), TimeSpan.FromSeconds(5));
     }
 
     private static Task<IResult> BeginAsync(HttpContext ctx, UploadSessionService uploads, ILoggerFactory loggers) =>
@@ -183,18 +184,18 @@ public static class UploadEndpoints
         AccessOutcome.Invalid => Error(StatusCodes.Status400BadRequest, message, code ?? UploadErrorCodes.Invalid),
         AccessOutcome.AlreadyExists => Error(StatusCodes.Status409Conflict, message, UploadErrorCodes.Exists),
         AccessOutcome.Conflict => Error(StatusCodes.Status409Conflict, message, code ?? UploadErrorCodes.Restart),
-        AccessOutcome.Busy => Busy(message),
+        AccessOutcome.Busy => Busy(message, code ?? UploadErrorCodes.Busy),
         _ => Error(StatusCodes.Status503ServiceUnavailable, message ?? DownloadEndpoints.UnavailableMessage, UploadErrorCodes.Unavailable),
     };
 
-    private static IResult Busy(string? message) => new BusyResult(message ?? RateLimits.RejectedMessage);
+    private static IResult Busy(string? message, string code) => new BusyResult(message ?? RateLimits.RejectedMessage, code);
 
-    private sealed class BusyResult(string message) : IResult
+    private sealed class BusyResult(string message, string code) : IResult
     {
         public Task ExecuteAsync(HttpContext httpContext)
         {
             httpContext.Response.Headers.RetryAfter = "5";
-            return Error(StatusCodes.Status429TooManyRequests, message, UploadErrorCodes.Busy).ExecuteAsync(httpContext);
+            return Error(StatusCodes.Status429TooManyRequests, message, code).ExecuteAsync(httpContext);
         }
     }
 

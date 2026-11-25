@@ -68,7 +68,7 @@ public class UploadSessionServiceTests
 
     private UploadSessionService Service(long? maxBytes = null, IUploadSessionStore? sessions = null, int? maxOpen = null,
         ILogger<UploadSessionService>? logger = null, IStorageBackendResolver? backends = null, int parallel = 6,
-        int? minChunkBytesPerSecond = null)
+        int? minChunkBytesPerSecond = null, PieceMemoryBudget? budget = null)
     {
         var settings = new Dictionary<string, string?> { ["Transfers:ParallelChunks"] = parallel.ToString() };
         if (maxBytes is not null) settings["Transfers:MaxUploadBytes"] = maxBytes.ToString();
@@ -79,7 +79,7 @@ public class UploadSessionServiceTests
         var access = new StorageAccessService(_users, _customers, _targets, _grants, _fake, audit, new OwnerConfig(""),
             _time, NullLogger<StorageAccessService>.Instance);
         return new UploadSessionService(access, sessions ?? _sessions, backends ?? _fake, audit, _time, config,
-            logger ?? NullLogger<UploadSessionService>.Instance);
+            budget ?? new PieceMemoryBudget(config), logger ?? NullLogger<UploadSessionService>.Instance);
     }
 
     private UploadCleanupService Cleanup(int? completingTimeoutMinutes = null, int? idleMinutes = null) =>
@@ -709,6 +709,110 @@ public class UploadSessionServiceTests
         Assert.Empty(await NonBeginAudits());
     }
 
+    // ---- Byte budget ----
+
+    private static PieceMemoryBudget Budget(long total, long perUser) =>
+        new(new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Transfers:MaxInFlightPieceBytes"] = total.ToString(),
+            ["Transfers:MaxInFlightPieceBytesPerUser"] = perUser.ToString(),
+        }).Build());
+
+    [Fact]
+    public async Task PutChunk_OverBudget_WaitBeforeAnyStorageCall()
+    {
+        var budget = Budget(total: 64 * Mi, perUser: 8 * Mi);
+        var svc = Service(budget: budget);
+        var file = Bytes(ChunkMath.MinPieceSize * 2);
+        var begin = await BeginOk(svc, _contrib, _share, "", "a.bin", file.Length);
+        Assert.True(budget.TryReserve(_contrib.Id, 8 * Mi, out var held));
+
+        var result = await Put(svc, _contrib.Id, begin.SessionId, file, 0);
+
+        Assert.Equal(AccessOutcome.Busy, result.Outcome);
+        Assert.Equal(UploadErrorCodes.Wait, result.Code);
+        Assert.Equal(UploadSessionService.WaitMessage, result.Message);
+        Assert.Equal("The server is busy with other large uploads. This piece will be sent again shortly.", UploadSessionService.WaitMessage);
+        Assert.DoesNotContain(_fake.Calls, c => c.StartsWith("WriteChunk") || c.StartsWith("GrowStaging"));
+        Assert.Empty(await _sessions.ReceivedChunksAsync(begin.SessionId));
+        held!.Dispose();
+        Assert.Equal(AccessOutcome.Ok, (await Put(svc, _contrib.Id, begin.SessionId, file, 0)).Outcome);
+    }
+
+    [Fact]
+    public async Task PutChunk_OtherUserHoldsBudget_OnlyAppWideBudgetApplies()
+    {
+        var budget = Budget(total: 8 * Mi, perUser: 8 * Mi);
+        var svc = Service(budget: budget);
+        var file = Bytes(ChunkMath.MinPieceSize);
+        var begin = await BeginOk(svc, _contrib, _share, "", "a.bin", file.Length);
+        Assert.True(budget.TryReserve(_colleague.Id, 4 * Mi, out var half));
+
+        Assert.Equal(AccessOutcome.Ok, (await Put(svc, _contrib.Id, begin.SessionId, file, 0)).Outcome);
+        Assert.True(budget.TryReserve(_colleague.Id, 4 * Mi, out var rest));
+        Assert.Equal(UploadErrorCodes.Wait, (await Put(svc, _contrib.Id, begin.SessionId, file, 0)).Code);
+        half!.Dispose();
+        rest!.Dispose();
+    }
+
+    [Fact]
+    public async Task PutChunk_UnauthorisedOrMissingSession_TakesNoBudget()
+    {
+        var budget = Budget(total: 10, perUser: 10);
+        var svc = Service(budget: budget);
+        var data = Bytes(10);
+        var begin = await BeginOk(svc, _contrib, _share, "", "a.bin", data.Length);
+        await _grants.RemoveAsync(_custA.Id, _share.Id);
+
+        Assert.Equal(AccessOutcome.Denied, (await svc.PutChunkAsync(_contrib.Id, begin.SessionId, 0, new MemoryStream(data), 10, Md5(data), Ctx)).Outcome);
+        Assert.Equal(AccessOutcome.NotFound, (await svc.PutChunkAsync(_contrib.Id, Guid.NewGuid(), 0, new MemoryStream(data), 10, Md5(data), Ctx)).Outcome);
+        Assert.True(budget.TryReserve(_colleague.Id, 10, out _));
+    }
+
+    public static TheoryData<string> LeaseReleasePaths => new() { "ok", "bad-md5", "read-fails", "storage-fails", "unexpected", "cancelled" };
+
+    // A leaked lease would lock the user out of uploading for good, so every way out of a piece must give the bytes back.
+    [Theory]
+    [MemberData(nameof(LeaseReleasePaths))]
+    public async Task PutChunk_AnyOutcome_ReleasesBudget(string path)
+    {
+        var budget = Budget(total: 10, perUser: 10);
+        var svc = Service(budget: budget);
+        var data = Bytes(10);
+        var begin = await BeginOk(svc, _contrib, _share, "", "a.bin", data.Length);
+        using var cts = new CancellationTokenSource();
+        Stream body = new MemoryStream(data);
+        var md5 = Md5(data);
+        switch (path)
+        {
+            case "bad-md5": md5 = Convert.ToBase64String(new byte[16]); break;
+            case "read-fails": body = new NonSeekableStream(data, failAfter: 4); break;
+            case "storage-fails":
+                _fake.FailOnCall = c => c.StartsWith("WriteChunk") ? new StorageFailureException(StorageFailureKind.Unreachable, "down") : null;
+                break;
+            case "unexpected":
+                _fake.FailOnCall = c => c.StartsWith("WriteChunk") ? new InvalidOperationException("sdk bug") : null;
+                break;
+            case "cancelled":
+                _fake.FailOnCall = c =>
+                {
+                    if (c.StartsWith("WriteChunk")) cts.Cancel();
+                    return c.StartsWith("WriteChunk") ? new OperationCanceledException(cts.Token) : null;
+                };
+                break;
+        }
+
+        if (path == "cancelled")
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+                svc.PutChunkAsync(_contrib.Id, begin.SessionId, 0, body, data.Length, md5, Ctx, cts.Token));
+        else
+            await svc.PutChunkAsync(_contrib.Id, begin.SessionId, 0, body, data.Length, md5, Ctx);
+
+        Assert.True(budget.TryReserve(_contrib.Id, 1, out var probe));
+        Assert.True(budget.TryReserve(_colleague.Id, 9, out _));
+        probe!.Dispose();
+    }
+
     // ---- Status ----
 
     [Fact]
@@ -954,7 +1058,8 @@ public class UploadSessionServiceTests
         var audit = new AuditService(_audit, NullLogger<AuditService>.Instance);
         var access = new StorageAccessService(_users, _customers, _targets, _grants, _fake, audit, new OwnerConfig(""), _time,
             NullLogger<StorageAccessService>.Instance);
-        var svc = new UploadSessionService(access, _sessions, _fake, audit, _time, config, NullLogger<UploadSessionService>.Instance);
+        var svc = new UploadSessionService(access, _sessions, _fake, audit, _time, config, new PieceMemoryBudget(config),
+            NullLogger<UploadSessionService>.Instance);
         await BeginOk(svc, _contrib, _blob, "", "a.bin", 10);
         _time.Now = Start.AddMinutes(30);
 

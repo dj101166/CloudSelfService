@@ -28,6 +28,9 @@ public static class UploadErrorCodes
     /// <summary>429: a rate or concurrency limit, or too many uploads in progress; wait for Retry-After.</summary>
     public const string Busy = "busy";
 
+    /// <summary>429: the server is busy with other large uploads; wait for Retry-After and send this piece again. Never a failure.</summary>
+    public const string Wait = "wait";
+
     /// <summary>503: storage or the database is unavailable; retry later.</summary>
     public const string Unavailable = "unavailable";
 }

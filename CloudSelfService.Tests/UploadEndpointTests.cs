@@ -9,6 +9,7 @@ using CloudSelfService.Tests.Infrastructure;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.AspNetCore.Server.Kestrel.Core.Features;
 using Microsoft.Extensions.Configuration;
@@ -461,6 +462,112 @@ public sealed class UploadEndpointTests : IDisposable
         Assert.Equal(HttpStatusCode.NoContent, heldResult.StatusCode);
         Assert.Equal(HttpStatusCode.NoContent, (await client.SendAsync(Chunk(token, session, 0, file))).StatusCode);
         await AssertError(await client.SendAsync(Chunk(token, session, 0, file)), HttpStatusCode.TooManyRequests, UploadErrorCodes.Busy);
+    }
+
+    // ---- Byte budget and 4 MiB-unit throughput ----
+
+    [Fact]
+    public async Task PutChunk_BudgetExhausted_Returns429Wait()
+    {
+        using var factory = new TestAppFactory(("Transfers:MaxInFlightPieceBytes", "1"));
+        var client = await factory.CreateClientAs("customer-contribute");
+        var token = await TokenAsync(client);
+        var target = await factory.DemoTargetAsync("Contribute");
+        var file = Bytes(10);
+        var session = (await JsonOf(await client.SendAsync(Begin(token, target.Id, "", "a.bin", file.Length)))).GetProperty("sessionId").GetGuid();
+        Assert.True(factory.Services.GetRequiredService<PieceMemoryBudget>().TryReserve(Guid.NewGuid(), 1, out var held));
+
+        var response = await client.SendAsync(Chunk(token, session, 0, file));
+
+        await AssertError(response, HttpStatusCode.TooManyRequests, UploadErrorCodes.Wait);
+        Assert.Equal(UploadSessionService.WaitMessage, (await JsonOf(response)).GetProperty("error").GetString());
+        Assert.Equal("5", response.Headers.GetValues("Retry-After").Single());
+        Assert.Equal(0, factory.Storage.BytesWritten);
+        held!.Dispose();
+        Assert.Equal(HttpStatusCode.NoContent, (await client.SendAsync(Chunk(token, session, 0, file))).StatusCode);
+    }
+
+    [Fact]
+    public async Task PutChunk_EightMiBPiece_ChargesTwoTokens()
+    {
+        using var factory = new TestAppFactory(("Transfers:ChunksPerMinute", "2"));
+        var client = await factory.CreateClientAs("customer-full");
+        var token = await TokenAsync(client);
+        var share = await factory.DemoTargetAsync("Full");
+        var blob = share with { Id = Guid.NewGuid(), DisplayName = "Big blob", Kind = StorageKind.BlobContainer, ContainerName = "big-blob" };
+        await factory.Services.GetRequiredService<ITargetStore>().UpsertAsync(blob);
+        await factory.Services.GetRequiredService<IGrantStore>().SetAsync(
+            new Grant(blob.CustomerId!.Value, blob.Id, AccessLevel.Full, "test", DateTimeOffset.UtcNow));
+        var user = (await factory.Services.GetRequiredService<IUserStore>().ListAsync(UserKind.Customer, blob.CustomerId)).Single();
+        const int piece = 8 * 1024 * 1024;
+        var now = DateTimeOffset.UtcNow;
+        var session = new UploadSession(Guid.NewGuid(), user.Id, blob.Id, "big.bin", "big.bin", 3L * piece, piece, false, now,
+            now.AddHours(24), UploadStatus.Open, TargetKind: StorageKind.BlobContainer, StagingRemoved: true);
+        await factory.Services.GetRequiredService<IUploadSessionStore>().CreateAsync(session);
+        await factory.Storage.BeginUploadAsync(blob, "big.bin", session.Size, default, session.Id);
+        var data = Bytes(piece);
+
+        var first = await client.SendAsync(Chunk(token, session.Id, 0, data));
+        var second = await client.SendAsync(Chunk(token, session.Id, 1, data));
+
+        Assert.Equal(HttpStatusCode.NoContent, first.StatusCode);
+        await AssertError(second, HttpStatusCode.TooManyRequests, UploadErrorCodes.Busy);
+        Assert.Equal("5", second.Headers.GetValues("Retry-After").Single());
+        Assert.Equal(piece, factory.Storage.BytesWritten);
+    }
+
+    [Theory]
+    [InlineData(null, 1)]
+    [InlineData(0L, 1)]
+    [InlineData(1L, 1)]
+    [InlineData(4L * 1024 * 1024, 1)]
+    [InlineData(4L * 1024 * 1024 + 1, 2)]
+    [InlineData(8L * 1024 * 1024, 2)]
+    [InlineData(32L * 1024 * 1024, 8)]
+    public void ChunkPermits_OnePerStartedFourMiB(long? contentLength, int expected) =>
+        Assert.Equal(expected, ChunkThroughputLimiter.PermitsFor(contentLength));
+
+    [Fact]
+    public void ChunkThroughputLimiter_PieceCostingMoreThanTheBucket_StillAdmittedWhenFull()
+    {
+        var config = new ConfigurationBuilder().AddInMemoryCollection(
+            new Dictionary<string, string?> { ["Transfers:ChunksPerMinute"] = "2" }).Build();
+        using var limiter = new ChunkThroughputLimiter(config);
+        var ctx = new DefaultHttpContext();
+
+        Assert.True(limiter.TryAcquire(ctx, 32L * 1024 * 1024));
+        Assert.False(limiter.TryAcquire(ctx, 1));
+    }
+
+    [Theory]
+    [InlineData("PUT", ChunkMath.MaxBlobPieceSize)]
+    [InlineData("POST", UploadEndpoints.ControlBodyLimit)]
+    [InlineData("GET", UploadEndpoints.ControlBodyLimit)]
+    [InlineData("DELETE", UploadEndpoints.ControlBodyLimit)]
+    public async Task Guard_SetsMaxRequestBodySizeBeforeAnyCheck(string method, long expected)
+    {
+        var services = new ServiceCollection()
+            .AddSingleton<IConfiguration>(new ConfigurationBuilder().Build())
+            .BuildServiceProvider();
+        var ctx = new DefaultHttpContext { RequestServices = services };
+        ctx.Request.Method = method;
+        // A cross-site request is refused straight after the limits are set, so nothing past them needs wiring.
+        ctx.Request.Headers["Sec-Fetch-Site"] = "cross-site";
+        var feature = new StubBodySizeFeature();
+        ctx.Features.Set<IHttpMaxRequestBodySizeFeature>(feature);
+        var reachedHandler = false;
+
+        await UploadEndpoints.GuardAsync(new DefaultEndpointFilterInvocationContext(ctx),
+            _ => { reachedHandler = true; return ValueTask.FromResult<object?>(null); });
+
+        Assert.Equal(expected, feature.MaxRequestBodySize);
+        Assert.False(reachedHandler);
+    }
+
+    private sealed class StubBodySizeFeature : IHttpMaxRequestBodySizeFeature
+    {
+        public bool IsReadOnly => false;
+        public long? MaxRequestBodySize { get; set; } = 30_000_000;
     }
 
     [Fact]
