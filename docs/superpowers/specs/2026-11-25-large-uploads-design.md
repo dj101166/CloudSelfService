@@ -86,11 +86,12 @@ Storage Explorer (AzCopy underneath) picks a block size big enough to fit the fi
 - Parallel pieces per upload, returned by Begin: enough to keep about 16 MiB in flight, never fewer than 2 nor more than
   `Transfers:ParallelChunks` (4 MiB → 4, 8 → 2, 16 → 2, 32 → 2).
 - Buffers stay pooled and are cleared on return.
-- *(Builder's call)* Capacity consequence, accepted: at 32 MiB pieces one upload holds 64 MiB, the whole per-user budget
-  (fine, the uploader sends one file at a time per user) and a quarter of the app budget, so about four uploads over
-  390 GB fit at once per instance; ordinary uploads (4 MiB pieces) are unaffected. A piece refused for **budget** is a
+- *(Builder's call)* Capacity consequence, accepted: at 16 MiB pieces (about 390 to 780 GiB) one upload holds 32 MiB, so
+  about eight fit at once in the app budget; at 32 MiB pieces (above about 780 GiB) one upload holds 64 MiB, the whole
+  per-user budget (fine, the uploader sends one file at a time per user) and a quarter of the app budget, so about four
+  fit at once per instance; ordinary uploads (4 MiB pieces) are unaffected. A piece refused for **budget** is a
   wait, not a failure: the 429 carries a distinct code (e.g. `wait`) and `Retry-After`, and `uploader.js` waits on it
-  indefinitely without counting it toward `MAX_BUSY_WAITS`. Document the four-at-once figure in `docs/operations.md`.
+  indefinitely without counting it toward `MAX_BUSY_WAITS`. Document these figures in `docs/operations.md`.
 - *(Builder's call)* Per-user throughput stays where it is today (`ChunksPerMinute` 600 x 4 MiB ≈ 40 MB/s): the piece
   rate is charged in 4 MiB units, so a 32 MiB piece costs 8. Bigger pieces must not mean a faster per-user ceiling.
 

@@ -10,6 +10,7 @@
 @using CloudSelfService.Services.Transfers
 
 @*
+    The form is prerendered disabled and enabled once the circuit is live, so a click made before then is not lost.
     Portal-wide settings Admins may change. The upload limit applies when an upload starts; one already open may still
     finish after it is lowered. Times are entered and shown in the browser's zone and stored and audited in UTC.
 *@
@@ -65,40 +66,40 @@ else
                     <div class="field">
                         <label class="label" for="upload-limit-gb">New limit (GB)</label>
                         <input id="upload-limit-gb" class="input" type="number" min="1" max="@this.CeilingGb" step="1"
-                               data-testid="upload-limit-gb" @bind="this._gb" />
+                               data-testid="upload-limit-gb" disabled="@(!this._ready)" @bind="this._gb" />
                         <p class="hint">Whole gigabytes, from 1 to @this.CeilingGb.</p>
                     </div>
                     <fieldset class="field settings__ends">
                         <legend class="label">Applies</legend>
                         <label class="switch">
                             <input type="radio" class="checkbox" name="upload-limit-ends" data-testid="upload-limit-permanent"
-                                   checked="@this._permanent" @onchange="() => this._permanent = true" />
+                                   disabled="@(!this._ready)" checked="@this._permanent" @onchange="() => this._permanent = true" />
                             Permanent
                         </label>
                         <label class="switch">
                             <input type="radio" class="checkbox" name="upload-limit-ends" data-testid="upload-limit-until"
-                                   checked="@(!this._permanent)" @onchange="() => this._permanent = false" />
+                                   disabled="@(!this._ready)" checked="@(!this._permanent)" @onchange="() => this._permanent = false" />
                             Until
                         </label>
                     </fieldset>
                     <div class="field">
                         <label class="label" for="upload-limit-until-at">End time (@this.ZoneName)</label>
                         <input id="upload-limit-until-at" class="input" type="datetime-local" data-testid="upload-limit-until-at"
-                               disabled="@this._permanent" @bind="this._untilAt" />
+                               disabled="@(this._permanent || !this._ready)" @bind="this._untilAt" />
                     </div>
                 </div>
                 <div class="field settings__note">
                     <label class="label" for="upload-limit-note">Note (optional)</label>
-                    <input id="upload-limit-note" class="input" maxlength="500" autocomplete="off" data-testid="upload-limit-note"
+                    <input id="upload-limit-note" class="input" maxlength="500" autocomplete="off" data-testid="upload-limit-note" disabled="@(!this._ready)"
                            @bind="this._note" @bind:event="oninput" />
                     <p class="hint">Why the limit is changing. Saved with the setting and in the audit log.</p>
                 </div>
                 <div class="admin__actions">
                     <button type="submit" class="btn btn--primary" data-testid="upload-limit-save"
-                            disabled="@(this.Busy || this._gb is null)">Save limit</button>
+                            disabled="@(!this._ready || this.Busy || this._gb is null)">Save limit</button>
                     @if (state.Override is not null)
                     {
-                        <button type="button" class="btn btn--secondary" data-testid="upload-limit-revert" disabled="@this.Busy"
+                        <button type="button" class="btn btn--secondary" data-testid="upload-limit-revert" disabled="@(!this._ready || this.Busy)"
                                 @onclick="this.RevertAsync">Revert to default</button>
                     }
                 </div>
@@ -116,6 +117,7 @@ else
     private bool _permanent = true;
     private DateTime? _untilAt;
     private string _note = "";
+    private bool _ready;
 
     private long CeilingGb => (this._state?.Ceiling ?? 0) >> 30;
 
@@ -136,6 +138,8 @@ else
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
         if (!firstRender) return;
+        this._ready = true;
+        this.StateHasChanged();
         try
         {
             var tz = await this.JS.InvokeAsync<BrowserTimeZone>("cssp.timeZone");

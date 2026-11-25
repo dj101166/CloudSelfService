@@ -21,6 +21,17 @@ public sealed class AdminEndpointTests : IDisposable
     }
 
     [Fact]
+    public async Task Settings_Prerender_RendersSaveAndRevertDisabled_UntilInteractive()
+    {
+        var client = await _factory.CreateClientAs("staff-admin");
+
+        var html = await (await client.GetAsync("/admin/settings")).Content.ReadAsStringAsync();
+
+        Assert.Matches(@"<button[^>]*data-testid=""upload-limit-save""[^>]*disabled", html);
+        Assert.Matches(@"<input[^>]*data-testid=""upload-limit-gb""[^>]*disabled", html);
+    }
+
+    [Fact]
     public async Task AuditCsv_Owner_ReturnsAttachmentWithSafeCells()
     {
         var client = await _factory.CreateClientAs("staff-owner");

@@ -112,18 +112,12 @@ def test_staff_admin_sets_and_reverts_upload_limit(make_context):
     page = open_page(make_context("staff-admin"), "/admin/settings", "upload-limit-card")
     effective = page.locator("[data-testid=upload-limit-effective]")
     revert = page.locator("[data-testid=upload-limit-revert]")
+    expect(page.locator("[data-testid=upload-limit-save]")).to_be_enabled(timeout=15000)
     try:
-        # The page is server-rendered before the Blazor circuit connects; a save sent too early is lost, so retry.
-        for _ in range(10):
-            page.locator("[data-testid=upload-limit-gb]").fill("150")
-            page.locator("[data-testid=upload-limit-permanent]").check()
-            page.locator("[data-testid=upload-limit-save]").click()
-            try:
-                expect(effective).to_contain_text("150", timeout=2000)
-                break
-            except AssertionError:
-                page.wait_for_timeout(500)
-        expect(effective).to_contain_text("150", timeout=5000)
+        page.locator("[data-testid=upload-limit-gb]").fill("150")
+        page.locator("[data-testid=upload-limit-permanent]").check()
+        page.locator("[data-testid=upload-limit-save]").click()
+        expect(effective).to_contain_text("150", timeout=15000)
     finally:
         if revert.count():
             revert.click()
