@@ -54,13 +54,13 @@ Set in `appsettings.json`, `appsettings.Development.json` (git-ignored; copy fro
 | `Storage:UseFake` | In-memory backend (Development only) |
 | `Admin:TestAccessTimeoutSeconds` / `AuditExportsPerMinute` | Admin guard rails |
 | `Support:Contact` | Shown on Help and Access Denied |
-| `Transfers:*` | Upload and download limits, concurrency, rate limits (`RequestsPerMinute` / `MaxConcurrentPerUser` cover downloads and upload Begin/Status/Complete/Abort; chunk PUTs have their own), reauthorisation cadence |
+| `Transfers:*` | Upload and download limits (`MaxUploadBytes` default 100 GiB, Admin-overridable in `/admin/settings` up to `MaxUploadBytesCeiling`, 1 TiB clamped to 1,562.5 GiB), session lifetime (`SessionHours` after the last piece, at most `MaxSessionDays`), the piece memory budget (`MaxInFlightPieceBytes` / `...PerUser`), concurrency, rate limits (`RequestsPerMinute` / `MaxConcurrentPerUser` cover downloads and upload Begin/Status/Complete/Abort; chunk PUTs have their own), reauthorisation cadence |
 | `DATA_ROOT` | Directory (Azure Files mount) where Data Protection keys persist under `dp-keys`. Unset means ephemeral keys: every restart signs everyone out |
 | `APP_VERSION` | Build arg / env var shown in the topbar version chip; falls back to the top `CHANGELOG.md` version when unset |
 
 ## Architecture
 
-- **Pages/**: `Index` (Files home), `Files/Browse`, `Help`, `Login`, `SignedOut`, `AccessDenied`, `Admin/{Customers,CustomerDetail,Targets,Staff,AuditLog}`.
+- **Pages/**: `Index` (Files home), `Files/Browse`, `Help`, `Login`, `SignedOut`, `AccessDenied`, `Admin/{Customers,CustomerDetail,Targets,Staff,AuditLog,Settings}`.
 - **Shared/**: layout, nav, account menu, upload panel, dialogs, changelog dialog.
 - **Authorization/**: Entra OIDC wiring, policies, role handler, session revalidation, `DevSignIn`.
 - **Services/**: `Access/` (`StorageAccessService` is the single storage gate, `StoragePath`), `Storage/` (Azure and fake backends), `Identity/` (incl. `StaffAccess`, the effective-role rule), `Data/` (PostgreSQL and in-memory stores), `AdminService`, `StartupChecks`, `ChangelogDocument`.

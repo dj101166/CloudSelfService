@@ -1,5 +1,18 @@
 # Changelog - Advanced Cloud Self Service
 
+## [1.1.0] - TBD
+
+### 🔄 Changed
+- The default upload limit is now 100 GB.
+- An unfinished upload is now kept for 24 hours after its last piece arrives (up to 7 days), instead of 24 hours after it started.
+- Being signed out during an upload now pauses it instead of failing it.
+
+### ✨ Added
+- Files larger than 195 GB can now be uploaded: large files are sent in bigger pieces, up to about 1.5 TB for blob containers.
+- Admins and Owners can change the upload limit in Admin, Settings, permanently or until a set time. Every change is recorded in the audit log.
+- The Files home lists your unfinished uploads, and the file browser shows each one as waiting for its file so you can carry on after signing in again.
+- The upload panel shows the largest file you can upload, and warns before your sign-in ends while uploads are running.
+
 ## [1.0.0] - November 21, 2026
 
 First release. Advanced Cloud Self Service is now a private storage access portal: customers and Advanced staff sign in with Microsoft and browse, upload and download files held in Advanced-hosted Azure storage, without ever being given a storage key, a SAS link or a direct storage address.

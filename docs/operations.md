@@ -61,9 +61,13 @@ For the person deploying or running the app. Settings are App Service applicatio
 
 | Key | Default | Notes |
 |---|---|---|
-| `Transfers:MaxUploadBytes` | 53687091200 (50 GiB) | Capped at 195.3 GiB, the Azure block limit; a higher value is reduced, with one warning at startup. |
-| `Transfers:ParallelChunks` | 4 | Browser-side parallel 4 MiB pieces per upload. |
-| `Transfers:SessionHours` | 24 | Lifetime of an upload session. |
+| `Transfers:MaxUploadBytes` | 107374182400 (100 GiB) | The default limit; Admins can override it in Admin → Settings. |
+| `Transfers:MaxUploadBytesCeiling` | 1099511627776 (1 TiB) | The most an Admin can set; capped at 1,562.5 GiB, the Azure block-blob maximum at 32 MiB pieces. A higher value is reduced, with one warning at startup. |
+| `Transfers:ParallelChunks` | 4 | Pieces in flight per upload for 4 MiB pieces; larger pieces use 2. |
+| `Transfers:SessionHours` | 24 | An unfinished upload expires this long after its last piece. |
+| `Transfers:MaxSessionDays` | 7 | ...and never later than this after it started. |
+| `Transfers:MaxInFlightPieceBytes` | 268435456 (256 MiB) | Memory the app holds for pieces being received, across all users. Over budget, a piece gets 429 with `Retry-After` and the browser waits. |
+| `Transfers:MaxInFlightPieceBytesPerUser` | 67108864 (64 MiB) | The same budget for one user. |
 | `Transfers:MaxOpenSessionsPerUser` | 8 | Unfinished uploads per user. |
 | `Transfers:IdleSessionMinutes` | 120 | An upload with no piece for this long is abandoned. |
 | `Transfers:CompletingTimeoutMinutes` | 30 | Time allowed for the final commit. |
@@ -80,7 +84,7 @@ For the person deploying or running the app. Settings are App Service applicatio
 ## Things an operator must know
 
 - **Empty parent folders on Files.** Deleting or moving the last item in a folder can leave the (empty) parent folder behind on an Azure Files share. It is cosmetic; folders can be deleted by a Full user.
-- **Abandoned one-piece uploads hold quota.** An upload that sends one piece and is then abandoned reserves the full logical file size against the user's quota until the session expires, up to 24 hours. This is bounded by the per-user byte cap and the open-session cap.
+- **Abandoned one-piece uploads hold quota.** An upload that sends one piece and is then abandoned reserves the full logical file size against the user's quota until the session expires (24 hours after its last piece, and at most 7 days after it started). This is bounded by the per-user byte cap and the open-session cap.
 - **Audit fails open.** If the audit store cannot be written, the user's action still proceeds and the failure is logged. Watch the application log for audit write errors.
 - **Idle sign-out is client-side.** The idle timer runs in the browser. An active upload counts as activity and keeps the session alive; the absolute session limit still applies.
 - **IP trust depends on the App Gateway.** Forwarded headers are trusted without a proxy allow-list, so the audited client IP is only reliable if the App Gateway is the only way to reach the app. Do not expose the App Service directly.
@@ -90,7 +94,8 @@ For the person deploying or running the app. Settings are App Service applicatio
 - **Verify the key folder after deploy.** Check that a `dp-keys` folder appears on the Files share behind `DATA_ROOT`. If the mount is missing, the keys are silently written to the container disk and sign-ins will not survive a restart. The keys on the share are not encrypted (the suite pattern), so protect the share.
 - **Test databases accumulate audit rows.** In a throwaway database used for the `CSSP_TEST_PG` tests, audit rows pile up because TRUNCATE is blocked. Drop the database to clean up.
 - **Malware scan results are not shown (deferred).** Defender for Storage on-upload scanning records its verdict as a blob index tag (`Malware Scanning scan result`). Reading index tags needs the `Microsoft.Storage/storageAccounts/blobServices/containers/blobs/tags/read` data action, which the app's role, Storage Blob Data Contributor, does not include (Storage Blob Data Owner does). Rather than widen the managed identity to Owner on customer accounts, the app does not read or display the tag in v1.0.0. Scanning itself is unaffected: Defender's alerts and any automatic response configured there still apply. To revisit, grant a custom role adding only `blobs/tags/read` and read the tag in the blob listing.
-- **WAF.** The App Gateway WAF needs a body-inspection exemption for `PUT /api/uploads/{id}/chunks/{index}` (4 MiB bodies).
+- **WAF.** The App Gateway WAF needs a body-inspection exemption for `PUT /api/uploads/{id}/chunks/{index}`, and it must allow bodies up to 32 MiB on `/api/uploads/*` (see Large uploads).
+- **Large uploads.** Files always use 4 MiB pieces. Blob containers use the smallest of 4, 8, 16 or 32 MiB that keeps the file within 50,000 blocks, so a 32 MiB piece is only needed above about 780 GiB. Each piece is held in memory while it is received, bounded by `Transfers:MaxInFlightPieceBytes`; with the defaults, about four uploads over 390 GB at once run per instance before others wait. Throughput limits are still charged per 4 MiB, so a 32 MiB piece costs 8. The limit Admins can set is capped by `Transfers:MaxUploadBytesCeiling` (1,562.5 GiB at most). For anything over the ceiling, stripe the backup across several files, for example SQL Server `BACKUP DATABASE ... TO DISK = 'a.bak', DISK = 'b.bak'`, and upload the files separately.
 - **Port.** In a container the app listens on 8080 (`ASPNETCORE_URLS`); locally on 5300 via `Kestrel:Endpoints:Http:Url`.
 
 ## Test access diagnostics

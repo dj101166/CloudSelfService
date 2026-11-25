@@ -29,7 +29,7 @@ public class SmokeTests
             var svc = new AppVersionService(new ConfigurationBuilder().Build());
 
             Assert.Equal(ChangelogDocument.CurrentVersion, svc.Version);
-            Assert.Equal("1.0.0", svc.Version);
+            Assert.Equal("1.1.0", svc.Version);
         }
         finally
         {
