@@ -293,8 +293,12 @@ public sealed class UploadSessionService
         return new(AccessOutcome.Ok, await _sessions.ReceivedChunksAsync(sessionId, ct));
     }
 
+    /// <param name="chargeThroughput">
+    /// Charges the caller's throughput for a piece of the given length; false refuses it as busy. Called only once the
+    /// piece holds its memory budget, so a piece told to wait is never charged.
+    /// </param>
     public async Task<AccessResult> PutChunkAsync(Guid userId, Guid sessionId, int index, Stream body, long? contentLength,
-        string? contentMd5Base64, AuditContext ctx, CancellationToken ct = default)
+        string? contentMd5Base64, AuditContext ctx, CancellationToken ct = default, Func<long, bool>? chargeThroughput = null)
     {
         if (CheckChunkFormat(index, contentLength, contentMd5Base64) is { } malformed)
             return malformed;
@@ -322,6 +326,11 @@ public sealed class UploadSessionService
         // piece is written or has failed.
         if (!_budget.TryReserve(userId, expected, out var budgetLease))
             return new(AccessOutcome.Busy, WaitMessage, UploadErrorCodes.Wait);
+        if (chargeThroughput is not null && !chargeThroughput(expected))
+        {
+            budgetLease.Dispose();
+            return new(AccessOutcome.Busy, null, UploadErrorCodes.Busy);
+        }
         var length = (int)expected;
         var buffer = ArrayPool<byte>.Shared.Rent(Math.Max(1, length));
         try

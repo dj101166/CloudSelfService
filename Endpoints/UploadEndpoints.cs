@@ -34,8 +34,8 @@ public static class UploadEndpoints
         uploads.MapDelete("/{id:guid}", AbortAsync).RequireRateLimiting(RateLimits.Transfers);
     }
 
-    // Runs before the handler reads any body: same-origin fetch, body limits, content type, antiforgery, a user id, then
-    // for a chunk PUT the per-user throughput bucket.
+    // Runs before the handler reads any body: same-origin fetch, body limits, content type, antiforgery, then a user id.
+    // The chunk throughput bucket is charged later, by the service, once the piece holds its memory budget.
     internal static async ValueTask<object?> GuardAsync(EndpointFilterInvocationContext invocation, EndpointFilterDelegate next)
     {
         var ctx = invocation.HttpContext;
@@ -72,8 +72,6 @@ public static class UploadEndpoints
         }
         if (AppClaims.UserIdOf(ctx.User) is null)
             return Results.Unauthorized();
-        if (isChunk && !ctx.RequestServices.GetRequiredService<ChunkThroughputLimiter>().TryAcquire(ctx, ctx.Request.ContentLength))
-            return Busy(null, UploadErrorCodes.Busy);
         return await next(invocation);
     }
 
@@ -129,14 +127,15 @@ public static class UploadEndpoints
                 : ErrorFor(result.Outcome, result.Message, result.Code);
         });
 
-    private static Task<IResult> PutChunkAsync(Guid id, int index, HttpContext ctx, UploadSessionService uploads, ILoggerFactory loggers) =>
+    private static Task<IResult> PutChunkAsync(Guid id, int index, HttpContext ctx, UploadSessionService uploads,
+        ChunkThroughputLimiter throughput, ILoggerFactory loggers) =>
         RunAsync(ctx, loggers, "chunk", async (userId, audit, ct) =>
         {
             // Format checks (length, MD5 header) run inside the service before any database call. A declared length
             // over the largest piece size was refused by the guard; Kestrel's body limit is the backstop, and the
             // service holds each piece to its own session's size.
             var result = await uploads.PutChunkAsync(userId, id, index, ctx.Request.Body, ctx.Request.ContentLength,
-                ctx.Request.Headers["Content-MD5"].ToString(), audit, ct);
+                ctx.Request.Headers["Content-MD5"].ToString(), audit, ct, bytes => throughput.TryAcquire(ctx, bytes));
             return result.Outcome == AccessOutcome.Ok ? Results.NoContent() : ErrorFor(result.Outcome, result.Message, result.Code);
         });
 

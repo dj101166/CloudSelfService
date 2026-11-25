@@ -756,6 +756,44 @@ public class UploadSessionServiceTests
     }
 
     [Fact]
+    public async Task PutChunk_OverBudget_NeverChargesThroughput()
+    {
+        var budget = Budget(total: 10, perUser: 10);
+        var svc = Service(budget: budget);
+        var data = Bytes(10);
+        var begin = await BeginOk(svc, _contrib, _share, "", "a.bin", data.Length);
+        Assert.True(budget.TryReserve(_colleague.Id, 10, out var held));
+        var charges = new List<long>();
+
+        var result = await svc.PutChunkAsync(_contrib.Id, begin.SessionId, 0, new MemoryStream(data), data.Length, Md5(data), Ctx,
+            chargeThroughput: bytes => { charges.Add(bytes); return true; });
+
+        Assert.Equal(UploadErrorCodes.Wait, result.Code);
+        Assert.Empty(charges);
+        held.Dispose();
+        Assert.Equal(AccessOutcome.Ok, (await svc.PutChunkAsync(_contrib.Id, begin.SessionId, 0, new MemoryStream(data), data.Length,
+            Md5(data), Ctx, chargeThroughput: bytes => { charges.Add(bytes); return true; })).Outcome);
+        Assert.Equal(new[] { 10L }, charges);
+    }
+
+    [Fact]
+    public async Task PutChunk_ThroughputRefused_BusyReleasesBudgetAndTouchesNoStorage()
+    {
+        var budget = Budget(total: 10, perUser: 10);
+        var svc = Service(budget: budget);
+        var data = Bytes(10);
+        var begin = await BeginOk(svc, _contrib, _share, "", "a.bin", data.Length);
+
+        var result = await svc.PutChunkAsync(_contrib.Id, begin.SessionId, 0, new MemoryStream(data), data.Length, Md5(data), Ctx,
+            chargeThroughput: _ => false);
+
+        Assert.Equal(AccessOutcome.Busy, result.Outcome);
+        Assert.Equal(UploadErrorCodes.Busy, result.Code);
+        Assert.DoesNotContain(_fake.Calls, c => c.StartsWith("WriteChunk") || c.StartsWith("GrowStaging"));
+        Assert.True(budget.TryReserve(_colleague.Id, 10, out _));
+    }
+
+    [Fact]
     public async Task PutChunk_UnauthorisedOrMissingSession_TakesNoBudget()
     {
         var budget = Budget(total: 10, perUser: 10);

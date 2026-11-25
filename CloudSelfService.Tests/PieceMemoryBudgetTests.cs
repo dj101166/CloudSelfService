@@ -103,6 +103,19 @@ public class PieceMemoryBudgetTests
     }
 
     [Fact]
+    public void TryReserve_ZeroBytes_AdmittedEvenOverBudget()
+    {
+        // An oversized piece admitted into an empty budget leaves it over its limit; an empty piece still goes.
+        var budget = Budget(total: 16 * Mi, perUser: 16 * Mi);
+        var user = Guid.NewGuid();
+        Assert.True(budget.TryReserve(user, 32 * Mi, out _));
+
+        Assert.True(budget.TryReserve(user, 0, out var empty));
+        empty.Dispose();
+        Assert.False(budget.TryReserve(user, 1, out _));
+    }
+
+    [Fact]
     public async Task TryReserve_Concurrent_NeverExceedsBudget()
     {
         var budget = Budget(total: 64 * Mi, perUser: 64 * Mi);

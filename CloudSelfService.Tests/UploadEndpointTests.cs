@@ -487,6 +487,39 @@ public sealed class UploadEndpointTests : IDisposable
         Assert.Equal(HttpStatusCode.NoContent, (await client.SendAsync(Chunk(token, session, 0, file))).StatusCode);
     }
 
+    // R7: a piece refused for budget is a wait, never a failure, so it must spend no throughput however often it retries,
+    // and it must hear "wait" (not "busy") while the budget is what blocks it, even when its bucket is also empty.
+    [Fact]
+    public async Task PutChunk_WaitingOnBudget_SpendsNoTokens_AndStaysWaitWhileBucketDrained()
+    {
+        using var factory = new TestAppFactory(("Transfers:ChunksPerMinute", "2"), ("Transfers:MaxInFlightPieceBytes", "1"));
+        var client = await factory.CreateClientAs("customer-contribute");
+        var token = await TokenAsync(client);
+        var target = await factory.DemoTargetAsync("Contribute");
+        var file = Bytes(10);
+        var session = (await JsonOf(await client.SendAsync(Begin(token, target.Id, "", "a.bin", file.Length)))).GetProperty("sessionId").GetGuid();
+        var budget = factory.Services.GetRequiredService<PieceMemoryBudget>();
+
+        Assert.True(budget.TryReserve(Guid.NewGuid(), 1, out var held));
+        for (var i = 0; i < 5; i++)
+            await AssertError(await client.SendAsync(Chunk(token, session, 0, file)), HttpStatusCode.TooManyRequests, UploadErrorCodes.Wait);
+        held.Dispose();
+
+        // Both of the bucket's tokens are still there after five waits; these two drain it.
+        Assert.Equal(HttpStatusCode.NoContent, (await client.SendAsync(Chunk(token, session, 0, file))).StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await client.SendAsync(Chunk(token, session, 0, file))).StatusCode);
+
+        Assert.True(budget.TryReserve(Guid.NewGuid(), 1, out held));
+        var waiting = await client.SendAsync(Chunk(token, session, 0, file));
+        held.Dispose();
+        var drained = await client.SendAsync(Chunk(token, session, 0, file));
+
+        await AssertError(waiting, HttpStatusCode.TooManyRequests, UploadErrorCodes.Wait);
+        await AssertError(drained, HttpStatusCode.TooManyRequests, UploadErrorCodes.Busy);
+        Assert.Equal("5", drained.Headers.GetValues("Retry-After").Single());
+        Assert.Equal(2 * file.Length, factory.Storage.BytesWritten);
+    }
+
     [Fact]
     public async Task PutChunk_EightMiBPiece_ChargesTwoTokens()
     {

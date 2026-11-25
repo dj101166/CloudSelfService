@@ -47,7 +47,7 @@ public sealed class PieceMemoryBudget
         return true;
     }
 
-    private static bool Fits(long used, long bytes, long max) => used == 0 || used + bytes <= max;
+    private static bool Fits(long used, long bytes, long max) => bytes == 0 || used == 0 || used + bytes <= max;
 
     private void Release(Guid userId, long bytes)
     {

@@ -64,6 +64,8 @@ public class UploaderScriptTests
         var js = Script();
         Assert.Contains("'wait'", js);
         Assert.Contains("e.kind === 'wait'", js);
+        // Busy answers met during a long wait must not add up to a failure.
+        Assert.Matches(new Regex(@"e\.kind === 'wait'\) \{\s*busyWaits = 0;"), js);
     }
 
     [Fact]
