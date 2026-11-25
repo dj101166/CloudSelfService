@@ -113,6 +113,56 @@ public class UploaderScriptTests
         Assert.Contains("André Cruz", notice);
     }
 
+    // A sign-in that lapses mid-upload must leave the server session intact so the same file resumes after signing in
+    // again: finishing the upload as failed (or cancelling it) would throw that away.
+    [Fact]
+    public void Uploader_ExpiryPausesInsteadOfFailing()
+    {
+        var js = Script();
+        Assert.Contains("'signed-out'", js);
+        var body = FunctionBody(js, "expireAll");
+        Assert.DoesNotContain("finish(", body);
+        Assert.DoesNotContain("'DELETE'", body);
+        Assert.DoesNotContain("cancel(", body);
+        Assert.Contains("'signed-out'", body);
+    }
+
+    [Fact]
+    public void Uploader_FingerprintIsFirstFourMiB()
+    {
+        var js = Script();
+        Assert.Contains("FINGERPRINT_BYTES = 4194304", js);
+        Assert.DoesNotContain("CHUNK_SIZE", js);
+    }
+
+    [Fact]
+    public void Uploader_ReadsSessionEnd()
+    {
+        var js = Script();
+        Assert.True(js.Contains("data-session-ends", StringComparison.Ordinal) || js.Contains("dataset.sessionEnds", StringComparison.Ordinal),
+            "uploader.js must read the sign-in end time App.razor writes on <body>");
+        Assert.Contains("'OnSessionEnding'", js);
+    }
+
+    [Fact]
+    public void Uploader_ReportsTheSessionIdBeginReturned() => Assert.Contains("'OnSession'", Script());
+
+    /// <summary>The text between a named function's opening brace and its matching closing brace.</summary>
+    private static string FunctionBody(string js, string name)
+    {
+        var start = js.IndexOf($"function {name}(", StringComparison.Ordinal);
+        Assert.True(start >= 0, $"uploader.js has no function {name}");
+        var open = js.IndexOf('{', start);
+        var depth = 0;
+        for (var i = open; i < js.Length; i++)
+        {
+            if (js[i] == '{') depth++;
+            else if (js[i] == '}' && --depth == 0) return js.Substring(open + 1, i - open - 1);
+        }
+        Assert.Fail($"function {name} is not closed");
+        return "";
+    }
+
     [Fact]
     public void AppShell_LoadsSparkMd5BeforeTheUploader()
     {

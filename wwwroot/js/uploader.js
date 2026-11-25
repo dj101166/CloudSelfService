@@ -16,11 +16,13 @@
     var MAX_RESTARTS = 3;
     var PROGRESS_INTERVAL_MS = 250;
     var ACTIVITY_INTERVAL_MS = 60000;
+    var SESSION_WARNING_MS = 15 * 60 * 1000;
+    var SESSION_CHECK_MS = 30000;
 
-    var SESSION_EXPIRED = 'Your session has expired. Sign in again, then select the file again to resume.';
     var INTERRUPTED = 'The connection dropped. Select Resume, or select the same file again, to carry on where it stopped.';
     var IN_PROGRESS = 'Someone else is uploading this file right now.';
     var GAVE_UP = 'The upload kept being restarted by the server. Try again later.';
+    var SIGNED_OUT = 'You were signed out. Sign in again, then select the same file to carry on where it stopped.';
 
     var uploads = {};
     var queue = [];
@@ -31,6 +33,7 @@
     var flushTimer = null;
     var lastActivity = 0;
     var antiforgeryMessage = null;
+    var sessionEndsAt = readSessionEnd();
 
     function UploadError(kind, message, code, retryAfter) {
         this.kind = kind;
@@ -91,11 +94,29 @@
         document.dispatchEvent(new Event('scroll'));
     }
 
+    // App.razor writes the sign-in's absolute end (Unix seconds) on <body> for a signed-in user. A new sign-in is a new
+    // page load, so it is read once.
+    function readSessionEnd() {
+        var seconds = parseInt((document.body && document.body.dataset.sessionEnds) || '', 10);
+        return isNaN(seconds) ? null : seconds * 1000;
+    }
+
+    function checkSessionEnd() {
+        if (sessionEndsAt === null || sessionEndsAt - Date.now() > SESSION_WARNING_MS) { return; }
+        var endsAtIso = new Date(sessionEndsAt).toISOString();
+        Object.keys(uploads).forEach(function (id) {
+            var u = uploads[id];
+            if (!isActive(u) || u.warnedSessionEnd) { return; }
+            u.warnedSessionEnd = true;
+            notify(u, 'OnSessionEnding', endsAtIso);
+        });
+    }
+
     function getToken() {
         if (!tokenPromise) {
             tokenPromise = fetch('/api/antiforgery', { credentials: 'same-origin', redirect: 'manual', cache: 'no-store' })
                 .then(function (r) {
-                    if (r.type === 'opaqueredirect' || r.status === 401) { throw new UploadError('expired', SESSION_EXPIRED); }
+                    if (r.type === 'opaqueredirect' || r.status === 401) { throw new UploadError('expired', SIGNED_OUT); }
                     if (!r.ok) { throw new UploadError('transient', 'Could not prepare the upload.', 'unavailable'); }
                     return r.json();
                 })
@@ -148,7 +169,7 @@
     function classify(r) {
         // A cookie that expired answers with a redirect to the sign-in page, or a bare 401 with no JSON.
         if (r.type === 'opaqueredirect' || r.status === 401 || (r.status >= 300 && r.status < 400)) {
-            throw new UploadError('expired', SESSION_EXPIRED);
+            throw new UploadError('expired', SIGNED_OUT);
         }
         if (r.status === 204) { return null; }
         return r.text().then(function (text) {
@@ -310,6 +331,7 @@
     function runOnce(u, signal) {
         setStatus(u, 'uploading');
         return begin(u, signal).then(function (session) {
+            notify(u, 'OnSession', session.sessionId);
             u.sessionId = session.sessionId;
             u.chunkSize = session.chunkSize;
             var received = {};
@@ -379,13 +401,18 @@
         notify(u, 'OnProgress', u.file.name, u.sent, u.file.size);
     }
 
+    // The sign-in ended. Each running upload pauses rather than fails: the server keeps its session and what it
+    // received, so selecting the same file after signing in again carries on. Nothing is sent to the server, which
+    // would refuse it anyway.
     function expireAll() {
+        tokenPromise = null;
         Object.keys(uploads).forEach(function (id) {
             var u = uploads[id];
-            if (u.status === 'done' || u.status === 'failed') { return; }
+            if (!isActive(u)) { return; }
             if (u.controller) { u.controller.abort(); }
             removeFromQueue(u);
-            finish(u, false, SESSION_EXPIRED);
+            setStatus(u, 'signed-out', SIGNED_OUT);
+            flushNow(u);
         });
     }
 
@@ -412,6 +439,7 @@
         queue.push(u);
         setStatus(u, 'queued');
         pump();
+        checkSessionEnd();
     }
 
     function isActive(u) {
@@ -426,7 +454,9 @@
     // ownerKey identifies the calling component across calls: Blazor hands JS a fresh wrapper for the same
     // DotNetObjectReference on every interop call, so the reference itself cannot be compared.
     // antiforgeryRejectedMessage is UploadEndpoints.AntiforgeryMessage, so a stale token is told apart from other 400s.
-    function start(dotnetRef, targetId, folder, inputElementId, overwrite, ownerKey, antiforgeryRejectedMessage) {
+    // overwriteOnlyFor, when set, limits overwrite to a file of that name: resuming an upload that was allowed to
+    // replace its file must not let a different file the user picks replace another one without asking.
+    function start(dotnetRef, targetId, folder, inputElementId, overwrite, ownerKey, antiforgeryRejectedMessage, overwriteOnlyFor) {
         var owner = ownerKey || '';
         if (antiforgeryRejectedMessage) { antiforgeryMessage = antiforgeryRejectedMessage; }
         var input = document.getElementById(inputElementId);
@@ -436,6 +466,7 @@
         input.value = '';
         var result = [];
         files.forEach(function (file) {
+            var replace = !!overwrite && (!overwriteOnlyFor || file.name === overwriteOnlyFor);
             var existing = null;
             Object.keys(uploads).forEach(function (id) {
                 if (sameFile(uploads[id], owner, targetId, folder, file) && uploads[id].status !== 'done') { existing = uploads[id]; }
@@ -444,13 +475,13 @@
                 existing.file = file;
                 existing.firstPieceMd5 = undefined;
                 existing.ref = dotnetRef;
-                if (!isActive(existing)) { existing.overwrite = !!overwrite; enqueue(existing); }
+                if (!isActive(existing)) { existing.overwrite = replace; enqueue(existing); }
                 result.push({ id: existing.id, name: file.name, size: file.size, existing: true });
                 return;
             }
             var u = {
                 id: 'u' + (++counter), ref: dotnetRef, owner: owner, targetId: targetId, folder: folder || '', file: file,
-                overwrite: !!overwrite, sent: 0, status: 'new', sessionId: null, chunkSize: 0, controller: null
+                overwrite: replace, sent: 0, status: 'new', sessionId: null, chunkSize: 0, controller: null
             };
             uploads[u.id] = u;
             result.push({ id: u.id, name: file.name, size: file.size, existing: false });
@@ -549,6 +580,8 @@
     function hasFiles(e) {
         return !!(e.dataTransfer && Array.prototype.indexOf.call(e.dataTransfer.types || [], 'Files') >= 0);
     }
+
+    if (sessionEndsAt !== null) { setInterval(checkSessionEnd, SESSION_CHECK_MS); }
 
     window.csspUploader = {
         start: start,

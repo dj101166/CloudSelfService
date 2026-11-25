@@ -2,6 +2,8 @@
 @attribute [Authorize]
 @inject StorageAccessService Access
 @inject CurrentUser CurrentUser
+@inject UploadSessionService UploadSessions
+@inject UploadLimitService UploadLimits
 @inject PageAuditContext Audit
 @inject IJSRuntime JS
 @inject ILogger<Browse> Logger
@@ -10,6 +12,7 @@
 @using CloudSelfService.Services.Files
 @using CloudSelfService.Services.Identity
 @using CloudSelfService.Services.Storage
+@using CloudSelfService.Services.Transfers
 
 @*
     One folder of one share or container. Every action goes through StorageAccessService, which re-checks access on
@@ -103,7 +106,8 @@ else
     }
 
     <UploadPanel @ref="this._uploads" OnUploaded="this.OnUploadedAsync" OnAccessDenied="this.OnUploadDeniedAsync"
-             OnScriptFailed="this.OnUploadScriptFailed" />
+             OnScriptFailed="this.OnUploadScriptFailed" Unfinished="@(this.CanContribute ? this._unfinished : Array.Empty<UnfinishedUpload>())"
+             LimitBytes="@(this.CanContribute ? this._uploadLimit : null)" Zone="this._zone" />
 
     <div id="@DropZoneId" class="card browse__table-card @(this.CanContribute ? "browse__drop" : "")" data-testid="browse-table">
         @if (this.CanContribute)
@@ -258,6 +262,8 @@ else
     private Alert? _alert;
     private TimeZoneInfo? _zone;
     private bool _dropAttached;
+    private IReadOnlyList<UnfinishedUpload> _unfinished = Array.Empty<UnfinishedUpload>();
+    private long? _uploadLimit;
 
     private NameMode _nameMode;
     private StorageItem? _subject;
@@ -288,6 +294,18 @@ else
         _ => "badge--muted",
     };
 
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            this._uploadLimit = (await this.UploadLimits.GetStateAsync()).Effective;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            this.Logger.LogError(ex, "Reading the upload limit failed; the upload panel leaves it out.");
+        }
+    }
+
     protected override async Task OnParametersSetAsync()
     {
         if (this._loadedFor == (this.TargetId, this.Path)) return;
@@ -317,6 +335,26 @@ else
             this._denied = false;
         }
         await this.LoadAsync(reset: true);
+        await this.LoadUnfinishedAsync();
+    }
+
+    /// <summary>
+    /// This folder's unfinished uploads, shown in the upload panel as waiting for their file. Secondary to the listing:
+    /// a failure is logged and the panel shows none.
+    /// </summary>
+    private async Task LoadUnfinishedAsync()
+    {
+        this._unfinished = Array.Empty<UnfinishedUpload>();
+        if (this._target is null || this._denied || !this.CanContribute) return;
+        try
+        {
+            if (await this.CurrentUser.GetAsync() is { } user)
+                this._unfinished = await this.UploadSessions.ListUnfinishedAsync(user.Id, this.TargetId, this._folder);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            this.Logger.LogError(ex, "Listing unfinished uploads for target {TargetId} folder {Folder} failed.", this.TargetId, this._folder);
+        }
     }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
@@ -456,10 +494,11 @@ else
         this._level = reachable.Level;
     }
 
-    private Task RefreshAsync()
+    private async Task RefreshAsync()
     {
         this._alert = null;
-        return this.LoadAsync(reset: true);
+        await this.LoadAsync(reset: true);
+        await this.LoadUnfinishedAsync();
     }
 
     private Task LoadMoreAsync() => this._continuation is null ? Task.CompletedTask : this.LoadAsync(reset: false);

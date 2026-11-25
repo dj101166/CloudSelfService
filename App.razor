@@ -1,5 +1,6 @@
 @inject IConfiguration Config
 @inject IWebHostEnvironment Env
+@inject CloudSelfService.Services.Identity.SessionLifetime Lifetime
 @inject CloudSelfService.Services.Files.PageAuditContext PageAudit
 
 <!DOCTYPE html>
@@ -39,7 +40,7 @@
     </script>
     <HeadOutlet @rendermode="RenderModeForPage" />
 </head>
-<body>
+<body data-session-ends="@SessionEnds">
     <Routes @rendermode="RenderModeForPage" />
 
     <div id="blazor-error-ui">
@@ -98,6 +99,21 @@
     // Runs during the page request, the only place the client's address is visible; the value reaches the circuit as
     // persisted component state (see PageAuditContext).
     protected override void OnInitialized() => this.PageAudit.Capture(this.HttpContext);
+
+    // uploader.js warns running uploads before the sign-in's absolute end, which only the cookie's issue time knows.
+    // Null leaves the attribute off, so an anonymous page says nothing.
+    private string? SessionEnds
+    {
+        get
+        {
+            var user = HttpContext?.User;
+            if (user?.Identity?.IsAuthenticated != true
+                || !long.TryParse(user.FindFirst(CloudSelfService.Services.Identity.AppClaims.IssuedAt)?.Value,
+                    System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var issued))
+                return null;
+            return (issued + (long)Lifetime.AbsoluteLifetime.TotalSeconds).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+    }
 
     private IComponentRenderMode? RenderModeForPage =>
         HttpContext?.AcceptsInteractiveRouting() == true ? InteractiveServer : null;

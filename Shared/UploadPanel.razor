@@ -4,22 +4,32 @@
 @inject ILogger<UploadPanel> Logger
 @using CloudSelfService.Services.Access
 @using CloudSelfService.Services.Files
+@using CloudSelfService.Services.Transfers
 
 @*
     The upload queue for the file browser. The bytes go from the browser straight to /api/uploads through
     wwwroot/js/uploader.js; this component only shows what that script reports. The page owns the file input and
     calls StartAsync when files are chosen or dropped.
 
-    Leaving the Files pages stops the uploads (the server keeps them for 24 hours, so choosing the same file again
-    resumes), which is why a navigation away with uploads running asks first.
+    Leaving the Files pages stops the uploads (the server keeps each one for 24 hours after its last piece arrived,
+    and at most 7 days, so choosing the same file again resumes), which is why a navigation away with uploads running
+    asks first. The same holds when the sign-in ends: running uploads pause, and after signing in again the page lists
+    this folder's unfinished uploads as rows waiting for their file.
 *@
 <NavigationLock ConfirmExternalNavigation="this.HasActive" OnBeforeInternalNavigation="this.OnBeforeNavigationAsync" />
 
-@if (this._items.Count > 0)
+@{ var waiting = UploadItem.WaitingRows(this.Unfinished, this._items, this._claimed); }
+@if (this._items.Count > 0 || waiting.Count > 0)
 {
     <section class="card upload-panel" data-testid="upload-panel" aria-label="Uploads">
         <div class="upload-panel__head">
-            <h2 class="card__title upload-panel__title">Uploads</h2>
+            <div class="upload-panel__heading">
+                <h2 class="card__title upload-panel__title">Uploads</h2>
+                @if (this.LimitBytes is { } limit)
+                {
+                    <span class="upload-panel__limit u-small" data-testid="upload-limit-text">@LimitText(limit)</span>
+                }
+            </div>
             @if (this._items.Any(i => i.IsFinished))
             {
                 <button type="button" class="btn btn--link btn--sm" data-testid="upload-clear" @onclick="this.ClearFinishedAsync">
@@ -27,6 +37,12 @@
                 </button>
             }
         </div>
+        @if (this._sessionEndsAt is { } endsAt && this.HasActive)
+        {
+            <div class="alert alert--warning upload-panel__banner" role="status" data-testid="upload-session-ending">
+                @UploadStatusNames.SessionEndingText(endsAt, this.Zone)
+            </div>
+        }
         <ul class="upload-panel__list">
             @foreach (var item in this._items)
             {
@@ -65,11 +81,48 @@
                          aria-valuenow="@item.Percent" aria-label="@StoragePath.DisplayName(item.Name)">
                         <div class="upload-panel__fill @FillModifier(item)" style="width: @(item.Percent)%"></div>
                     </div>
-                    <p class="upload-panel__status @StatusModifier(item)" data-testid="upload-status">@UploadStatusNames.Label(item)</p>
+                    <p class="upload-panel__status @StatusModifier(item)" data-testid="upload-status">
+                        @UploadStatusNames.Label(item)
+                        @if (item.Status == UploadStatusNames.SignedOut)
+                        {
+                            <a href="/login" class="upload-panel__sign-in" data-testid="upload-sign-in">Sign in again</a>
+                        }
+                    </p>
+                    @if (item.Notice is { Length: > 0 } notice)
+                    {
+                        <p class="upload-panel__notice" data-testid="upload-notice">@notice</p>
+                    }
+                </li>
+            }
+            @foreach (var u in waiting)
+            {
+                var row = UploadItem.Waiting(u);
+                var inputId = ResumeInputId(u);
+                <li class="upload-panel__item" data-testid="upload-item" data-status="@row.Status" data-session-id="@u.SessionId" @key="row.Id">
+                    <div class="upload-panel__row">
+                        <Icon Name="file" />
+                        <span class="upload-panel__name" title="@StoragePath.DisplayName(row.Name)">@StoragePath.DisplayName(row.Name)</span>
+                        <span class="upload-panel__size u-subtle">@FileDisplay.Size(row.Sent) of @FileDisplay.Size(row.Size)</span>
+                        <span class="upload-panel__actions">
+                            <input type="file" id="@inputId" class="upload-panel__file-input" data-testid="upload-select-input"
+                                   aria-label="Select @StoragePath.DisplayName(row.Name) again to carry on uploading it"
+                                   @onchange="() => this.SelectFileAsync(u, inputId)" />
+                            <label for="@inputId" class="btn btn--secondary btn--sm" data-testid="upload-select-file">Select file</label>
+                        </span>
+                    </div>
+                    <div class="upload-panel__track" role="progressbar" aria-valuemin="0" aria-valuemax="100"
+                         aria-valuenow="@row.Percent" aria-label="@StoragePath.DisplayName(row.Name)">
+                        <div class="upload-panel__fill @FillModifier(row)" style="width: @(row.Percent)%"></div>
+                    </div>
+                    <p class="upload-panel__status @StatusModifier(row)" data-testid="upload-status">@UploadStatusNames.Label(row)</p>
                 </li>
             }
         </ul>
     </section>
+}
+else if (this.LimitBytes is { } limit)
+{
+    <p class="upload-panel__limit upload-panel__limit--alone u-small" data-testid="upload-limit-text">@LimitText(limit)</p>
 }
 
 <ConfirmDialog IsOpen="this._conflict is not null"
@@ -93,33 +146,104 @@
     /// <summary>Raised when the server refuses an upload as not allowed, so the page can re-read the access level.</summary>
     [Parameter] public EventCallback OnAccessDenied { get; set; }
 
+    /// <summary>This folder's unfinished uploads on the server, each shown waiting for its file unless already in the panel.</summary>
+    [Parameter] public IReadOnlyList<UnfinishedUpload> Unfinished { get; set; } = Array.Empty<UnfinishedUpload>();
+
+    /// <summary>The largest file the caller may upload, or null to say nothing (no upload access, or not known).</summary>
+    [Parameter] public long? LimitBytes { get; set; }
+
+    /// <summary>The viewer's time zone, for the sign-in-ending warning; UTC (labelled) while unknown.</summary>
+    [Parameter] public TimeZoneInfo? Zone { get; set; }
+
     private readonly List<UploadItem> _items = new();
     private readonly Queue<UploadItem> _conflicts = new();
     private UploadItem? _conflict;
     private DotNetObjectReference<UploadPanel>? _ref;
     private readonly string _owner = Guid.NewGuid().ToString("N");
+    private readonly HashSet<Guid> _claimed = new();
+    private DateTimeOffset? _sessionEndsAt;
 
     private bool HasActive => this._items.Any(i => i.IsActive);
 
     /// <summary>Hands the files chosen in <paramref name="inputElementId"/> to uploader.js.</summary>
-    public async Task StartAsync(Guid targetId, string folder, string inputElementId)
+    public Task StartAsync(Guid targetId, string folder, string inputElementId) =>
+        this.StartAsync(targetId, folder, inputElementId, null);
+
+    /// <summary>
+    /// Starts the file chosen for a row waiting for its file. The session's own overwrite choice goes with it, so a
+    /// replace the user already confirmed is not asked again (Begin still re-checks the user may overwrite), but only
+    /// for a file of that name.
+    /// </summary>
+    private async Task StartAsync(Guid targetId, string folder, string inputElementId, UnfinishedUpload? resuming)
     {
         this._ref ??= DotNetObjectReference.Create(this);
         var started = await this.JS.InvokeAsync<UploadStart[]>("csspUploader.start", this._ref, targetId.ToString(), folder,
-            inputElementId, false, this._owner, CloudSelfService.Endpoints.UploadEndpoints.AntiforgeryMessage);
+            inputElementId, resuming?.Overwrite ?? false, this._owner, CloudSelfService.Endpoints.UploadEndpoints.AntiforgeryMessage,
+            resuming?.FileName);
         foreach (var s in started ?? Array.Empty<UploadStart>())
         {
             var item = this._items.FirstOrDefault(i => i.Id == s.Id);
             if (item is null)
             {
-                this._items.Add(new UploadItem(s.Id, s.Name, targetId, folder, s.Size));
+                item = new UploadItem(s.Id, s.Name, targetId, folder, s.Size);
+                this._items.Add(item);
             }
             else
             {
                 item.Message = null;
             }
+            item.Notice = null;
+            item.ResumingSessionId = resuming?.SessionId;
+            // Begin resumes or replaces the server session a started file matches, so its waiting row must not come
+            // back when the finished item is cleared from the panel.
+            foreach (var u in this.Unfinished.Where(item.IsFor))
+                this._claimed.Add(u.SessionId);
         }
+        if (resuming is not null && started is { Length: > 0 })
+            this._claimed.Add(resuming.SessionId);
         this.StateHasChanged();
+    }
+
+    private async Task SelectFileAsync(UnfinishedUpload u, string inputId)
+    {
+        try
+        {
+            await this.StartAsync(u.TargetId, u.Folder, inputId, u);
+        }
+        catch (JSDisconnectedException)
+        {
+        }
+        catch (Exception ex) when (ex is JSException or TaskCanceledException)
+        {
+            this.Logger.LogWarning(ex, "Starting the upload for unfinished session {SessionId} failed.", u.SessionId);
+            await this.OnScriptFailed.InvokeAsync();
+        }
+    }
+
+    /// <summary>Begin answered with a session; one other than the row's means the server started the file afresh.</summary>
+    [JSInvokable]
+    public Task OnSession(string id, string sessionId) => this.UpdateAsync(id, item =>
+    {
+        if (item.ResumingSessionId is not { } resuming) return;
+        item.ResumingSessionId = null;
+        if (Guid.TryParse(sessionId, out var begun) && begun == resuming) return;
+        item.Notice = UploadStatusNames.DifferentFileMessage;
+        // Begin replaces every open session for the same name, so only a file under another name leaves the row's
+        // session on the server, and only then does its row come back.
+        if (this.Unfinished.FirstOrDefault(u => u.SessionId == resuming) is { } row
+            && !string.Equals(item.Name, row.FileName, StringComparison.Ordinal))
+            this._claimed.Remove(resuming);
+    });
+
+    [JSInvokable]
+    public Task OnSessionEnding(string id, string endsAtIso)
+    {
+        if (this._sessionEndsAt is not null
+            || !DateTimeOffset.TryParse(endsAtIso, System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.RoundtripKind, out var endsAt))
+            return Task.CompletedTask;
+        this._sessionEndsAt = endsAt;
+        return this.InvokeAsync(this.StateHasChanged);
     }
 
     [JSInvokable]
@@ -258,7 +382,8 @@
     {
         UploadStatusNames.Done => "upload-panel__fill--done",
         UploadStatusNames.Failed or UploadStatusNames.Conflict => "upload-panel__fill--failed",
-        UploadStatusNames.Paused or UploadStatusNames.Interrupted or UploadStatusNames.Waiting => "upload-panel__fill--held",
+        UploadStatusNames.Paused or UploadStatusNames.Interrupted or UploadStatusNames.Waiting or UploadStatusNames.SignedOut
+            or UploadStatusNames.WaitingForFile => "upload-panel__fill--held",
         _ => "",
     };
 
@@ -266,9 +391,13 @@
     {
         UploadStatusNames.Done => "upload-panel__status--done",
         UploadStatusNames.Failed or UploadStatusNames.Conflict => "upload-panel__status--failed",
-        UploadStatusNames.Interrupted or UploadStatusNames.Waiting => "upload-panel__status--held",
+        UploadStatusNames.Interrupted or UploadStatusNames.Waiting or UploadStatusNames.SignedOut => "upload-panel__status--held",
         _ => "",
     };
+
+    private static string LimitText(long bytes) => $"Files up to {UploadLimitService.FormatGb(bytes)} GB";
+
+    private static string ResumeInputId(UnfinishedUpload u) => "upload-resume-" + u.SessionId.ToString("N");
 
     public async ValueTask DisposeAsync()
     {

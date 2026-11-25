@@ -208,6 +208,91 @@ public sealed class BrowseRouteTests : IDisposable
         Assert.Contains("your Advanced account team", html);
     }
 
+    private static async Task<Guid> BeginUploadAsync(HttpClient client, Guid targetId, string folder, string name, long size)
+    {
+        using var tokenJson = System.Text.Json.JsonDocument.Parse(await (await client.GetAsync("/api/antiforgery")).Content.ReadAsStringAsync());
+        var request = new HttpRequestMessage(HttpMethod.Post, "/api/uploads")
+        {
+            Content = System.Net.Http.Json.JsonContent.Create(new { targetId, folder, fileName = name, size, overwrite = false }),
+        };
+        request.Headers.Add("RequestVerificationToken", tokenJson.RootElement.GetProperty("token").GetString());
+        var response = await client.SendAsync(request);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using var body = System.Text.Json.JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        return body.RootElement.GetProperty("sessionId").GetGuid();
+    }
+
+    [Fact]
+    public async Task Browse_UnfinishedUploadInThisFolder_ShowsWaitingForFileRow()
+    {
+        var full = await _factory.CreateClientAs("customer-full");
+        var own = await _factory.DemoTargetAsync("Full");
+        var session = await BeginUploadAsync(full, own.Id, "Documents", "big.bak", 10 * 1024 * 1024);
+
+        var html = await (await full.GetAsync($"/files/{own.Id}/Documents")).Content.ReadAsStringAsync();
+
+        Assert.Contains("data-status=\"waiting-file\"", html);
+        Assert.Contains($"data-session-id=\"{session}\"", html);
+        Assert.Contains("Waiting for the file: 0% received", html);
+        Assert.Contains("data-testid=\"upload-select-file\"", html);
+        Assert.Matches(new Regex("<label[^>]*for=\"upload-resume-[0-9a-f]{32}\"[^>]*data-testid=\"upload-select-file\""), html);
+        var input = Regex.Match(html, "<input type=\"file\" id=\"upload-resume-[0-9a-f]{32}\"[^>]*>");
+        Assert.True(input.Success);
+        Assert.DoesNotContain("accept=", input.Value);
+    }
+
+    [Fact]
+    public async Task Browse_UnfinishedUploadInAnotherFolder_NoWaitingRow()
+    {
+        var full = await _factory.CreateClientAs("customer-full");
+        var own = await _factory.DemoTargetAsync("Full");
+        await BeginUploadAsync(full, own.Id, "Documents", "big.bak", 10 * 1024 * 1024);
+
+        var html = await (await full.GetAsync($"/files/{own.Id}")).Content.ReadAsStringAsync();
+
+        Assert.DoesNotContain("waiting-file", html);
+        Assert.DoesNotContain("data-testid=\"upload-select-file\"", html);
+    }
+
+    [Fact]
+    public async Task Browse_UnfinishedListFails_PageStillRenders()
+    {
+        using var failing = _factory.WithWebHostBuilder(b => b.ConfigureTestServices(s =>
+            s.AddSingleton<IUploadSessionStore, ThrowingSessionStore>()));
+        var client = failing.CreateClient(new() { AllowAutoRedirect = false, HandleCookies = true });
+        await client.GetAsync("/dev/signin?as=customer-full");
+        var own = (await failing.Services.GetRequiredService<ITargetStore>().ListAsync()).Single(t => t.DisplayName == "Demo share (Full)");
+
+        var response = await client.GetAsync($"/files/{own.Id}");
+        var html = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("Welcome.txt", html);
+        Assert.DoesNotContain("waiting-file", html);
+    }
+
+    [Fact]
+    public async Task Browse_Contributor_ShowsUploadLimit()
+    {
+        var full = await _factory.CreateClientAs("customer-full");
+        var own = await _factory.DemoTargetAsync("Full");
+
+        var html = await (await full.GetAsync($"/files/{own.Id}")).Content.ReadAsStringAsync();
+
+        Assert.Matches(new Regex("data-testid=\"upload-limit-text\"[^>]*>\\s*Files up to 100 GB\\s*<"), html);
+    }
+
+    [Fact]
+    public async Task Browse_Reader_NoUploadLimit()
+    {
+        var reader = await _factory.CreateClientAs("customer-read");
+        var own = await _factory.DemoTargetAsync("Read");
+
+        var html = await (await reader.GetAsync($"/files/{own.Id}")).Content.ReadAsStringAsync();
+
+        Assert.DoesNotContain("upload-limit-text", html);
+    }
+
     private sealed class ThrowingTargetStore : ITargetStore
     {
         public Task<StorageTarget?> GetAsync(Guid id, CancellationToken ct = default) => throw new InvalidOperationException("db down");
