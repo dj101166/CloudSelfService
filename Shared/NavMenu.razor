@@ -34,6 +34,10 @@
             <Icon Name="database" />
             <span class="app__nav-link__label">Storage targets</span>
         </NavLink>
+        <NavLink class="app__nav-link" ActiveClass="app__nav-link--active" href="admin/settings" data-testid="nav-admin-settings">
+            <Icon Name="monitor" />
+            <span class="app__nav-link__label">Settings</span>
+        </NavLink>
         @if (this._role >= StaffRole.Owner)
         {
             <NavLink class="app__nav-link" ActiveClass="app__nav-link--active" href="admin/staff" data-testid="nav-admin-staff">

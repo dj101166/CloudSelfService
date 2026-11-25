@@ -4,6 +4,7 @@ using CloudSelfService.Services.Access;
 using CloudSelfService.Services.Data;
 using CloudSelfService.Services.Identity;
 using CloudSelfService.Services.Storage;
+using CloudSelfService.Services.Transfers;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
@@ -22,6 +23,9 @@ public class AdminServiceTests
     private readonly InMemoryGrantStore _grants;
     private readonly InMemoryAuditStore _audit = new();
     private readonly FakeStorageBackend _fake = new();
+    private readonly InMemoryUploadLimitStore _limitStore = new();
+    private readonly UploadSessionServiceTests.MutableTime _clock = new(Now);
+    private readonly UploadLimitService _limits;
     private readonly AdminService _svc;
 
     private readonly Customer _alpha = new(Guid.NewGuid(), "Alpha", true, "", null, CustomerCloud.Commercial, CrossTenantStatus.NotRequired);
@@ -35,6 +39,7 @@ public class AdminServiceTests
     public AdminServiceTests()
     {
         _grants = new InMemoryGrantStore(_targets);
+        _limits = new UploadLimitService(_limitStore, _clock, new ConfigurationBuilder().Build());
         _svc = Build(new Dictionary<string, string?>
         {
             ["Entra:StaffEmailDomain"] = "advancedutility.com",
@@ -52,8 +57,8 @@ public class AdminServiceTests
 
     private AdminService Build(Dictionary<string, string?> settings) =>
         new(_users, _customers, _targets, _grants, _fake, new AuditService(_audit, NullLogger<AuditService>.Instance),
-            new OwnerConfig(OwnerUpn), new AppRoleHandlerTests.FixedTime(Now),
-            new ConfigurationBuilder().AddInMemoryCollection(settings).Build());
+            new OwnerConfig(OwnerUpn), _clock,
+            new ConfigurationBuilder().AddInMemoryCollection(settings).Build(), _limits);
 
     private static AppUser Staff(string upn, StaffRole role, bool active = true) =>
         new(Guid.NewGuid(), UserKind.Staff, null, upn, upn, "oid-" + upn, role, active, Now, null);
@@ -524,7 +529,7 @@ public class AdminServiceTests
 
     private AdminService WithOwners(string owners) =>
         new(_users, _customers, _targets, _grants, _fake, new AuditService(_audit, NullLogger<AuditService>.Instance),
-            new OwnerConfig(owners), new AppRoleHandlerTests.FixedTime(Now), new ConfigurationBuilder().Build());
+            new OwnerConfig(owners), new AppRoleHandlerTests.FixedTime(Now), new ConfigurationBuilder().Build(), _limits);
 
     [Theory]
     [InlineData("a\u0000b@x.example")]
@@ -1239,7 +1244,7 @@ public class AdminServiceTests
     {
         var shared = new ProbeCooldown(new AppRoleHandlerTests.FixedTime(Now));
         AdminService Make() => new(_users, _customers, _targets, _grants, _fake, new AuditService(_audit, NullLogger<AuditService>.Instance),
-            new OwnerConfig(OwnerUpn), new AppRoleHandlerTests.FixedTime(Now), new ConfigurationBuilder().Build(), shared);
+            new OwnerConfig(OwnerUpn), new AppRoleHandlerTests.FixedTime(Now), new ConfigurationBuilder().Build(), _limits, shared);
 
         var first = await Make().TestTargetAsync(_admin.Id, _alphaTarget.Id, Ctx);
         var secondCircuit = await Make().TestTargetAsync(_admin.Id, _alphaTarget.Id, Ctx);
@@ -1317,5 +1322,161 @@ public class AdminServiceTests
 
         Assert.Equal(AdminService.OwnersFromConfigMessage, result.Message);
         Assert.Equal(AdminService.OwnersFromConfigMessage, external.Message);
+    }
+
+    // ---- Upload limit ----
+
+    private const long GiB = 1L << 30;
+
+    [Fact]
+    public async Task SetUploadLimit_StaffAdmin_SavesAndAudits()
+    {
+        var until = Now.AddDays(3);
+
+        var result = await _svc.SetUploadLimitAsync(_admin.Id, 150 * GiB, until, "  quarter end  ", Ctx);
+
+        Assert.Equal(AccessOutcome.Ok, result.Outcome);
+        var stored = (await _limitStore.GetAsync())!;
+        Assert.Equal(150 * GiB, stored.Bytes);
+        Assert.Equal(until, stored.ExpiresAt);
+        Assert.Equal(_admin.Id, stored.SetBy);
+        Assert.Equal(_admin.Upn, stored.SetByUpn);
+        Assert.Equal(Now, stored.SetAt);
+        Assert.Equal("quarter end", stored.Note);
+        Assert.Equal(150 * GiB, (await _limits.GetStateAsync()).Effective);
+        var row = Assert.Single(await AuditAsync(AdminService.SetUploadLimitOp));
+        Assert.Equal("Admin.SetUploadLimit", row.Operation);
+        Assert.Equal(AuditResult.Success, row.Result);
+        Assert.Equal(150 * GiB, row.Bytes);
+        Assert.Contains("-> 150 GB", row.Path);
+        Assert.Equal("limit 100 GB -> 150 GB; until 2026-11-23T00:00:00Z; note: quarter end", row.Path);
+        Assert.Equal("10.0.0.9", row.SourceIp);
+        Assert.Contains(AdminService.SetUploadLimitOp, AdminService.AuditOperationNames);
+    }
+
+    [Fact]
+    public async Task SetUploadLimit_Permanent_AuditsPermanent()
+    {
+        await _svc.SetUploadLimitAsync(_admin.Id, 2 * GiB, null, null, Ctx);
+
+        Assert.Equal("limit 100 GB -> 2 GB; until permanent; note: ", Assert.Single(await AuditAsync(AdminService.SetUploadLimitOp)).Path);
+        Assert.Null((await _limitStore.GetAsync())!.ExpiresAt);
+    }
+
+    [Fact]
+    public async Task SetUploadLimit_SeenAtOnceThroughTheCache()
+    {
+        Assert.Equal(100 * GiB, (await _limits.GetStateAsync()).Effective);
+
+        await _svc.SetUploadLimitAsync(_admin.Id, 7 * GiB, null, null, Ctx);
+        Assert.Equal(7 * GiB, (await _limits.GetStateAsync()).Effective);
+
+        await _svc.ClearUploadLimitAsync(_admin.Id, Ctx);
+        Assert.Equal(100 * GiB, (await _limits.GetStateAsync()).Effective);
+    }
+
+    [Fact]
+    public async Task SetUploadLimit_Staff_Denied()
+    {
+        var result = await _svc.SetUploadLimitAsync(_staff.Id, 150 * GiB, null, null, Ctx);
+
+        Assert.Equal(AccessOutcome.Denied, result.Outcome);
+        Assert.Null(await _limitStore.GetAsync());
+        var row = Assert.Single(await AuditAsync(AdminService.SetUploadLimitOp));
+        Assert.Equal(AuditResult.Denied, row.Result);
+        Assert.Equal(_staff.Upn, row.UserDisplay);
+    }
+
+    [Fact]
+    public async Task ClearUploadLimit_Staff_Denied()
+    {
+        await _svc.SetUploadLimitAsync(_admin.Id, 150 * GiB, null, null, Ctx);
+
+        var result = await _svc.ClearUploadLimitAsync(_staff.Id, Ctx);
+
+        Assert.Equal(AccessOutcome.Denied, result.Outcome);
+        Assert.NotNull(await _limitStore.GetAsync());
+        Assert.Equal(AuditResult.Denied, (await AuditAsync(AdminService.SetUploadLimitOp)).Single(r => r.Result != AuditResult.Success).Result);
+    }
+
+    [Theory]
+    [InlineData(1_099_511_627_777L)]
+    [InlineData(1_073_741_823L)]
+    [InlineData(0L)]
+    [InlineData(-1L)]
+    public async Task SetUploadLimit_AboveCeiling_Invalid(long bytes)
+    {
+        var result = await _svc.SetUploadLimitAsync(_admin.Id, bytes, null, null, Ctx);
+
+        Assert.Equal(AccessOutcome.Invalid, result.Outcome);
+        Assert.Equal("The limit must be between 1 GB and 1024 GB.", result.Message);
+        Assert.Null(await _limitStore.GetAsync());
+        Assert.Empty(await AuditAsync(AdminService.SetUploadLimitOp));
+    }
+
+    [Theory]
+    [InlineData(1_073_741_824L)]
+    [InlineData(1_099_511_627_776L)]
+    public async Task SetUploadLimit_AtBounds_Ok(long bytes) =>
+        Assert.Equal(AccessOutcome.Ok, (await _svc.SetUploadLimitAsync(_admin.Id, bytes, null, null, Ctx)).Outcome);
+
+    [Theory]
+    [InlineData(-60)]
+    [InlineData(0)]
+    [InlineData(60)]
+    public async Task SetUploadLimit_PastExpiry_Invalid(int seconds)
+    {
+        var result = await _svc.SetUploadLimitAsync(_admin.Id, 150 * GiB, Now.AddSeconds(seconds), null, Ctx);
+
+        Assert.Equal(AccessOutcome.Invalid, result.Outcome);
+        Assert.Equal("The end time must be in the future.", result.Message);
+        Assert.Null(await _limitStore.GetAsync());
+        Assert.Empty(await AuditAsync(AdminService.SetUploadLimitOp));
+    }
+
+    [Fact]
+    public async Task SetUploadLimit_JustOverAMinute_Ok() =>
+        Assert.Equal(AccessOutcome.Ok, (await _svc.SetUploadLimitAsync(_admin.Id, 150 * GiB, Now.AddSeconds(61), null, Ctx)).Outcome);
+
+    [Fact]
+    public async Task SetUploadLimit_NoteTooLong_Invalid()
+    {
+        var ok = await _svc.SetUploadLimitAsync(_admin.Id, 150 * GiB, null, " " + new string('n', 500) + " ", Ctx);
+        var tooLong = await _svc.SetUploadLimitAsync(_admin.Id, 150 * GiB, null, new string('n', 501), Ctx);
+
+        Assert.Equal(AccessOutcome.Ok, ok.Outcome);
+        Assert.Equal(AccessOutcome.Invalid, tooLong.Outcome);
+        Assert.Single(await AuditAsync(AdminService.SetUploadLimitOp));
+    }
+
+    [Fact]
+    public async Task ClearUploadLimit_RevertsToDefault_Audited()
+    {
+        await _svc.SetUploadLimitAsync(_admin.Id, 150 * GiB, null, null, Ctx);
+
+        var result = await _svc.ClearUploadLimitAsync(_admin.Id, Ctx);
+
+        Assert.Equal(AccessOutcome.Ok, result.Outcome);
+        Assert.Null(await _limitStore.GetAsync());
+        Assert.Equal(100 * GiB, (await _limits.GetStateAsync()).Effective);
+        var rows = await AuditAsync(AdminService.SetUploadLimitOp);
+        Assert.Equal(2, rows.Count);
+        var clear = rows.Single(r => r.Path.Contains("default"));
+        Assert.Equal("limit 150 GB -> default 100 GB", clear.Path);
+        Assert.Equal(AuditResult.Success, clear.Result);
+        Assert.Equal(100 * GiB, clear.Bytes);
+    }
+
+    [Fact]
+    public async Task SetUploadLimit_Owner_FromConfig_Allowed()
+    {
+        var configured = Staff("olive@advancedutility.com", StaffRole.None);
+        await _users.UpsertAsync(configured);
+        var svc = WithOwners("olive@advancedutility.com");
+
+        var result = await svc.SetUploadLimitAsync(configured.Id, 150 * GiB, null, null, Ctx);
+
+        Assert.Equal(AccessOutcome.Ok, result.Outcome);
+        Assert.Equal(150 * GiB, (await _limitStore.GetAsync())!.Bytes);
     }
 }

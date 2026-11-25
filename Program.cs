@@ -60,6 +60,7 @@ if (StartupChecks.UsePostgres(builder.Environment.IsDevelopment(), builder.Confi
     builder.Services.AddSingleton<IGrantStore, PgGrantStore>();
     builder.Services.AddSingleton<IAuditStore, PgAuditStore>();
     builder.Services.AddSingleton<IUploadSessionStore, PgUploadSessionStore>();
+    builder.Services.AddSingleton<IUploadLimitStore, PgUploadLimitStore>();
 }
 else
 {
@@ -70,6 +71,7 @@ else
     builder.Services.AddSingleton<IGrantStore, InMemoryGrantStore>();
     builder.Services.AddSingleton<IAuditStore, InMemoryAuditStore>();
     builder.Services.AddSingleton<IUploadSessionStore, InMemoryUploadSessionStore>();
+    builder.Services.AddSingleton<IUploadLimitStore, InMemoryUploadLimitStore>();
 }
 builder.Services.AddSingleton<AuditService>();
 if (DevSignIn.UseFakeStorage(builder.Configuration) && builder.Environment.IsDevelopment())
@@ -89,6 +91,7 @@ builder.Services.AddSingleton<ProbeCooldown>();
 builder.Services.AddScoped<AdminService>();
 builder.Services.AddScoped<UploadSessionService>();
 builder.Services.AddSingleton<PieceMemoryBudget>();
+builder.Services.AddSingleton<UploadLimitService>();
 builder.Services.AddSingleton<ChunkThroughputLimiter>();
 builder.Services.AddHostedService<UploadCleanupService>();
 builder.Services.AddRateLimiter(o => RateLimits.Configure(o, builder.Configuration));
@@ -193,10 +196,13 @@ if (AdminService.ParseAllowedSubscriptions(builder.Configuration).Count == 0)
     app.Logger.LogWarning("Storage:AllowedSubscriptions is empty — any subscription the managed identity can reach may be registered");
 if (StartupChecks.OwnersWarning(app.Environment.IsDevelopment(), app.Services.GetRequiredService<OwnerConfig>()) is { } ownersWarning)
     app.Logger.LogWarning("{Warning}", ownersWarning);
-var (maxUploadBytes, configuredMaxUploadBytes) = UploadSessionService.MaxUploadBytesFrom(builder.Configuration);
-if (configuredMaxUploadBytes > maxUploadBytes)
-    app.Logger.LogWarning("Transfers:MaxUploadBytes {Configured} exceeds the {Limit}-byte ceiling (Azure's 50,000 blocks per blob at the 32 MiB largest piece size); using the ceiling.",
-        configuredMaxUploadBytes, maxUploadBytes);
+var uploadLimits = UploadLimitService.LimitsFrom(builder.Configuration);
+if (uploadLimits.ConfiguredCeiling > uploadLimits.Ceiling)
+    app.Logger.LogWarning("Transfers:MaxUploadBytesCeiling {Configured} exceeds the {Limit}-byte Azure block-blob maximum; using the maximum.",
+        uploadLimits.ConfiguredCeiling, uploadLimits.Ceiling);
+if (uploadLimits.ConfiguredDefault > uploadLimits.Default)
+    app.Logger.LogWarning("Transfers:MaxUploadBytes {Configured} exceeds the {Limit}-byte ceiling (Transfers:MaxUploadBytesCeiling); using the ceiling.",
+        uploadLimits.ConfiguredDefault, uploadLimits.Default);
 
 var pg = app.Services.GetRequiredService<PgsqlContext>();
 // An unreachable database fails the start on purpose.

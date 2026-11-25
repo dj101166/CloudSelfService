@@ -189,6 +189,16 @@ public sealed class PgsqlContext : IAsyncDisposable
             idx        INT NOT NULL,
             PRIMARY KEY (session_id, idx)
         );
+
+        CREATE TABLE IF NOT EXISTS upload_limit_override (
+            id         SMALLINT PRIMARY KEY CHECK (id = 1),
+            bytes      BIGINT NOT NULL CHECK (bytes > 0),
+            expires_at TIMESTAMPTZ NULL,
+            set_by     UUID NOT NULL,
+            set_by_upn TEXT NOT NULL,
+            set_at     TIMESTAMPTZ NOT NULL,
+            note       TEXT NOT NULL DEFAULT ''
+        );
         """;
 
     public async Task EnsureSchemaAsync(CancellationToken ct = default)

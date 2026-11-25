@@ -1,0 +1,197 @@
+@page "/admin/settings"
+@attribute [Authorize(Policy = Policies.StaffAdmin)]
+@inherits AdminPageBase
+@inject UploadLimitService Limits
+@inject IJSRuntime JS
+@inject ILogger<Settings> Logger
+@using CloudSelfService.Services
+@using CloudSelfService.Services.Access
+@using CloudSelfService.Services.Files
+@using CloudSelfService.Services.Transfers
+
+@*
+    Portal-wide settings Admins may change. The upload limit applies when an upload starts; one already open may still
+    finish after it is lowered. Times are entered and shown in the browser's zone and stored and audited in UTC.
+*@
+
+<PageTitle>Settings — Advanced Cloud Self Service</PageTitle>
+
+<AdminGate Denied="this.Denied" SessionEnded="this.SessionEnded">
+
+<div class="page-head">
+    <div>
+        <h1 class="page-title">Settings</h1>
+        <p class="page-subtitle">Portal-wide settings. Every change is written to the audit log.</p>
+    </div>
+</div>
+
+<AdminAlertBox Alert="this.Alert" />
+
+@if (!this.Loaded || this._state is not { } state)
+{
+    @if (this.Alert is null)
+    {
+        <div class="loading"><span class="spinner spinner--lg"></span> Loading…</div>
+    }
+}
+else
+{
+    <section class="card" aria-labelledby="upload-limit-title" data-testid="upload-limit-card">
+        <div class="card__head">
+            <h2 class="card__title" id="upload-limit-title">Upload size limit</h2>
+            <p class="card__desc">The largest file anyone can start uploading. An upload already in progress can still finish if the limit is lowered.</p>
+        </div>
+        <div class="card__body">
+            <div class="settings__facts">
+                <div class="stat">
+                    <div class="stat__label">Current limit</div>
+                    <div class="stat__value" data-testid="upload-limit-effective">@UploadLimitService.FormatGb(state.Effective) GB</div>
+                    <div class="stat__sub" data-testid="upload-limit-source">@UploadLimitService.Describe(state, this._zone)</div>
+                </div>
+                <div class="stat">
+                    <div class="stat__label">Default</div>
+                    <div class="stat__value" data-testid="upload-limit-default">@UploadLimitService.FormatGb(state.Default) GB</div>
+                    <div class="stat__sub">From configuration</div>
+                </div>
+                <div class="stat">
+                    <div class="stat__label">Ceiling</div>
+                    <div class="stat__value" data-testid="upload-limit-ceiling">@UploadLimitService.FormatGb(state.Ceiling) GB</div>
+                    <div class="stat__sub">The most that can be set here</div>
+                </div>
+            </div>
+
+            <form class="admin__subform" @onsubmit="this.SaveAsync">
+                <div class="field-row">
+                    <div class="field">
+                        <label class="label" for="upload-limit-gb">New limit (GB)</label>
+                        <input id="upload-limit-gb" class="input" type="number" min="1" max="@this.CeilingGb" step="1"
+                               data-testid="upload-limit-gb" @bind="this._gb" />
+                        <p class="hint">Whole gigabytes, from 1 to @this.CeilingGb.</p>
+                    </div>
+                    <fieldset class="field settings__ends">
+                        <legend class="label">Applies</legend>
+                        <label class="switch">
+                            <input type="radio" class="checkbox" name="upload-limit-ends" data-testid="upload-limit-permanent"
+                                   checked="@this._permanent" @onchange="() => this._permanent = true" />
+                            Permanent
+                        </label>
+                        <label class="switch">
+                            <input type="radio" class="checkbox" name="upload-limit-ends" data-testid="upload-limit-until"
+                                   checked="@(!this._permanent)" @onchange="() => this._permanent = false" />
+                            Until
+                        </label>
+                    </fieldset>
+                    <div class="field">
+                        <label class="label" for="upload-limit-until-at">End time (@this.ZoneName)</label>
+                        <input id="upload-limit-until-at" class="input" type="datetime-local" data-testid="upload-limit-until-at"
+                               disabled="@this._permanent" @bind="this._untilAt" />
+                    </div>
+                </div>
+                <div class="field settings__note">
+                    <label class="label" for="upload-limit-note">Note (optional)</label>
+                    <input id="upload-limit-note" class="input" maxlength="500" autocomplete="off" data-testid="upload-limit-note"
+                           @bind="this._note" @bind:event="oninput" />
+                    <p class="hint">Why the limit is changing. Saved with the setting and in the audit log.</p>
+                </div>
+                <div class="admin__actions">
+                    <button type="submit" class="btn btn--primary" data-testid="upload-limit-save"
+                            disabled="@(this.Busy || this._gb is null)">Save limit</button>
+                    @if (state.Override is not null)
+                    {
+                        <button type="button" class="btn btn--secondary" data-testid="upload-limit-revert" disabled="@this.Busy"
+                                @onclick="this.RevertAsync">Revert to default</button>
+                    }
+                </div>
+            </form>
+        </div>
+    </section>
+}
+
+</AdminGate>
+
+@code {
+    private UploadLimitState? _state;
+    private TimeZoneInfo? _zone;
+    private long? _gb;
+    private bool _permanent = true;
+    private DateTime? _untilAt;
+    private string _note = "";
+
+    private long CeilingGb => (this._state?.Ceiling ?? 0) >> 30;
+
+    private string ZoneName => this._zone?.Id ?? "UTC";
+
+    protected override void ClearData()
+    {
+        base.ClearData();
+        this._state = null;
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        await this.LoadGuardedAsync(this.LoadAsync);
+        this.Prefill();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender) return;
+        try
+        {
+            var tz = await this.JS.InvokeAsync<BrowserTimeZone>("cssp.timeZone");
+            var untilUtc = this._permanent || this._untilAt is not { } local ? (DateTimeOffset?)null : UploadLimitService.LocalToUtc(local, this._zone);
+            this._zone = FileDisplay.ResolveZone(tz.Id, tz.Offset);
+            if (untilUtc is { } u) this._untilAt = UploadLimitService.UtcToLocal(u, this._zone);
+            this.StateHasChanged();
+        }
+        catch (JSDisconnectedException)
+        {
+        }
+        catch (JSException ex)
+        {
+            this.Logger.LogDebug(ex, "Could not read the browser time zone; using UTC.");
+        }
+    }
+
+    private async Task LoadAsync() => this._state = await this.Limits.GetStateAsync();
+
+    private void Prefill()
+    {
+        if (this._state is not { } state) return;
+        var active = state.OverrideActive ? state.Override : null;
+        this._gb = state.Effective >> 30;
+        this._permanent = active?.ExpiresAt is null;
+        this._untilAt = active?.ExpiresAt is { } end ? UploadLimitService.UtcToLocal(end, this._zone) : null;
+        this._note = active?.Note ?? "";
+    }
+
+    private async Task SaveAsync()
+    {
+        var bytes = UploadLimitService.BytesFromGb(this._gb ?? 0);
+        var permanent = this._permanent;
+        var until = permanent || this._untilAt is not { } local ? (DateTimeOffset?)null : UploadLimitService.LocalToUtc(local, this._zone);
+        var note = this._note;
+        var saved = false;
+        await this.ActAsync(async (actor, ctx) =>
+        {
+            if (!permanent && until is null)
+                return AdminAlert.For(AccessOutcome.Invalid, AdminService.UploadLimitEndMessage);
+            var result = await this.Admin.SetUploadLimitAsync(actor, bytes, until, note, ctx);
+            saved = result.Outcome == AccessOutcome.Ok;
+            return AdminAlert.For(result.Outcome, result.Message, $"The upload limit is now {UploadLimitService.FormatGb(bytes)} GB.");
+        }, this.LoadAsync);
+        if (saved) this.Prefill();
+    }
+
+    private async Task RevertAsync()
+    {
+        var cleared = false;
+        await this.ActAsync(async (actor, ctx) =>
+        {
+            var result = await this.Admin.ClearUploadLimitAsync(actor, ctx);
+            cleared = result.Outcome == AccessOutcome.Ok;
+            return AdminAlert.For(result.Outcome, result.Message, "The upload limit is back to the default.");
+        }, this.LoadAsync);
+        if (cleared) this.Prefill();
+    }
+}

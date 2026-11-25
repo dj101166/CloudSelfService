@@ -48,7 +48,8 @@ public class StartupChecksTests
 
         Assert.Contains("StartupChecks.UsePostgres(builder.Environment.IsDevelopment(), builder.Configuration.GetConnectionString(\"Default\"))", program);
         Assert.Contains("StartupChecks.OwnersWarning(", program);
-        Assert.Contains("UploadSessionService.MaxUploadBytesFrom(", program);
+        Assert.Contains("UploadLimitService.LimitsFrom(", program);
+        Assert.Contains("Transfers:MaxUploadBytesCeiling {Configured} exceeds the {Limit}-byte Azure block-blob maximum; using the maximum.", program);
     }
 
     [Fact]
@@ -72,35 +73,58 @@ public class StartupChecksTests
         Assert.Null(StartupChecks.OwnersWarning(isDevelopment: true, new OwnerConfig("")));
     }
 
-    [Theory]
-    [InlineData(null, UploadSessionService.DefaultMaxUploadBytes, UploadSessionService.DefaultMaxUploadBytes)]
-    [InlineData("1000", 1000L, 1000L)]
-    [InlineData("-5", 0L, 0L)]
-    [InlineData("209715200001", 209_715_200_001L, 209_715_200_001L)]
-    [InlineData("1677721600000", 1_677_721_600_000L, 1_677_721_600_000L)]
-    public void MaxUploadBytesFrom_WithinCeiling_Unchanged(string? configured, long effective, long reported)
+    [Fact]
+    public void LimitsFrom_NullConfig_HundredGibDefaultAndOneTibCeiling()
     {
-        var (e, c) = UploadSessionService.MaxUploadBytesFrom(Config(configured));
+        var limits = UploadLimitService.LimitsFrom(Config(null, null));
 
-        Assert.Equal(effective, e);
-        Assert.Equal(reported, c);
+        Assert.Equal(107_374_182_400L, limits.Default);
+        Assert.Equal(107_374_182_400L, limits.ConfiguredDefault);
+        Assert.Equal(1_099_511_627_776L, limits.Ceiling);
+        Assert.Equal(1_099_511_627_776L, limits.ConfiguredCeiling);
+        Assert.Equal(UploadLimitService.DefaultMaxUploadBytes, limits.Default);
+        Assert.Equal(UploadLimitService.DefaultCeilingBytes, limits.Ceiling);
+    }
+
+    [Theory]
+    [InlineData("1000", null, 1000L, 1_099_511_627_776L)]
+    [InlineData("-5", null, 0L, 1_099_511_627_776L)]
+    [InlineData(null, "1677721600000", 107_374_182_400L, 1_677_721_600_000L)]
+    [InlineData("1677721600000", "1677721600000", 1_677_721_600_000L, 1_677_721_600_000L)]
+    public void LimitsFrom_WithinCeiling_Unchanged(string? maxUploadBytes, string? ceiling, long expectedDefault, long expectedCeiling)
+    {
+        var limits = UploadLimitService.LimitsFrom(Config(maxUploadBytes, ceiling));
+
+        Assert.Equal(expectedDefault, limits.Default);
+        Assert.Equal(expectedCeiling, limits.Ceiling);
+        Assert.Equal(limits.Ceiling, limits.ConfiguredCeiling);
     }
 
     [Fact]
-    public void MaxUploadBytesFrom_AboveCeiling_Clamped()
+    public void LimitsFrom_CeilingAboveBlobMax_ClampedAndReported()
     {
         var over = ChunkMath.MaxBlobBytes + 1;
 
-        var (e, c) = UploadSessionService.MaxUploadBytesFrom(Config(over.ToString()));
+        var limits = UploadLimitService.LimitsFrom(Config(null, over.ToString()));
 
-        Assert.Equal(ChunkMath.MaxBlobBytes, e);
-        Assert.Equal(over, c);
+        Assert.Equal(ChunkMath.MaxBlobBytes, limits.Ceiling);
+        Assert.Equal(over, limits.ConfiguredCeiling);
     }
 
-    private static IConfiguration Config(string? maxUploadBytes) =>
+    [Fact]
+    public void LimitsFrom_DefaultAboveCeiling_ClampedAndReported()
+    {
+        var limits = UploadLimitService.LimitsFrom(Config("2000000000000", null));
+
+        Assert.Equal(1_099_511_627_776L, limits.Default);
+        Assert.Equal(2_000_000_000_000L, limits.ConfiguredDefault);
+    }
+
+    private static IConfiguration Config(string? maxUploadBytes, string? ceiling) =>
         new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
         {
             ["Transfers:MaxUploadBytes"] = maxUploadBytes,
+            ["Transfers:MaxUploadBytesCeiling"] = ceiling,
         }).Build();
 }
 

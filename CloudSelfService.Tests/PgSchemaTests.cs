@@ -12,6 +12,16 @@ public class PgSchemaTests
         Assert.Contains("grants_owner_check", PgsqlContext.SchemaSql);
     }
 
+    [Fact]
+    public void SchemaSql_HasUploadLimitOverrideTable()
+    {
+        var sql = System.Text.RegularExpressions.Regex.Replace(PgsqlContext.SchemaSql, @"\s+", " ");
+
+        Assert.Contains("CREATE TABLE IF NOT EXISTS upload_limit_override ( id SMALLINT PRIMARY KEY CHECK (id = 1), "
+            + "bytes BIGINT NOT NULL CHECK (bytes > 0), expires_at TIMESTAMPTZ NULL, set_by UUID NOT NULL, "
+            + "set_by_upn TEXT NOT NULL, set_at TIMESTAMPTZ NOT NULL, note TEXT NOT NULL DEFAULT '' );", sql);
+    }
+
     [Theory]
     [InlineData("audit_events_append_only")]
     [InlineData("audit_events_no_change")]

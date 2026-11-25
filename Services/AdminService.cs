@@ -6,6 +6,7 @@ using CloudSelfService.Services.Access;
 using CloudSelfService.Services.Data;
 using CloudSelfService.Services.Identity;
 using CloudSelfService.Services.Storage;
+using CloudSelfService.Services.Transfers;
 
 namespace CloudSelfService.Services;
 
@@ -24,6 +25,7 @@ public sealed partial class AdminService
     public const string TestTargetOp = "Admin.TestTarget";
     public const string SetGrantOp = "Admin.SetGrant";
     public const string SetStaffRoleOp = "Admin.SetStaffRole";
+    public const string SetUploadLimitOp = "Admin.SetUploadLimit";
 
     public const string DefaultEndpointSuffix = "core.windows.net";
     public const string StaffUpnMessage = "Advanced staff sign in with their own account and don't need to be added.";
@@ -42,6 +44,7 @@ public sealed partial class AdminService
     private readonly string _staffDomain;
     private readonly HashSet<Guid> _allowedSubscriptions;
     private readonly ProbeCooldown _cooldown;
+    private readonly UploadLimitService _limits;
     private readonly ILogger<AdminService>? _logger;
     private readonly TimeSpan _testTimeout;
 
@@ -54,9 +57,10 @@ public sealed partial class AdminService
 
     public AdminService(IUserStore users, ICustomerStore customers, ITargetStore targets, IGrantStore grants,
         IStorageBackendResolver backends, AuditService audit, OwnerConfig owners, TimeProvider time, IConfiguration config,
-        ProbeCooldown? cooldown = null, ILogger<AdminService>? logger = null)
+        UploadLimitService limits, ProbeCooldown? cooldown = null, ILogger<AdminService>? logger = null)
     {
         _logger = logger;
+        _limits = limits;
         _users = users;
         _customers = customers;
         _targets = targets;
@@ -102,7 +106,8 @@ public sealed partial class AdminService
         nameof(StorageOperation.List), nameof(StorageOperation.Download), nameof(StorageOperation.Upload),
         nameof(StorageOperation.Overwrite), nameof(StorageOperation.CreateFolder), nameof(StorageOperation.Move),
         nameof(StorageOperation.Delete), "UploadBegin", "SignIn",
-        SaveCustomerOp, AddCustomerUserOp, SetUserActiveOp, SaveTargetOp, TestTargetOp, SetGrantOp, SetStaffRoleOp, ExportAuditOp,
+        SaveCustomerOp, AddCustomerUserOp, SetUserActiveOp, SaveTargetOp, TestTargetOp, SetGrantOp, SetStaffRoleOp, SetUploadLimitOp,
+        ExportAuditOp,
     };
 
     [GeneratedRegex(@"^[a-z0-9]{3,24}$")]
@@ -389,6 +394,60 @@ public sealed partial class AdminService
         return new(AccessOutcome.Ok);
     }
 
+    public const string UploadLimitEndMessage = "The end time must be in the future.";
+    public const string UploadLimitNoteMessage = "The note is limited to 500 characters.";
+    public const long MinUploadLimitBytes = 1L << 30;
+    private static readonly TimeSpan MinUploadLimitLead = TimeSpan.FromMinutes(1);
+
+    public static string UploadLimitRangeMessage(long ceiling) =>
+        $"The limit must be between 1 GB and {UploadLimitService.FormatGb(ceiling)} GB.";
+
+    /// <summary>Replaces the upload limit override. <paramref name="expiresAt"/> null is permanent; otherwise more than a minute ahead.</summary>
+    public async Task<AccessResult> SetUploadLimitAsync(Guid actorId, long bytes, DateTimeOffset? expiresAt, string? note,
+        AuditContext? ctx = null, CancellationToken ct = default)
+    {
+        var actor = await RequireAsync(actorId, StaffRole.StaffAdmin, SetUploadLimitOp, $"limit -> {bytes} bytes", null, null, ctx, ct);
+        if (actor is null) return new(AccessOutcome.Denied, StorageAccessService.DeniedMessage);
+
+        // Read past the cache: another instance may have changed the limit, and the audit row names the value replaced.
+        _limits.Invalidate();
+        var before = await _limits.GetStateAsync(ct);
+        if (bytes < MinUploadLimitBytes || bytes > before.Ceiling)
+            return new(AccessOutcome.Invalid, UploadLimitRangeMessage(before.Ceiling));
+        var now = _time.GetUtcNow();
+        if (expiresAt is { } end && end <= now + MinUploadLimitLead)
+            return new(AccessOutcome.Invalid, UploadLimitEndMessage);
+        var text = note?.Trim() ?? "";
+        if (text.Length > 500) return new(AccessOutcome.Invalid, UploadLimitNoteMessage);
+
+        var until = expiresAt?.ToUniversalTime();
+        await _limits.SetOverrideAsync(new UploadLimitOverride(bytes, until, actor.Id, actor.Upn, now, text), ct);
+        _limits.Invalidate();
+
+        var untilText = until is { } u ? u.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture) : "permanent";
+        await RecordAsync(actor, SetUploadLimitOp, null, null,
+            $"limit {UploadLimitService.FormatGb(before.Effective)} GB -> {UploadLimitService.FormatGb(bytes)} GB; until {untilText}; note: {text}",
+            ctx, bytes: bytes);
+        return new(AccessOutcome.Ok);
+    }
+
+    /// <summary>Removes the override, so the configured default applies again.</summary>
+    public async Task<AccessResult> ClearUploadLimitAsync(Guid actorId, AuditContext? ctx = null, CancellationToken ct = default)
+    {
+        var actor = await RequireAsync(actorId, StaffRole.StaffAdmin, SetUploadLimitOp, "limit -> default", null, null, ctx, ct);
+        if (actor is null) return new(AccessOutcome.Denied, StorageAccessService.DeniedMessage);
+
+        _limits.Invalidate();
+        var before = await _limits.GetStateAsync(ct);
+        await _limits.ClearOverrideAsync(ct);
+        _limits.Invalidate();
+
+        await RecordAsync(actor, SetUploadLimitOp, null, null,
+            $"limit {UploadLimitService.FormatGb(before.Effective)} GB -> default {UploadLimitService.FormatGb(before.Default)} GB", ctx,
+            bytes: before.Default);
+        return new(AccessOutcome.Ok);
+    }
+
     /// <summary>The acting user if still an active staff user holding at least <paramref name="minimum"/>; otherwise a Denied row is written and null returned.</summary>
     private async Task<AppUser?> RequireAsync(Guid actorId, StaffRole minimum, string operation, string path, Guid? customerId,
         Guid? targetId, AuditContext? ctx, CancellationToken ct)
@@ -404,9 +463,9 @@ public sealed partial class AdminService
     }
 
     private Task RecordAsync(AppUser actor, string operation, Guid? customerId, Guid? targetId, string path, AuditContext? ctx,
-        AuditResult result = AuditResult.Success, string error = "") =>
+        AuditResult result = AuditResult.Success, string error = "", long? bytes = null) =>
         _audit.RecordAsync(new AuditEvent(Guid.NewGuid(), _time.GetUtcNow(), actor.Id, actor.Upn, customerId, targetId, operation,
-            path, null, result, error, SourceIp(ctx), Correlation(ctx)), CancellationToken.None);
+            path, bytes, result, error, SourceIp(ctx), Correlation(ctx)), CancellationToken.None);
 
     public const string ExportAuditOp = "Admin.ExportAudit";
 

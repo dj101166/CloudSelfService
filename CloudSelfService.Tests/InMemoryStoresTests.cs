@@ -6,6 +6,12 @@ namespace CloudSelfService.Tests;
 
 public class InMemoryStoresTests
 {
+    [Fact]
+    public Task UploadLimitStore_SetGetClear_RoundTrips() => UploadLimitStoreContract.SetGetClear_RoundTrips(new InMemoryUploadLimitStore());
+
+    [Fact]
+    public Task UploadLimitStore_SetTwice_KeepsOneRow() => UploadLimitStoreContract.SetTwice_KeepsOneRow(new InMemoryUploadLimitStore());
+
     private static StorageTarget Target(Guid id, Guid? customerId) =>
         new(id, customerId, "t", "sub", "rg", "acct", StorageKind.FileShare, "share", "core.windows.net", true);
 
@@ -127,5 +133,42 @@ public class InMemoryStoresTests
         await targets.UpsertAsync(Target(targetId, newOwner));
 
         Assert.Equal(newOwner, (await targets.GetAsync(targetId))!.CustomerId);
+    }
+}
+
+/// <summary>The single-row upload limit override, shared by the in-memory and PostgreSQL stores.</summary>
+public static class UploadLimitStoreContract
+{
+    private static readonly DateTimeOffset At = new(2026, 11, 25, 9, 0, 0, TimeSpan.Zero);
+
+    public static async Task SetGetClear_RoundTrips(IUploadLimitStore store)
+    {
+        await store.ClearAsync();
+        Assert.Null(await store.GetAsync());
+
+        var permanent = new UploadLimitOverride(5L << 30, null, Guid.NewGuid(), "ada@advancedutility.com", At, "");
+        await store.SetAsync(permanent);
+        Assert.Equal(permanent, await store.GetAsync());
+
+        var expiring = new UploadLimitOverride(200L << 30, At.AddDays(2), Guid.NewGuid(), "bo@advancedutility.com", At.AddMinutes(5), "quarter end");
+        await store.SetAsync(expiring);
+        Assert.Equal(expiring, await store.GetAsync());
+
+        await store.ClearAsync();
+        Assert.Null(await store.GetAsync());
+        await store.ClearAsync();
+    }
+
+    public static async Task SetTwice_KeepsOneRow(IUploadLimitStore store)
+    {
+        await store.ClearAsync();
+        await store.SetAsync(new UploadLimitOverride(3L << 30, null, Guid.NewGuid(), "a@advancedutility.com", At, "one"));
+        await store.SetAsync(new UploadLimitOverride(4L << 30, null, Guid.NewGuid(), "b@advancedutility.com", At, "two"));
+
+        var current = (await store.GetAsync())!;
+        Assert.Equal(4L << 30, current.Bytes);
+        Assert.Equal("two", current.Note);
+        await store.ClearAsync();
+        Assert.Null(await store.GetAsync());
     }
 }

@@ -35,6 +35,37 @@ public class PgStoresIntegrationTests
         StorageKind.BlobContainer, "cont", "core.usgovcloudapi.net", true);
 
     [PgFact]
+    public async Task UploadLimitStore_SetGetClear_RoundTrips()
+    {
+        await using var ctx = await CtxAsync();
+        await UploadLimitStoreContract.SetGetClear_RoundTrips(new PgUploadLimitStore(ctx));
+    }
+
+    [PgFact]
+    public async Task UploadLimitStore_SetTwice_KeepsOneRow()
+    {
+        await using var ctx = await CtxAsync();
+        await UploadLimitStoreContract.SetTwice_KeepsOneRow(new PgUploadLimitStore(ctx));
+        await using var cmd = ctx.DataSource.CreateCommand("SELECT count(*) FROM upload_limit_override");
+        Assert.Equal(0L, (long)(await cmd.ExecuteScalarAsync())!);
+    }
+
+    [PgFact]
+    public async Task UploadLimitOverride_RejectsSecondRowAndNonPositiveBytes()
+    {
+        await using var ctx = await CtxAsync();
+        async Task Run(string sql)
+        {
+            await using var cmd = ctx.DataSource.CreateCommand(sql);
+            var ex = await Assert.ThrowsAsync<Npgsql.PostgresException>(() => cmd.ExecuteNonQueryAsync());
+            Assert.Equal("23514", ex.SqlState);
+        }
+
+        await Run("INSERT INTO upload_limit_override (id, bytes, set_by, set_by_upn, set_at) VALUES (2, 1, gen_random_uuid(), 'x', now())");
+        await Run("INSERT INTO upload_limit_override (id, bytes, set_by, set_by_upn, set_at) VALUES (1, 0, gen_random_uuid(), 'x', now())");
+    }
+
+    [PgFact]
     public async Task EnsureSchema_RunTwiceAndConcurrently_Succeeds()
     {
         await using var ctx = await CtxAsync();

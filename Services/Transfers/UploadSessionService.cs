@@ -1,5 +1,4 @@
 using System.Buffers;
-using System.Globalization;
 using System.Security.Cryptography;
 using CloudSelfService.Models;
 using CloudSelfService.Services.Access;
@@ -22,7 +21,6 @@ public sealed record BeginUploadResponse(Guid SessionId, int ChunkSize, int Chun
 /// </summary>
 public sealed class UploadSessionService
 {
-    public const long DefaultMaxUploadBytes = 53_687_091_200;
     public const int DefaultParallelChunks = 4;
     public const int DefaultSessionHours = 24;
     public const int DefaultBlobLockMinutes = 15;
@@ -58,8 +56,8 @@ public sealed class UploadSessionService
     private readonly AuditService _audit;
     private readonly TimeProvider _time;
     private readonly PieceMemoryBudget _budget;
+    private readonly UploadLimitService _limits;
     private readonly ILogger<UploadSessionService> _logger;
-    private readonly long _maxBytes;
     private readonly int _parallel;
     private readonly TimeSpan _lifetime;
     private readonly TimeSpan _blobLock;
@@ -83,7 +81,8 @@ public sealed class UploadSessionService
     internal TimeSpan GrowTimeout { get; set; } = DefaultGrowTimeout;
 
     public UploadSessionService(StorageAccessService access, IUploadSessionStore sessions, IStorageBackendResolver backends,
-        AuditService audit, TimeProvider time, IConfiguration config, PieceMemoryBudget budget, ILogger<UploadSessionService> logger)
+        AuditService audit, TimeProvider time, IConfiguration config, PieceMemoryBudget budget, UploadLimitService limits,
+        ILogger<UploadSessionService> logger)
     {
         _access = access;
         _sessions = sessions;
@@ -91,8 +90,8 @@ public sealed class UploadSessionService
         _audit = audit;
         _time = time;
         _budget = budget;
+        _limits = limits;
         _logger = logger;
-        _maxBytes = MaxUploadBytesFrom(config).Effective;
         _parallel = Math.Clamp(config.GetValue<int?>("Transfers:ParallelChunks") ?? DefaultParallelChunks, 1, 16);
         _lifetime = TimeSpan.FromHours(Math.Max(1, config.GetValue<int?>("Transfers:SessionHours") ?? DefaultSessionHours));
         _blobLock = TimeSpan.FromMinutes(Math.Max(1, config.GetValue<int?>("Transfers:BlobLockMinutes") ?? DefaultBlobLockMinutes));
@@ -104,15 +103,8 @@ public sealed class UploadSessionService
     public static int MinChunkBytesPerSecondFrom(IConfiguration config) =>
         Math.Max(1, config.GetValue<int?>("Transfers:MinChunkBytesPerSecond") ?? DefaultMinChunkBytesPerSecond);
 
-    /// <summary>The configured upload limit and the one in force, clamped to the largest blob the portal can stage. Program warns once at startup when they differ.</summary>
-    public static (long Effective, long Configured) MaxUploadBytesFrom(IConfiguration config)
-    {
-        var configured = Math.Max(0, config.GetValue<long?>("Transfers:MaxUploadBytes") ?? DefaultMaxUploadBytes);
-        return (Math.Min(configured, ChunkMath.MaxBlobBytes), configured);
-    }
-
     public static string TooLargeMessage(long maxBytes) =>
-        $"File is larger than the {(maxBytes / (double)(1L << 30)).ToString("0.##", CultureInfo.InvariantCulture)} GB limit.";
+        $"File is larger than the {UploadLimitService.FormatGb(maxBytes)} GB limit.";
 
     public static string MissingPiecesMessage(int missing) =>
         $"Upload is missing {missing} {(missing == 1 ? "piece" : "pieces")}.";
@@ -147,8 +139,6 @@ public sealed class UploadSessionService
     {
         if (req.Size < 0)
             return new(AccessOutcome.Invalid, null, NegativeSizeMessage);
-        if (req.Size > _maxBytes)
-            return new(AccessOutcome.Invalid, null, TooLargeMessage(_maxBytes));
         if (req.FirstPieceMd5 is not null && !TryParseMd5(req.FirstPieceMd5, out _))
             return new(AccessOutcome.Invalid, null, FirstPieceMd5InvalidMessage);
         var firstPieceMd5 = req.FirstPieceMd5?.Trim();
@@ -177,16 +167,20 @@ public sealed class UploadSessionService
         if (resumable is not null && !SameFirstPiece(resumable.FirstPieceMd5, firstPieceMd5))
             resumable = null;
 
-        // Per-user caps, before any storage call: a session reserves its declared size until it settles, so one user
-        // can never stage more than MaxUploadBytes (or hold more than MaxOpenSessionsPerUser uploads) at a time.
-        // Resuming adds nothing, and an older session for the same file is about to be replaced, so neither counts.
+        // The limit applies only to a new upload: one already open was accepted at its own Begin and may finish after
+        // the limit is lowered. Per-user caps come before any storage call: a session reserves its declared size until
+        // it settles, so one user can never stage more than the limit (or hold more than MaxOpenSessionsPerUser uploads)
+        // at a time. Resuming adds nothing, and an older session for the same file is about to be replaced, so neither counts.
         if (resumable is null)
         {
+            var maxBytes = (await _limits.GetStateAsync(ct)).Effective;
+            if (req.Size > maxBytes)
+                return new(AccessOutcome.Invalid, null, TooLargeMessage(maxBytes));
             var replaced = (await _sessions.ListOpenForUserPathAsync(userId, target.Id, finalPath, ct))
                 .Where(o => o.ExpiresAt > now).ToList();
             var open = await _sessions.CountOpenForUserAsync(userId, now, ct) - replaced.Count;
             var reserved = await _sessions.SumOpenSizeForUserAsync(userId, now, ct) - replaced.Sum(o => o.Size);
-            if (open >= _maxOpenSessions || reserved + req.Size > _maxBytes)
+            if (open >= _maxOpenSessions || reserved + req.Size > maxBytes)
                 return new(AccessOutcome.Busy, null, TooManyUploadsMessage, Code: UploadErrorCodes.Busy);
         }
 

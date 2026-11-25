@@ -27,6 +27,7 @@ public class UploadSessionServiceTests
     private readonly InMemoryAuditStore _audit = new();
     private readonly InMemoryUploadSessionStore _sessions = new();
     private readonly FakeStorageBackend _fake = new();
+    private readonly InMemoryUploadLimitStore _limitStore = new();
     private readonly MutableTime _time = new(Start);
 
     private readonly Customer _custA = new(Guid.NewGuid(), "Alpha", true, "", null, CustomerCloud.Commercial, CrossTenantStatus.NotRequired);
@@ -71,7 +72,11 @@ public class UploadSessionServiceTests
         int? minChunkBytesPerSecond = null, PieceMemoryBudget? budget = null)
     {
         var settings = new Dictionary<string, string?> { ["Transfers:ParallelChunks"] = parallel.ToString() };
-        if (maxBytes is not null) settings["Transfers:MaxUploadBytes"] = maxBytes.ToString();
+        if (maxBytes is not null)
+        {
+            settings["Transfers:MaxUploadBytes"] = maxBytes.ToString();
+            settings["Transfers:MaxUploadBytesCeiling"] = maxBytes.ToString();
+        }
         if (maxOpen is not null) settings["Transfers:MaxOpenSessionsPerUser"] = maxOpen.ToString();
         if (minChunkBytesPerSecond is not null) settings["Transfers:MinChunkBytesPerSecond"] = minChunkBytesPerSecond.ToString();
         var config = new ConfigurationBuilder().AddInMemoryCollection(settings).Build();
@@ -79,7 +84,8 @@ public class UploadSessionServiceTests
         var access = new StorageAccessService(_users, _customers, _targets, _grants, _fake, audit, new OwnerConfig(""),
             _time, NullLogger<StorageAccessService>.Instance);
         return new UploadSessionService(access, sessions ?? _sessions, backends ?? _fake, audit, _time, config,
-            budget ?? new PieceMemoryBudget(config), logger ?? NullLogger<UploadSessionService>.Instance);
+            budget ?? new PieceMemoryBudget(config), new UploadLimitService(_limitStore, _time, config),
+            logger ?? NullLogger<UploadSessionService>.Instance);
     }
 
     private UploadCleanupService Cleanup(int? completingTimeoutMinutes = null, int? idleMinutes = null) =>
@@ -165,12 +171,91 @@ public class UploadSessionServiceTests
     }
 
     [Fact]
-    public async Task Begin_DefaultLimit_Is50Gb()
+    public async Task Begin_DefaultLimit_Is100Gb()
     {
         var result = await Service().BeginAsync(_contrib.Id,
-            new BeginUploadRequest(_share.Id, "", "big.iso", 53_687_091_201, false), Ctx);
+            new BeginUploadRequest(_share.Id, "", "big.iso", 107_374_182_401, false), Ctx);
 
-        Assert.Equal("File is larger than the 50 GB limit.", result.Message);
+        Assert.Equal("File is larger than the 100 GB limit.", result.Message);
+        Assert.Equal(AccessOutcome.Ok, (await Service().BeginAsync(_contrib.Id,
+            new BeginUploadRequest(_share.Id, "", "big.iso", 107_374_182_400, false), Ctx)).Outcome);
+    }
+
+    private const long GiB = 1L << 30;
+
+    private Task SetOverride(long bytes) =>
+        _limitStore.SetAsync(new UploadLimitOverride(bytes, null, Guid.NewGuid(), "ada@advancedutility.com", Start, ""));
+
+    [Fact]
+    public async Task Begin_AboveEffectiveLimit_TooLarge()
+    {
+        await SetOverride(2 * GiB);
+        var svc = Service();
+
+        var over = await svc.BeginAsync(_contrib.Id, new BeginUploadRequest(_share.Id, "", "big.iso", 2 * GiB + 1, false), Ctx);
+        var at = await svc.BeginAsync(_contrib.Id, new BeginUploadRequest(_share.Id, "", "fits.iso", 2 * GiB, false), Ctx);
+
+        Assert.Equal(AccessOutcome.Invalid, over.Outcome);
+        Assert.Equal(UploadSessionService.TooLargeMessage(2 * GiB), over.Message);
+        Assert.Equal("File is larger than the 2 GB limit.", over.Message);
+        Assert.Equal(AccessOutcome.Ok, at.Outcome);
+    }
+
+    [Fact]
+    public async Task Begin_ReservedBytesCap_UsesEffectiveLimit()
+    {
+        await SetOverride(2 * GiB);
+        var svc = Service();
+        await BeginOk(svc, _contrib, _share, "", "a.bin", GiB);
+
+        var over = await svc.BeginAsync(_contrib.Id, new BeginUploadRequest(_share.Id, "", "b.bin", GiB + 1, false), Ctx);
+
+        Assert.Equal(AccessOutcome.Busy, over.Outcome);
+        Assert.Equal(UploadErrorCodes.Busy, over.Code);
+    }
+
+    [Fact]
+    public async Task Begin_ResumeAfterLimitLowered_StillResumes()
+    {
+        await SetOverride(4 * GiB);
+        var first = await BeginOk(Service(), _contrib, _share, "", "big.iso", 3 * GiB);
+
+        await SetOverride(2 * GiB);
+        var svc = Service();
+        var resumed = await svc.BeginAsync(_contrib.Id, new BeginUploadRequest(_share.Id, "", "big.iso", 3 * GiB, false), Ctx);
+        var fresh = await svc.BeginAsync(_contrib.Id, new BeginUploadRequest(_share.Id, "", "other.iso", 3 * GiB, false), Ctx);
+
+        Assert.Equal(AccessOutcome.Ok, resumed.Outcome);
+        Assert.Equal(first.SessionId, resumed.Value!.SessionId);
+        Assert.Equal(AccessOutcome.Invalid, fresh.Outcome);
+        Assert.Equal(UploadSessionService.TooLargeMessage(2 * GiB), fresh.Message);
+    }
+
+    [Fact]
+    public async Task Begin_ResumeWithDifferentFirstPiece_AfterLimitLowered_TooLarge()
+    {
+        await SetOverride(4 * GiB);
+        var firstMd5 = Md5(Bytes(16));
+        var begin = await Service().BeginAsync(_contrib.Id,
+            new BeginUploadRequest(_share.Id, "", "big.iso", 3 * GiB, false, firstMd5), Ctx);
+        Assert.Equal(AccessOutcome.Ok, begin.Outcome);
+
+        await SetOverride(2 * GiB);
+        var other = await Service().BeginAsync(_contrib.Id,
+            new BeginUploadRequest(_share.Id, "", "big.iso", 3 * GiB, false, Md5(Bytes(16, seed: 9))), Ctx);
+
+        Assert.Equal(AccessOutcome.Invalid, other.Outcome);
+        Assert.Equal(UploadSessionService.TooLargeMessage(2 * GiB), other.Message);
+    }
+
+    [Fact]
+    public async Task Begin_TooLargeWithoutAccess_DeniedFirst()
+    {
+        var result = await Service(maxBytes: GiB).BeginAsync(_reader.Id,
+            new BeginUploadRequest(_readShare.Id, "", "big.iso", GiB + 1, false), Ctx);
+
+        Assert.Equal(AccessOutcome.Denied, result.Outcome);
+        Assert.Equal(AuditResult.Denied, Assert.Single(await UploadAudits()).Result);
     }
 
     [Fact]
@@ -1097,7 +1182,7 @@ public class UploadSessionServiceTests
         var access = new StorageAccessService(_users, _customers, _targets, _grants, _fake, audit, new OwnerConfig(""), _time,
             NullLogger<StorageAccessService>.Instance);
         var svc = new UploadSessionService(access, _sessions, _fake, audit, _time, config, new PieceMemoryBudget(config),
-            NullLogger<UploadSessionService>.Instance);
+            new UploadLimitService(_limitStore, _time, config), NullLogger<UploadSessionService>.Instance);
         await BeginOk(svc, _contrib, _blob, "", "a.bin", 10);
         _time.Now = Start.AddMinutes(30);
 

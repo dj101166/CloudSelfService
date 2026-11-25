@@ -1,0 +1,16 @@
+/* Settings. Every colour reads a token. Shared admin classes live in wwwroot/css/app.css. */
+
+.settings__facts {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 12px;
+}
+
+.settings__ends {
+    border: 0;
+    margin: 0;
+    padding: 0;
+    min-width: 0;
+}
+
+.settings__note { margin-top: 14px; max-width: 68ch; }
