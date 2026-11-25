@@ -89,7 +89,7 @@ public sealed class UploadSessionService
     public static (long Effective, long Configured) MaxUploadBytesFrom(IConfiguration config)
     {
         var configured = Math.Max(0, config.GetValue<long?>("Transfers:MaxUploadBytes") ?? DefaultMaxUploadBytes);
-        return (Math.Min(configured, ChunkMath.MaxUploadBytes), configured);
+        return (Math.Min(configured, (long)ChunkMath.MinPieceSize * ChunkMath.MaxBlocksPerBlob), configured);
     }
 
     public static string TooLargeMessage(long maxBytes) =>
@@ -116,7 +116,7 @@ public sealed class UploadSessionService
     {
         if (index < 0)
             return new(AccessOutcome.Invalid, $"Piece {index} is out of range.");
-        if (contentLength is not { } length || length < 0 || length > ChunkMath.ChunkSize)
+        if (contentLength is not { } length || length < 0 || length > ChunkMath.MinPieceSize)
             return new(AccessOutcome.Invalid, "Each piece needs a Content-Length of at most one piece size.");
         if (!TryParseMd5(contentMd5Base64, out _))
             return new(AccessOutcome.Invalid, Md5RequiredMessage);
@@ -232,7 +232,7 @@ public sealed class UploadSessionService
         var id = Guid.NewGuid();
         var staging = target.Kind == StorageKind.FileShare ? StagingPathFor(finalPath, id) : finalPath;
         // The row is written first so the expiry sweep can always find (and remove) whatever storage was prepared.
-        var session = new UploadSession(id, userId, target.Id, finalPath, staging, req.Size, ChunkMath.ChunkSize,
+        var session = new UploadSession(id, userId, target.Id, finalPath, staging, req.Size, ChunkMath.MinPieceSize,
             req.Overwrite, now, now + _lifetime, UploadStatus.Open, TargetKind: target.Kind, ExistedAtBegin: existed,
             StagingRemoved: target.Kind == StorageKind.BlobContainer, FirstPieceMd5: firstPieceMd5);
         await _sessions.CreateAsync(session, ct);
@@ -284,10 +284,10 @@ public sealed class UploadSessionService
         if (session is null)
             return new(AccessOutcome.NotFound, StorageErrorMapper.NotFoundMessage);
 
-        var count = ChunkMath.ChunkCount(session.Size);
+        var count = ChunkMath.ChunkCount(session.Size, ChunkMath.MinPieceSize);
         if (index >= count)
             return new(AccessOutcome.Invalid, $"Piece {index} is out of range; this upload has {count}.");
-        var expected = ChunkMath.ExpectedLength(session.Size, index);
+        var expected = ChunkMath.ExpectedLength(session.Size, ChunkMath.MinPieceSize, index);
         if (contentLength != expected)
             return new(AccessOutcome.Invalid, $"Piece {index} must be exactly {expected} bytes.");
 
@@ -310,7 +310,7 @@ public sealed class UploadSessionService
                 return new(AccessOutcome.Invalid, ChunkCorruptedMessage, UploadErrorCodes.Retry);
 
             var backend = _backends.For(target);
-            var offset = (long)index * ChunkMath.ChunkSize;
+            var offset = (long)index * ChunkMath.MinPieceSize;
             // Files quota is charged on logical size, so the full size is reserved only when the first piece arrives
             // (bounded by the per-user byte cap). It is always grown to exactly session.Size, never offset + length: a
             // timed-out grow that Azure applies late then sets the same size again instead of truncating pieces another
@@ -402,7 +402,7 @@ public sealed class UploadSessionService
         if (session is null)
             return new(AccessOutcome.NotFound, StorageErrorMapper.NotFoundMessage);
 
-        var count = ChunkMath.ChunkCount(session.Size);
+        var count = ChunkMath.ChunkCount(session.Size, ChunkMath.MinPieceSize);
         var received = (await _sessions.ReceivedChunksAsync(session.Id, ct)).Where(i => i >= 0 && i < count).Distinct().Count();
         if (received < count)
             return new(AccessOutcome.Invalid, MissingPiecesMessage(count - received));
@@ -588,7 +588,7 @@ public sealed class UploadSessionService
     }
 
     private BeginUploadResponse Response(Guid id, long size, IReadOnlyList<int> received) =>
-        new(id, ChunkMath.ChunkSize, ChunkMath.ChunkCount(size), _parallel, received);
+        new(id, ChunkMath.MinPieceSize, ChunkMath.ChunkCount(size, ChunkMath.MinPieceSize), _parallel, received);
 
     private bool HoldsBlobName(UploadSession s, DateTimeOffset now) =>
         s.Status == UploadStatus.Completing || now - s.CreatedAt < _blobLock

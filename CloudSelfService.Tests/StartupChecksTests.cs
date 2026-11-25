@@ -87,11 +87,11 @@ public class StartupChecksTests
     [Fact]
     public void MaxUploadBytesFrom_AboveCeiling_Clamped()
     {
-        var over = ChunkMath.MaxUploadBytes + 1;
+        var over = (long)ChunkMath.MinPieceSize * ChunkMath.MaxBlocksPerBlob + 1;
 
         var (e, c) = UploadSessionService.MaxUploadBytesFrom(Config(over.ToString()));
 
-        Assert.Equal(ChunkMath.MaxUploadBytes, e);
+        Assert.Equal((long)ChunkMath.MinPieceSize * ChunkMath.MaxBlocksPerBlob, e);
         Assert.Equal(over, c);
     }
 

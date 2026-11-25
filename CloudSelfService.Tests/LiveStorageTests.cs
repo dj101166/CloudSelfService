@@ -28,7 +28,7 @@ public class LiveStorageTests
     {
         var ct = CancellationToken.None;
         var run = "cssp-live-" + Guid.NewGuid().ToString("N")[..8];
-        var content = new byte[ChunkMath.ChunkSize * 2 + 1];
+        var content = new byte[ChunkMath.MinPieceSize * 2 + 1];
         Random.Shared.NextBytes(content);
         var sessionId = Guid.NewGuid();
         var staging = $"{run}/.big.bin.cssupload-{sessionId:N}";
@@ -40,10 +40,10 @@ public class LiveStorageTests
 
         await b.BeginUploadAsync(t, staging, content.Length, ct);
         var ids = new List<string>();
-        for (var i = 0; i < ChunkMath.ChunkCount(content.Length); i++)
+        for (var i = 0; i < ChunkMath.ChunkCount(content.Length, ChunkMath.MinPieceSize); i++)
         {
-            var offset = (long)i * ChunkMath.ChunkSize;
-            var len = (int)ChunkMath.ExpectedLength(content.Length, i);
+            var offset = (long)i * ChunkMath.MinPieceSize;
+            var len = (int)ChunkMath.ExpectedLength(content.Length, ChunkMath.MinPieceSize, i);
             var slice = content.AsMemory((int)offset, len).ToArray();
             var id = ChunkMath.BlockId(sessionId, i);
             ids.Add(id);

@@ -99,8 +99,8 @@ public class UploadSessionServiceTests
 
     private static byte[] Chunk(byte[] file, int index)
     {
-        var start = index * ChunkMath.ChunkSize;
-        return file[start..Math.Min(file.Length, start + ChunkMath.ChunkSize)];
+        var start = index * ChunkMath.MinPieceSize;
+        return file[start..Math.Min(file.Length, start + ChunkMath.MinPieceSize)];
     }
 
     private Task<AccessResult> Put(UploadSessionService svc, Guid user, Guid session, byte[] file, int index)
@@ -227,7 +227,7 @@ public class UploadSessionServiceTests
         Assert.Equal("Docs/Q1/report.pdf", session.FinalPath);
         Assert.Equal($"Docs/Q1/.report.pdf.cssupload-{begin.SessionId:N}", session.StagingPath);
         Assert.True(StoragePaths.IsStagingName(StoragePath.Leaf(session.StagingPath)));
-        Assert.Equal(ChunkMath.ChunkSize, begin.ChunkSize);
+        Assert.Equal(ChunkMath.MinPieceSize, begin.ChunkSize);
         Assert.Equal(3, begin.ChunkCount);
         Assert.Equal(6, begin.ParallelChunks);
         Assert.Empty(begin.Received);
@@ -405,7 +405,7 @@ public class UploadSessionServiceTests
 
     private async Task<BeginUploadResponse> BeginWithHash(UploadSessionService svc, string? hash)
     {
-        var result = await svc.BeginAsync(_contrib.Id, new BeginUploadRequest(_share.Id, "", "same.bin", 2 * ChunkMath.ChunkSize, false, hash), Ctx);
+        var result = await svc.BeginAsync(_contrib.Id, new BeginUploadRequest(_share.Id, "", "same.bin", 2 * ChunkMath.MinPieceSize, false, hash), Ctx);
         Assert.Equal(AccessOutcome.Ok, result.Outcome);
         return result.Value!;
     }
@@ -415,7 +415,7 @@ public class UploadSessionServiceTests
     {
         var svc = Service();
         var first = await BeginWithHash(svc, HashA);
-        Assert.Equal(AccessOutcome.Ok, (await Put(svc, _contrib.Id, first.SessionId, new byte[2 * ChunkMath.ChunkSize], 0)).Outcome);
+        Assert.Equal(AccessOutcome.Ok, (await Put(svc, _contrib.Id, first.SessionId, new byte[2 * ChunkMath.MinPieceSize], 0)).Outcome);
 
         var again = await BeginWithHash(svc, HashA);
 
@@ -428,7 +428,7 @@ public class UploadSessionServiceTests
     {
         var svc = Service();
         var first = await BeginWithHash(svc, HashA);
-        Assert.Equal(AccessOutcome.Ok, (await Put(svc, _contrib.Id, first.SessionId, new byte[2 * ChunkMath.ChunkSize], 0)).Outcome);
+        Assert.Equal(AccessOutcome.Ok, (await Put(svc, _contrib.Id, first.SessionId, new byte[2 * ChunkMath.MinPieceSize], 0)).Outcome);
 
         var other = await BeginWithHash(svc, HashB);
 
@@ -1675,7 +1675,7 @@ public class UploadSessionServiceTests
     {
         var id = Guid.NewGuid();
         var s = new UploadSession(id, Guid.NewGuid(), Guid.NewGuid(), "Docs/a.bin", UploadSessionService.StagingPathFor("Docs/a.bin", id),
-            1, ChunkMath.ChunkSize, false, Start, Start, UploadStatus.Open);
+            1, ChunkMath.MinPieceSize, false, Start, Start, UploadStatus.Open);
 
         Assert.True(UploadSessionService.StagingIsOwnedBy(s));
         Assert.False(UploadSessionService.StagingIsOwnedBy(s with { StagingPath = "Docs/a.bin" }));
@@ -2310,7 +2310,7 @@ public class UploadSessionServiceTests
     public async Task Complete_ReceivedIncludesOutOfRangeIndex_StillMissingPiece_Invalid()
     {
         var svc = Service();
-        var file = Bytes(2 * ChunkMath.ChunkSize + 1);
+        var file = Bytes(2 * ChunkMath.MinPieceSize + 1);
         var begin = await BeginOk(svc, _contrib, _share, "", "a.bin", file.Length);
         await Put(svc, _contrib.Id, begin.SessionId, file, 0);
         await Put(svc, _contrib.Id, begin.SessionId, file, 1);
@@ -2480,13 +2480,13 @@ public class UploadSessionServiceTests
         var log = new WarningLogger();
         var svc = Service(maxBytes: 1L << 40, logger: log);
 
-        var atCeiling = await svc.BeginAsync(_contrib.Id, new BeginUploadRequest(_share.Id, "", "a.bin", ChunkMath.MaxUploadBytes, false), Ctx);
-        var overCeiling = await svc.BeginAsync(_contrib.Id, new BeginUploadRequest(_share.Id, "", "b.bin", ChunkMath.MaxUploadBytes + 1, false), Ctx);
+        var atCeiling = await svc.BeginAsync(_contrib.Id, new BeginUploadRequest(_share.Id, "", "a.bin", (long)ChunkMath.MinPieceSize * ChunkMath.MaxBlocksPerBlob, false), Ctx);
+        var overCeiling = await svc.BeginAsync(_contrib.Id, new BeginUploadRequest(_share.Id, "", "b.bin", (long)ChunkMath.MinPieceSize * ChunkMath.MaxBlocksPerBlob + 1, false), Ctx);
 
         Assert.Equal(0, log.Warnings);
         Assert.Equal(AccessOutcome.Ok, atCeiling.Outcome);
         Assert.Equal(AccessOutcome.Invalid, overCeiling.Outcome);
-        Assert.Equal(UploadSessionService.TooLargeMessage(ChunkMath.MaxUploadBytes), overCeiling.Message);
+        Assert.Equal(UploadSessionService.TooLargeMessage((long)ChunkMath.MinPieceSize * ChunkMath.MaxBlocksPerBlob), overCeiling.Message);
     }
 
     [Fact]

@@ -43,12 +43,12 @@ public static class UploadEndpoints
         var isChunk = HttpMethods.IsPut(ctx.Request.Method);
         // Limits are set before antiforgery, which may read a form body. The chunk PUT is the group's only PUT.
         if (ctx.Features.Get<IHttpMaxRequestBodySizeFeature>() is { IsReadOnly: false } limit)
-            limit.MaxRequestBodySize = isChunk ? ChunkMath.ChunkSize : ControlBodyLimit;
+            limit.MaxRequestBodySize = isChunk ? ChunkMath.MinPieceSize : ControlBodyLimit;
         if (isChunk)
             ApplyMinDataRate(ctx, ctx.RequestServices.GetRequiredService<IConfiguration>());
         if (ctx.Request.Headers["Sec-Fetch-Site"].ToString() is "cross-site" or "same-site")
             return Error(StatusCodes.Status403Forbidden, CrossSiteMessage, UploadErrorCodes.Denied);
-        if (ctx.Request.ContentLength > (isChunk ? ChunkMath.ChunkSize : ControlBodyLimit))
+        if (ctx.Request.ContentLength > (isChunk ? ChunkMath.MinPieceSize : ControlBodyLimit))
             return isChunk
                 ? Error(StatusCodes.Status413PayloadTooLarge, TooLargeMessage, UploadErrorCodes.TooLarge)
                 : Error(StatusCodes.Status413PayloadTooLarge, ControlBodyTooLargeMessage, UploadErrorCodes.TooLarge);

@@ -87,7 +87,7 @@ public sealed class UploadEndpointTests : IDisposable
     public async Task Upload_EndToEnd_CustomerContribute_Succeeds()
     {
         var (client, token, target) = await ContributorAsync();
-        var file = Bytes(ChunkMath.ChunkSize + 10);
+        var file = Bytes(ChunkMath.MinPieceSize + 10);
 
         var begin = await client.SendAsync(Begin(token, target.Id, "Uploads", "big file #1.bin", file.Length));
         Assert.Equal(HttpStatusCode.OK, begin.StatusCode);
@@ -95,13 +95,13 @@ public sealed class UploadEndpointTests : IDisposable
         Assert.Equal("no-store", begin.Headers.CacheControl?.ToString());
         var body = await JsonOf(begin);
         var session = body.GetProperty("sessionId").GetGuid();
-        Assert.Equal(ChunkMath.ChunkSize, body.GetProperty("chunkSize").GetInt32());
+        Assert.Equal(ChunkMath.MinPieceSize, body.GetProperty("chunkSize").GetInt32());
         Assert.Equal(2, body.GetProperty("chunkCount").GetInt32());
         Assert.Equal(4, body.GetProperty("parallelChunks").GetInt32());
         Assert.Equal(0, body.GetProperty("received").GetArrayLength());
 
-        var second = await client.SendAsync(Chunk(token, session, 1, file[ChunkMath.ChunkSize..]));
-        var first = await client.SendAsync(Chunk(token, session, 0, file[..ChunkMath.ChunkSize]));
+        var second = await client.SendAsync(Chunk(token, session, 1, file[ChunkMath.MinPieceSize..]));
+        var first = await client.SendAsync(Chunk(token, session, 0, file[..ChunkMath.MinPieceSize]));
         Assert.Equal(HttpStatusCode.NoContent, second.StatusCode);
         Assert.Equal(HttpStatusCode.NoContent, first.StatusCode);
 
@@ -166,9 +166,9 @@ public sealed class UploadEndpointTests : IDisposable
     public async Task PutChunk_BodyLargerThanChunk_413()
     {
         var (client, token, target) = await ContributorAsync();
-        var session = await BeginOkAsync(client, token, target, "a.bin", 3L * ChunkMath.ChunkSize);
+        var session = await BeginOkAsync(client, token, target, "a.bin", 3L * ChunkMath.MinPieceSize);
 
-        var response = await client.SendAsync(Chunk(token, session, 0, Bytes(ChunkMath.ChunkSize + 1)));
+        var response = await client.SendAsync(Chunk(token, session, 0, Bytes(ChunkMath.MinPieceSize + 1)));
 
         Assert.Equal(HttpStatusCode.RequestEntityTooLarge, response.StatusCode);
         Assert.DoesNotContain(_factory.Storage.Calls, c => c.StartsWith("WriteChunk"));
@@ -296,13 +296,13 @@ public sealed class UploadEndpointTests : IDisposable
     public async Task PutChunk_FullSizePiece_ReachesStorageAsSeekableStream()
     {
         var (client, token, target) = await ContributorAsync();
-        var file = Bytes(ChunkMath.ChunkSize);
+        var file = Bytes(ChunkMath.MinPieceSize);
         var session = await BeginOkAsync(client, token, target, "a.bin", file.Length);
 
         var response = await client.SendAsync(Chunk(token, session, 0, file));
 
         Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
-        Assert.Equal(ChunkMath.ChunkSize, _factory.Storage.BytesWritten);
+        Assert.Equal(ChunkMath.MinPieceSize, _factory.Storage.BytesWritten);
     }
 
     [Fact]
@@ -624,7 +624,7 @@ public sealed class UploadEndpointTests : IDisposable
         await AssertError(await client.SendAsync(Chunk(token, session, 0, Bytes(9))), HttpStatusCode.BadRequest, UploadErrorCodes.Invalid);
         await AssertError(await client.SendAsync(Chunk(token, session, 5, data)), HttpStatusCode.BadRequest, UploadErrorCodes.Invalid);
         await AssertError(await client.SendAsync(Chunk(token, Guid.NewGuid(), 0, data)), HttpStatusCode.NotFound, UploadErrorCodes.NotFound);
-        await AssertError(await client.SendAsync(Chunk(token, session, 0, Bytes(ChunkMath.ChunkSize + 1))),
+        await AssertError(await client.SendAsync(Chunk(token, session, 0, Bytes(ChunkMath.MinPieceSize + 1))),
             HttpStatusCode.RequestEntityTooLarge, UploadErrorCodes.TooLarge);
         _factory.Storage.ThrowUnreachable = true;
         await AssertError(await client.SendAsync(Chunk(token, session, 0, data)), HttpStatusCode.ServiceUnavailable, UploadErrorCodes.Unavailable);
@@ -705,7 +705,7 @@ public sealed class UploadEndpointTests : IDisposable
         await users.UpsertAsync(colleague);
         var sessions = _factory.Services.GetRequiredService<IUploadSessionStore>();
         var now = DateTimeOffset.UtcNow;
-        await sessions.CreateAsync(new UploadSession(Guid.NewGuid(), colleague.Id, blob.Id, "a.bin", "a.bin", 1, ChunkMath.ChunkSize,
+        await sessions.CreateAsync(new UploadSession(Guid.NewGuid(), colleague.Id, blob.Id, "a.bin", "a.bin", 1, ChunkMath.MinPieceSize,
             false, now, now.AddHours(24), UploadStatus.Open));
 
         await AssertError(await full.SendAsync(Begin(await TokenAsync(full), blob.Id, "", "a.bin", 1)),
