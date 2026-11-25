@@ -211,10 +211,10 @@ public class PgStoresIntegrationTests
         Assert.Null(await store.FindResumableAsync(user, target, "Docs/a b#.bin", s.Size + 1, now));
         Assert.Null(await store.FindResumableAsync(user, target, "Docs/a b#.bin", s.Size, now.AddHours(24)));
 
-        await store.MarkChunkAsync(s.Id, 3, now.AddMinutes(2));
-        await store.MarkChunkAsync(s.Id, 3, now.AddMinutes(1));
+        await store.MarkChunkAsync(s.Id, 3, now.AddMinutes(2), now.AddHours(24));
+        await store.MarkChunkAsync(s.Id, 3, now.AddMinutes(1), now.AddHours(24));
         Assert.Equal(now.AddMinutes(2), (await store.GetAsync(s.Id))!.LastActivityAt);
-        await Task.WhenAll(Enumerable.Range(0, 20).Select(i => store.MarkChunkAsync(s.Id, i, now)));
+        await Task.WhenAll(Enumerable.Range(0, 20).Select(i => store.MarkChunkAsync(s.Id, i, now, now.AddHours(24))));
         Assert.Equal(Enumerable.Range(0, 20), (await store.ReceivedChunksAsync(s.Id)).OrderBy(i => i));
 
         await store.SetOverwriteAsync(s.Id, true, true);
@@ -299,7 +299,7 @@ public class PgStoresIntegrationTests
 
         var other = s with { Id = Guid.NewGuid() };
         await store.CreateAsync(other);
-        await store.MarkChunkAsync(other.Id, 0, now);
+        await store.MarkChunkAsync(other.Id, 0, now, now.AddHours(24));
         await store.DeleteAsync(other.Id);
         Assert.Null(await store.GetAsync(other.Id));
         Assert.Empty(await store.ReceivedChunksAsync(other.Id));

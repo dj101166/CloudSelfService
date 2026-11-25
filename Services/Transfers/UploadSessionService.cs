@@ -23,6 +23,13 @@ public sealed class UploadSessionService
 {
     public const int DefaultParallelChunks = 4;
     public const int DefaultSessionHours = 24;
+
+    /// <summary>
+    /// Longest an upload session may live after Begin, however steadily pieces keep arriving. Blob discards uncommitted
+    /// blocks after a week, and a Files staging file holds share quota until it is swept, so the sweep aborts the session
+    /// at created_at + 7 days, no later than Azure would drop the blocks.
+    /// </summary>
+    public const int DefaultMaxSessionDays = 7;
     public const int DefaultBlobLockMinutes = 15;
     public const int DefaultMaxOpenSessionsPerUser = 8;
     public const int DefaultMinChunkBytesPerSecond = 64 * 1024;
@@ -60,6 +67,7 @@ public sealed class UploadSessionService
     private readonly ILogger<UploadSessionService> _logger;
     private readonly int _parallel;
     private readonly TimeSpan _lifetime;
+    private readonly TimeSpan _maxSessionAge;
     private readonly TimeSpan _blobLock;
     private readonly int _maxOpenSessions;
     private readonly int _minChunkBytesPerSecond;
@@ -94,6 +102,7 @@ public sealed class UploadSessionService
         _logger = logger;
         _parallel = Math.Clamp(config.GetValue<int?>("Transfers:ParallelChunks") ?? DefaultParallelChunks, 1, 16);
         _lifetime = TimeSpan.FromHours(Math.Max(1, config.GetValue<int?>("Transfers:SessionHours") ?? DefaultSessionHours));
+        _maxSessionAge = TimeSpan.FromDays(Math.Max(1, config.GetValue<int?>("Transfers:MaxSessionDays") ?? DefaultMaxSessionDays));
         _blobLock = TimeSpan.FromMinutes(Math.Max(1, config.GetValue<int?>("Transfers:BlobLockMinutes") ?? DefaultBlobLockMinutes));
         _maxOpenSessions = Math.Max(1, config.GetValue<int?>("Transfers:MaxOpenSessionsPerUser") ?? DefaultMaxOpenSessionsPerUser);
         _minChunkBytesPerSecond = MinChunkBytesPerSecondFrom(config);
@@ -388,7 +397,10 @@ public sealed class UploadSessionService
             budgetLease.Dispose();
         }
 
-        await _sessions.MarkChunkAsync(session.Id, index, _time.GetUtcNow(), ct);
+        var landedAt = _time.GetUtcNow();
+        var expiresAt = landedAt + _lifetime;
+        var cap = session.CreatedAt + _maxSessionAge;
+        await _sessions.MarkChunkAsync(session.Id, index, landedAt, expiresAt < cap ? expiresAt : cap, ct);
         return new(AccessOutcome.Ok);
     }
 

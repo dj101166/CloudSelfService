@@ -142,6 +142,115 @@ public class UploadSessionServiceTests
     private async Task<IReadOnlyList<AuditEvent>> UploadAudits(string operation = "Upload") =>
         await _audit.QueryAsync(new AuditQuery(Operation: operation));
 
+    // ---- Sliding expiry ----
+
+    [Fact]
+    public async Task PutChunk_Day3_ExtendsExpiryToLastPiecePlus24h()
+    {
+        var svc = Service();
+        var file = Bytes(33 * Mi);
+        var begin = await BeginOk(svc, _contrib, _share, "", "a.bin", file.Length);
+        var next = await KeepAlive(svc, begin.SessionId, file, until: TimeSpan.FromDays(3));
+        _time.Now = Start.AddDays(3);
+
+        Assert.Equal(AccessOutcome.Ok, (await Put(svc, _contrib.Id, begin.SessionId, file, next)).Outcome);
+
+        Assert.Equal(Start.AddDays(3).AddHours(24), (await _sessions.GetAsync(begin.SessionId))!.ExpiresAt);
+    }
+
+    [Fact]
+    public async Task PutChunk_Day6point5_CapsAtSevenDays()
+    {
+        var svc = Service();
+        var file = Bytes(33 * Mi);
+        var begin = await BeginOk(svc, _contrib, _share, "", "a.bin", file.Length);
+        var next = await KeepAlive(svc, begin.SessionId, file, until: TimeSpan.FromDays(6.5));
+        _time.Now = Start.AddDays(6.5);
+
+        Assert.Equal(AccessOutcome.Ok, (await Put(svc, _contrib.Id, begin.SessionId, file, next)).Outcome);
+
+        Assert.Equal(Start.AddDays(7), (await _sessions.GetAsync(begin.SessionId))!.ExpiresAt);
+    }
+
+    [Fact]
+    public async Task Sweep_SessionWithRecentPiece_NotAbortedAfter24h()
+    {
+        var svc = Service();
+        var file = Bytes(9 * Mi);
+        var begin = await BeginOk(svc, _contrib, _share, "", "a.bin", file.Length);
+        _time.Now = Start.AddHours(20);
+        await Put(svc, _contrib.Id, begin.SessionId, file, 0);
+
+        await Cleanup().SweepAsync(Start.AddHours(30), default);
+
+        Assert.Equal(UploadStatus.Open, (await _sessions.GetAsync(begin.SessionId))!.Status);
+    }
+
+    [Fact]
+    public async Task Begin_ResumeAfterSignInLapse_SameSession()
+    {
+        var svc = Service();
+        var file = Bytes(9 * Mi);
+        var begin = await BeginOk(svc, _contrib, _share, "", "a.bin", file.Length);
+        await Put(svc, _contrib.Id, begin.SessionId, file, 0);
+        _time.Now = Start.AddHours(13);
+
+        var resumed = await BeginOk(svc, _contrib, _share, "", "a.bin", file.Length);
+
+        Assert.Equal(begin.SessionId, resumed.SessionId);
+        Assert.Equal(new[] { 0 }, resumed.Received);
+    }
+
+    [Fact]
+    public async Task Begin_SameFileOtherUser_NewSession()
+    {
+        var svc = Service();
+        var file = Bytes(9 * Mi);
+        var first = await BeginWithFirstPiece(svc, _contrib, file);
+        await Put(svc, _contrib.Id, first.SessionId, file, 0);
+
+        var other = await BeginWithFirstPiece(svc, _colleague, file);
+
+        Assert.NotEqual(first.SessionId, other.SessionId);
+        Assert.Empty(other.Received);
+        Assert.Equal(UploadStatus.Open, (await _sessions.GetAsync(first.SessionId))!.Status);
+    }
+
+    [Fact]
+    public async Task Begin_SameBlobOtherUser_InProgress()
+    {
+        var svc = Service();
+        var file = Bytes(9 * Mi);
+        var first = await BeginOk(svc, _contrib, _blob, "", "a.bin", file.Length);
+        await Put(svc, _contrib.Id, first.SessionId, file, 0);
+
+        var other = await svc.BeginAsync(_colleague.Id, new BeginUploadRequest(_blob.Id, "", "a.bin", file.Length, false, Md5(file[..ChunkMath.MinPieceSize])), Ctx);
+
+        Assert.Equal(AccessOutcome.Conflict, other.Outcome);
+        Assert.Equal(UploadStatus.Open, (await _sessions.GetAsync(first.SessionId))!.Status);
+    }
+
+    // A client's pieces keep arriving, so the session never lapses on the way: one piece every 20 h until just before
+    // <until>. Returns the next free piece index.
+    private async Task<int> KeepAlive(UploadSessionService svc, Guid session, byte[] file, TimeSpan until)
+    {
+        var index = 0;
+        for (var at = TimeSpan.Zero; at < until; at += TimeSpan.FromHours(20), index++)
+        {
+            _time.Now = Start + at;
+            Assert.Equal(AccessOutcome.Ok, (await Put(svc, _contrib.Id, session, file, index)).Outcome);
+        }
+        return index;
+    }
+
+    private async Task<BeginUploadResponse> BeginWithFirstPiece(UploadSessionService svc, AppUser user, byte[] file)
+    {
+        var result = await svc.BeginAsync(user.Id,
+            new BeginUploadRequest(_share.Id, "", "a.bin", file.Length, false, Md5(file[..ChunkMath.MinPieceSize])), Ctx);
+        Assert.Equal(AccessOutcome.Ok, result.Outcome);
+        return result.Value!;
+    }
+
     // ---- Begin ----
 
     [Fact]
@@ -2544,8 +2653,8 @@ public class UploadSessionServiceTests
         var begin = await BeginOk(svc, _contrib, _share, "", "a.bin", file.Length);
         await Put(svc, _contrib.Id, begin.SessionId, file, 0);
         await Put(svc, _contrib.Id, begin.SessionId, file, 1);
-        await _sessions.MarkChunkAsync(begin.SessionId, 7, Start);
-        await _sessions.MarkChunkAsync(begin.SessionId, -1, Start);
+        await _sessions.MarkChunkAsync(begin.SessionId, 7, Start, Start.AddHours(24));
+        await _sessions.MarkChunkAsync(begin.SessionId, -1, Start, Start.AddHours(24));
 
         var result = await svc.CompleteAsync(_contrib.Id, begin.SessionId, Ctx);
 
@@ -2760,7 +2869,7 @@ public class UploadSessionServiceTests
     public async Task Begin_ResumesLegacySession_ReturnsStoredPieceSize()
     {
         var legacy = await CreateBlobSession("big.bin", LargeBlobSize, 4 * Mi);
-        await _sessions.MarkChunkAsync(legacy.Id, 3, Start);
+        await _sessions.MarkChunkAsync(legacy.Id, 3, Start, Start.AddHours(24));
 
         var begin = await BeginOk(Service(maxBytes: LargeBlobSize + 1), _contrib, _blob, "", "big.bin", LargeBlobSize);
 
@@ -2800,7 +2909,7 @@ public class UploadSessionServiceTests
         var svc = Service(backends: recorder);
         var session = await CreateBlobSession("big.bin", LargeBlobSize, 4 * Mi);
         for (var i = 0; i < 50_000; i++)
-            await _sessions.MarkChunkAsync(session.Id, i, Start);
+            await _sessions.MarkChunkAsync(session.Id, i, Start, Start.AddHours(24));
         var last = new byte[] { 42 };
 
         var put = await svc.PutChunkAsync(_contrib.Id, session.Id, 50_000, new MemoryStream(last), 1, Md5(last), Ctx);

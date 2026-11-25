@@ -15,7 +15,7 @@ internal sealed class ThrowingSessionStore : IUploadSessionStore
     public Task<UploadSession?> GetAsync(Guid id, CancellationToken ct = default) => throw Down();
     public Task<UploadSession?> FindResumableAsync(Guid userId, Guid targetId, string finalPath, long size, DateTimeOffset now,
         CancellationToken ct = default) => throw Down();
-    public Task MarkChunkAsync(Guid id, int index, DateTimeOffset at, CancellationToken ct = default) => throw Down();
+    public Task MarkChunkAsync(Guid id, int index, DateTimeOffset at, DateTimeOffset expiresAt, CancellationToken ct = default) => throw Down();
     public Task<IReadOnlyList<int>> ReceivedChunksAsync(Guid id, CancellationToken ct = default) => throw Down();
     public Task SetStatusAsync(Guid id, string status, CancellationToken ct = default) => throw Down();
     public Task<bool> TrySetStatusAsync(Guid id, string expected, string next, DateTimeOffset? claimedAt = null,

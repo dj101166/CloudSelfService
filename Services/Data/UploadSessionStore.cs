@@ -47,8 +47,11 @@ public interface IUploadSessionStore
     Task<UploadSession?> FindResumableAsync(Guid userId, Guid targetId, string finalPath, long size, DateTimeOffset now,
         CancellationToken ct = default);
 
-    /// <summary>Idempotent: marking a received chunk twice is not an error. Also stamps LastActivityAt with <paramref name="at"/>.</summary>
-    Task MarkChunkAsync(Guid id, int index, DateTimeOffset at, CancellationToken ct = default);
+    /// <summary>
+    /// Idempotent: marking a received chunk twice is not an error. Also stamps LastActivityAt with <paramref name="at"/>
+    /// and, for an Open session only, moves ExpiresAt to <paramref name="expiresAt"/> if that is later (it never moves back).
+    /// </summary>
+    Task MarkChunkAsync(Guid id, int index, DateTimeOffset at, DateTimeOffset expiresAt, CancellationToken ct = default);
     Task<IReadOnlyList<int>> ReceivedChunksAsync(Guid id, CancellationToken ct = default);
     Task SetStatusAsync(Guid id, string status, CancellationToken ct = default);
 
@@ -144,15 +147,22 @@ public sealed class InMemoryUploadSessionStore : IUploadSessionStore
                 .FirstOrDefault());
     }
 
-    public Task MarkChunkAsync(Guid id, int index, DateTimeOffset at, CancellationToken ct = default)
+    public Task MarkChunkAsync(Guid id, int index, DateTimeOffset at, DateTimeOffset expiresAt, CancellationToken ct = default)
     {
         lock (_lock)
         {
             if (!_chunks.TryGetValue(id, out var set))
                 throw new InvalidOperationException("Upload session not found.");
             set.Add(index);
-            if (_sessions.TryGetValue(id, out var s) && (s.LastActivityAt is null || s.LastActivityAt < at))
-                _sessions[id] = s with { LastActivityAt = at };
+            if (_sessions.TryGetValue(id, out var s))
+            {
+                var updated = s;
+                if (s.LastActivityAt is null || s.LastActivityAt < at)
+                    updated = updated with { LastActivityAt = at };
+                if (s.Status == UploadStatus.Open && s.ExpiresAt < expiresAt)
+                    updated = updated with { ExpiresAt = expiresAt };
+                _sessions[id] = updated;
+            }
         }
         return Task.CompletedTask;
     }
@@ -402,16 +412,19 @@ public sealed class PgUploadSessionStore : IUploadSessionStore
         return await cmd.ReadOneAsync(Map, ct);
     }
 
-    public async Task MarkChunkAsync(Guid id, int index, DateTimeOffset at, CancellationToken ct = default)
+    public async Task MarkChunkAsync(Guid id, int index, DateTimeOffset at, DateTimeOffset expiresAt, CancellationToken ct = default)
     {
         await using var conn = await _db.DataSource.OpenConnectionAsync(ct);
         await using var cmd = new NpgsqlCommand("""
             INSERT INTO upload_chunks (session_id, idx) VALUES (@id, @idx) ON CONFLICT (session_id, idx) DO NOTHING;
-            UPDATE upload_sessions SET last_activity_at = GREATEST(COALESCE(last_activity_at, @at), @at) WHERE id = @id;
+            UPDATE upload_sessions SET last_activity_at = GREATEST(COALESCE(last_activity_at, @at), @at),
+                expires_at = CASE WHEN status = 'Open' THEN GREATEST(expires_at, @expires) ELSE expires_at END
+            WHERE id = @id;
             """, conn);
         cmd.Parameters.AddWithValue("id", id);
         cmd.Parameters.AddWithValue("idx", index);
         cmd.Parameters.AddWithValue("at", at.ToUniversalTime());
+        cmd.Parameters.AddWithValue("expires", expiresAt.ToUniversalTime());
         await cmd.ExecuteNonQueryAsync(ct);
     }
 

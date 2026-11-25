@@ -79,7 +79,7 @@ public abstract class UploadSessionStoreContract
         await store.CreateAsync(open);
         await store.CreateAsync(completing);
         await store.CreateAsync(completed);
-        await store.MarkChunkAsync(open.Id, 0, longAgo);
+        await store.MarkChunkAsync(open.Id, 0, longAgo, longAgo);
 
         await store.PurgeAsync(Now.AddYears(1), Now.AddYears(1));
 
@@ -87,6 +87,42 @@ public abstract class UploadSessionStoreContract
         Assert.NotNull(await store.GetAsync(completing.Id));
         Assert.Equal(new[] { 0 }, await store.ReceivedChunksAsync(open.Id));
         Assert.Null(await store.GetAsync(completed.Id));
+    }
+
+    protected async Task LaterExpiry_Extends()
+    {
+        var store = await CreateStoreAsync();
+        var s = Session(Guid.NewGuid());
+        await store.CreateAsync(s);
+
+        await store.MarkChunkAsync(s.Id, 0, Now.AddHours(1), Now.AddHours(30));
+
+        Assert.Equal(Now.AddHours(30), (await store.GetAsync(s.Id))!.ExpiresAt);
+    }
+
+    protected async Task EarlierExpiry_DoesNotShorten()
+    {
+        var store = await CreateStoreAsync();
+        var s = Session(Guid.NewGuid());
+        await store.CreateAsync(s);
+
+        await store.MarkChunkAsync(s.Id, 0, Now.AddHours(1), Now.AddHours(2));
+
+        Assert.Equal(Now.AddHours(24), (await store.GetAsync(s.Id))!.ExpiresAt);
+    }
+
+    protected async Task NonOpenSession_ExpiryUnchanged()
+    {
+        var store = await CreateStoreAsync();
+        var s = Session(Guid.NewGuid(), UploadStatus.Completing, claimed: Now);
+        await store.CreateAsync(s);
+
+        await store.MarkChunkAsync(s.Id, 0, Now.AddHours(1), Now.AddHours(30));
+
+        var after = (await store.GetAsync(s.Id))!;
+        Assert.Equal(Now.AddHours(24), after.ExpiresAt);
+        Assert.Equal(new[] { 0 }, await store.ReceivedChunksAsync(s.Id));
+        Assert.Equal(Now.AddHours(1), after.LastActivityAt);
     }
 }
 
@@ -105,6 +141,15 @@ public class InMemoryUploadSessionStoreContractTests : UploadSessionStoreContrac
 
     [Fact]
     public Task UploadSessionStore_FirstPieceMd5_RoundTrips() => FirstPieceMd5_RoundTrips();
+
+    [Fact]
+    public Task MarkChunk_LaterExpiry_Extends() => LaterExpiry_Extends();
+
+    [Fact]
+    public Task MarkChunk_EarlierExpiry_DoesNotShorten() => EarlierExpiry_DoesNotShorten();
+
+    [Fact]
+    public Task MarkChunk_NonOpenSession_ExpiryUnchanged() => NonOpenSession_ExpiryUnchanged();
 }
 
 public class PgUploadSessionStoreContractTests : UploadSessionStoreContract
@@ -129,4 +174,13 @@ public class PgUploadSessionStoreContractTests : UploadSessionStoreContract
 
     [PgFact]
     public Task UploadSessionStore_FirstPieceMd5_RoundTrips() => FirstPieceMd5_RoundTrips();
+
+    [PgFact]
+    public Task MarkChunk_LaterExpiry_Extends() => LaterExpiry_Extends();
+
+    [PgFact]
+    public Task MarkChunk_EarlierExpiry_DoesNotShorten() => EarlierExpiry_DoesNotShorten();
+
+    [PgFact]
+    public Task MarkChunk_NonOpenSession_ExpiryUnchanged() => NonOpenSession_ExpiryUnchanged();
 }
