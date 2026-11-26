@@ -8,11 +8,13 @@ namespace CloudSelfService.Endpoints;
 /// <summary>
 /// Limits for the transfer endpoints. Downloads and the upload control calls share <see cref="Transfers"/> (per user:
 /// concurrency, then a 120/min bucket). Chunk PUTs use <see cref="Chunks"/>, because one large file is thousands of
-/// pieces: a global concurrency cap, then per-user concurrency, which guard the request rate and the database pool.
-/// Memory is bounded by <see cref="PieceMemoryBudget"/>, which counts the bytes of buffered pieces, not their number.
-/// Throughput is bounded by <see cref="ChunkThroughputLimiter"/>, a per-user bucket of Transfers:ChunksPerMinute
-/// (default 600) charged in 4 MiB units, so a 32 MiB piece costs 8 and larger pieces never raise the per-user ceiling
-/// above 600 x 4 MiB a minute (about 40 MB/s). A piece refused for memory is charged nothing.
+/// pieces: a global concurrency cap and a per-user one bound the requests in flight (and so the database pool), then a
+/// per-user bucket of Transfers:ChunkRequestsPerMinute charges every chunk PUT one permit, valid or not, which bounds the
+/// request rate and the database queries each one costs. Memory is bounded by <see cref="PieceMemoryBudget"/>, which
+/// counts the bytes of buffered pieces, not their number. Throughput is bounded by <see cref="ChunkThroughputLimiter"/>,
+/// a per-user bucket of Transfers:ChunksPerMinute (default 600) charged in 4 MiB units once a piece has passed its
+/// checks, so a 32 MiB piece costs 8 and larger pieces never raise the per-user ceiling above 600 x 4 MiB a minute
+/// (about 40 MB/s). A piece refused for memory is charged no throughput.
 /// </summary>
 public static class RateLimits
 {
@@ -25,6 +27,9 @@ public static class RateLimits
     public const int DefaultMaxConcurrentPerUser = 4;
     public const int DefaultMaxConcurrentChunksPerUser = 16;
     public const int DefaultChunksPerMinute = 600;
+    // Twice ChunksPerMinute: honest work peaks at 600 accepted pieces a minute plus under 200 retries (16 pieces in flight,
+    // each told to wait asking again every 5 s or later), so it never meets this, while a flood of bad requests does.
+    public const int DefaultChunkRequestsPerMinute = 1200;
     // Below Npgsql's default MaxPoolSize (100): every chunk PUT can hold a pooled connection while its staging grows.
     public const int DefaultMaxConcurrentChunksTotal = 64;
 
@@ -39,6 +44,7 @@ public static class RateLimits
         var concurrent = Math.Max(1, config.GetValue<int?>("Transfers:MaxConcurrentPerUser") ?? DefaultMaxConcurrentPerUser);
         var chunks = Math.Max(1, config.GetValue<int?>("Transfers:MaxConcurrentChunksPerUser") ?? DefaultMaxConcurrentChunksPerUser);
         var chunksTotal = Math.Max(1, config.GetValue<int?>("Transfers:MaxConcurrentChunksTotal") ?? DefaultMaxConcurrentChunksTotal);
+        var chunkRequests = Math.Max(1, config.GetValue<int?>("Transfers:ChunkRequestsPerMinute") ?? DefaultChunkRequestsPerMinute);
         // One limiter instance shared by every partition, so it bounds the whole app rather than each user.
         var globalChunks = new ConcurrencyLimiter(new ConcurrencyLimiterOptions { PermitLimit = chunksTotal, QueueLimit = 0 });
 
@@ -78,7 +84,16 @@ public static class RateLimits
         }));
         options.AddPolicy<string>(Chunks, ctx => RateLimitPartition.Get(PartitionKey(ctx), _ => new ChainedLimiter(
             new SharedLimiter(globalChunks),
-            new ConcurrencyLimiter(new ConcurrencyLimiterOptions { PermitLimit = chunks, QueueLimit = 0 }))));
+            new ChainedLimiter(
+                new ConcurrencyLimiter(new ConcurrencyLimiterOptions { PermitLimit = chunks, QueueLimit = 0 }),
+                new TokenBucketRateLimiter(new TokenBucketRateLimiterOptions
+                {
+                    TokenLimit = chunkRequests,
+                    TokensPerPeriod = chunkRequests,
+                    ReplenishmentPeriod = TimeSpan.FromMinutes(1),
+                    QueueLimit = 0,
+                    AutoReplenishment = true,
+                })))));
     }
 
     /// <summary>

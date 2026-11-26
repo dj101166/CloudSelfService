@@ -74,7 +74,8 @@ For the person deploying or running the app. Settings are App Service applicatio
 | `Transfers:BlobLockMinutes` | 15 | Lock on a target file while one session writes it. |
 | `Transfers:MaxConcurrentChunksPerUser` | 16 | In-flight pieces per user. |
 | `Transfers:MaxConcurrentChunksTotal` | 64 | In-flight pieces across the app. |
-| `Transfers:ChunksPerMinute` | 600 | Piece rate limit per user. |
+| `Transfers:ChunksPerMinute` | 600 | Piece throughput limit per user, charged per started 4 MiB of each accepted piece (a 32 MiB piece costs 8). |
+| `Transfers:ChunkRequestsPerMinute` | 1200 | Piece request rate limit per user: every piece request counts, accepted or refused. Twice `ChunksPerMinute`, so the retries of pieces told to wait never reach it. |
 | `Transfers:MinChunkBytesPerSecond` | 65536 | Pieces arriving slower than this are ended. |
 | `Transfers:RequestsPerMinute` | 120 | Request rate per user for downloads and the upload Begin, Status, Complete and Abort calls. Pieces have their own limits above. |
 | `Transfers:MaxConcurrentPerUser` | 4 | Concurrent requests per user across the same calls (downloads and upload Begin, Status, Complete, Abort). |

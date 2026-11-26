@@ -393,6 +393,31 @@ public sealed class UploadEndpointTests : IDisposable
         Assert.Equal(HttpStatusCode.NoContent, (await other.SendAsync(Chunk(otherToken, otherSession, 0, file))).StatusCode);
     }
 
+    // Refused pieces spend no throughput, but each still costs database queries, so every request counts here.
+    [Fact]
+    public async Task PutChunks_InvalidRequests_CountTowardChunkRequestsPerMinute()
+    {
+        using var factory = new TestAppFactory(("Transfers:ChunkRequestsPerMinute", "3"));
+        var client = await factory.CreateClientAs("customer-contribute");
+        var other = await factory.CreateClientAs("customer-full");
+        var token = await TokenAsync(client);
+        var otherToken = await TokenAsync(other);
+        var target = await factory.DemoTargetAsync("Contribute");
+        var otherTarget = await factory.DemoTargetAsync("Full");
+        var file = Bytes(10);
+        var session = (await JsonOf(await client.SendAsync(Begin(token, target.Id, "", "a.bin", file.Length)))).GetProperty("sessionId").GetGuid();
+        var otherSession = (await JsonOf(await other.SendAsync(Begin(otherToken, otherTarget.Id, "", "a.bin", file.Length)))).GetProperty("sessionId").GetGuid();
+
+        for (var i = 0; i < 3; i++)
+            await AssertError(await client.SendAsync(Chunk(token, session, 0, Bytes(5))), HttpStatusCode.BadRequest, UploadErrorCodes.Invalid);
+        var fourth = await client.SendAsync(Chunk(token, session, 0, file));
+
+        await AssertError(fourth, HttpStatusCode.TooManyRequests, UploadErrorCodes.Busy);
+        Assert.Equal("5", fourth.Headers.GetValues("Retry-After").Single());
+        Assert.Equal(0, factory.Storage.BytesWritten);
+        Assert.Equal(HttpStatusCode.NoContent, (await other.SendAsync(Chunk(otherToken, otherSession, 0, file))).StatusCode);
+    }
+
     [Fact]
     public async Task PutChunks_GlobalConcurrencyCap_AppliesAcrossUsers()
     {
