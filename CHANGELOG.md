@@ -1,6 +1,6 @@
 # Changelog - Advanced Cloud Self Service
 
-## [1.1.0] - TBD
+## [1.1.0] - November 25, 2026
 
 ### 🔄 Changed
 - The default upload limit is now 100 GB.
