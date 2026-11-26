@@ -88,7 +88,7 @@ This app deliberately sets a stricter CSP than the suite baseline: **no `'unsafe
 The Dockerfile restores the app and test projects, runs `dotnet test` (a failing test fails the build), then `dotnet publish` (never `--no-restore`). The final stage runs as `appuser` through `gosu`.
 
 ```powershell
-$version = "1.1.0"
+$version = "1.1.1"
 podman build -t cloudselfservice:$version --build-arg APP_VERSION=$version .
 podman tag cloudselfservice:$version auscacprdcregsvc73a13ca2.azurecr.io/cloudselfservice:latest
 podman tag cloudselfservice:$version auscacprdcregsvc73a13ca2.azurecr.io/cloudselfservice:$version
