@@ -21,6 +21,7 @@ public static class UploadEndpoints
     public const string TooLargeMessage = "An upload piece is larger than the 32 MiB maximum piece size.";
     public const string ControlBodyTooLargeMessage = "The request body is too large.";
     public const string JsonRequiredMessage = "Send this request as application/json.";
+    public const string FormBodyMessage = "Upload requests can't be sent as a form.";
     /// <summary>Begin's JSON is a few hundred bytes; every non-chunk upload route gets this body cap.</summary>
     public const long ControlBodyLimit = 16 * 1024;
 
@@ -52,6 +53,10 @@ public static class UploadEndpoints
             return isChunk
                 ? Error(StatusCodes.Status413PayloadTooLarge, TooLargeMessage, UploadErrorCodes.TooLarge)
                 : Error(StatusCodes.Status413PayloadTooLarge, ControlBodyTooLargeMessage, UploadErrorCodes.TooLarge);
+        // Antiforgery reads a form body when the header token is missing, which would parse up to 32 MiB into strings
+        // outside the piece memory budget. No upload route takes a form, so one is refused unread.
+        if (ctx.Request.HasFormContentType)
+            return Error(StatusCodes.Status415UnsupportedMediaType, FormBodyMessage, UploadErrorCodes.Invalid);
         // Begin and Complete are the POSTs. Begin must be JSON; Complete may also have no body at all. Any other media
         // type (a form or text POST, which a plain cross-site form can send without a preflight) is refused.
         if (HttpMethods.IsPost(ctx.Request.Method) && !ctx.Request.HasJsonContentType())

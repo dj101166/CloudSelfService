@@ -659,6 +659,54 @@ public sealed class UploadEndpointTests : IDisposable
         Assert.False(reachedHandler);
     }
 
+    // Antiforgery falls back to reading a form body when the header token is missing, and the chunk PUT's limit is 32 MiB.
+    [Theory]
+    [InlineData("PUT", "application/x-www-form-urlencoded")]
+    [InlineData("PUT", "multipart/form-data; boundary=x")]
+    [InlineData("DELETE", "application/x-www-form-urlencoded")]
+    public async Task Guard_FormBody_415_WithoutReadingIt(string method, string contentType)
+    {
+        var services = new ServiceCollection()
+            .AddSingleton<IConfiguration>(new ConfigurationBuilder().Build())
+            .BuildServiceProvider();
+        var ctx = new DefaultHttpContext { RequestServices = services };
+        ctx.Request.Method = method;
+        ctx.Request.ContentType = contentType;
+        var body = new ReadTrackingStream();
+        ctx.Request.Body = body;
+        var reachedHandler = false;
+
+        var result = await UploadEndpoints.GuardAsync(new DefaultEndpointFilterInvocationContext(ctx),
+            _ => { reachedHandler = true; return ValueTask.FromResult<object?>(null); });
+
+        Assert.False(reachedHandler);
+        Assert.False(body.WasRead);
+        var json = Assert.IsAssignableFrom<IStatusCodeHttpResult>(result);
+        Assert.Equal(StatusCodes.Status415UnsupportedMediaType, json.StatusCode);
+    }
+
+    [Fact]
+    public async Task PutChunk_FormBodyWithoutToken_415_NothingWritten()
+    {
+        var (client, _, target) = await ContributorAsync();
+        var session = await BeginOkAsync(client, await TokenAsync(client), target, "a.bin", 10);
+        var form = new FormUrlEncodedContent(new Dictionary<string, string> { ["__RequestVerificationToken"] = "x" });
+
+        var response = await client.SendAsync(Request(HttpMethod.Put, $"/api/uploads/{session}/chunks/0", null, form));
+
+        await AssertError(response, HttpStatusCode.UnsupportedMediaType, UploadErrorCodes.Invalid);
+        Assert.DoesNotContain(_factory.Storage.Calls, c => c.StartsWith("WriteChunk"));
+    }
+
+    private sealed class ReadTrackingStream : MemoryStream
+    {
+        public bool WasRead { get; private set; }
+        public override int Read(byte[] buffer, int offset, int count) { WasRead = true; return base.Read(buffer, offset, count); }
+        public override int Read(Span<byte> buffer) { WasRead = true; return base.Read(buffer); }
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken ct) { WasRead = true; return base.ReadAsync(buffer, offset, count, ct); }
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct = default) { WasRead = true; return base.ReadAsync(buffer, ct); }
+    }
+
     private sealed class StubBodySizeFeature : IHttpMaxRequestBodySizeFeature
     {
         public bool IsReadOnly => false;
