@@ -13,6 +13,10 @@
     // Begin later returns: it is hashed before Begin, and a resumed session must match on the same bytes.
     var FINGERPRINT_BYTES = 4194304;
     var MAX_RETRY_AFTER_SECONDS = 300;
+    // Repeated waits for the same piece back off from Retry-After, doubling up to this cap, so many uploads waiting on
+    // the server's memory do not all ask again at the same moment.
+    var MAX_WAIT_BACKOFF_SECONDS = 30;
+    var JITTER = 0.2;
     var MAX_RESTARTS = 3;
     var PROGRESS_INTERVAL_MS = 250;
     var ACTIVITY_INTERVAL_MS = 60000;
@@ -52,6 +56,11 @@
             function onAbort() { clearTimeout(t); reject(new UploadError('aborted')); }
             if (signal) { signal.addEventListener('abort', onAbort, { once: true }); }
         });
+    }
+
+    // Spreads retries by up to JITTER either side, so pieces refused together do not all come back together.
+    function jittered(ms) {
+        return Math.max(0, Math.round(ms * (1 - JITTER + Math.random() * 2 * JITTER)));
     }
 
     function notify(u, method) {
@@ -212,18 +221,23 @@
 
     // Retries transient failures on the agreed backoff. A busy answer waits Retry-After and only starts counting as an
     // attempt after MAX_BUSY_WAITS of them. A wait answer (the server's memory for large pieces is full) is no failure at
-    // all: it waits Retry-After for as long as it takes, until the piece goes or the upload is aborted, and clears the
-    // busy count so busy answers met during a long wait never add up to a failure.
+    // all: it waits for as long as it takes, until the piece goes or the upload is aborted, and clears the busy count so
+    // busy answers met during a long wait never add up to a failure. Each further wait doubles the delay from
+    // Retry-After up to MAX_WAIT_BACKOFF_SECONDS; every new piece starts again from Retry-After.
     function withRetry(u, work, signal) {
         var attempt = 0;
         var busyWaits = 0;
+        var waits = 0;
         function run() {
             return work().catch(function (e) {
                 if (!(e instanceof UploadError)) { e = new UploadError('transient', INTERRUPTED, 'network'); }
                 if (e.kind === 'wait') {
                     busyWaits = 0;
+                    var base = Math.max(1, e.retryAfter);
+                    var backoff = Math.min(Math.max(base, MAX_WAIT_BACKOFF_SECONDS), base * Math.pow(2, Math.min(waits, 16)));
+                    waits++;
                     setStatus(u, 'waiting', e.message);
-                    return sleep(Math.max(1, e.retryAfter) * 1000, signal).then(resumeStatus).then(run);
+                    return sleep(jittered(backoff * 1000), signal).then(resumeStatus).then(run);
                 }
                 if (e.kind === 'busy') {
                     busyWaits++;
@@ -232,7 +246,7 @@
                         attempt++;
                     }
                     setStatus(u, 'waiting', e.message);
-                    return sleep(Math.max(1, e.retryAfter) * 1000, signal).then(resumeStatus).then(run);
+                    return sleep(jittered(Math.max(1, e.retryAfter) * 1000), signal).then(resumeStatus).then(run);
                 }
                 if (e.kind !== 'transient') { throw e; }
                 if (attempt >= RETRY_DELAYS.length) { throw new UploadError('interrupted', INTERRUPTED, e.code); }

@@ -68,6 +68,21 @@ public class UploaderScriptTests
         Assert.Matches(new Regex(@"e\.kind === 'wait'\) \{\s*busyWaits = 0;"), js);
     }
 
+    // Many uploads told to wait at once must not all come back at once: repeated waits back off to 30 s, with jitter.
+    [Fact]
+    public void Uploader_WaitBacksOffWithJitter_AndBusyIsJittered()
+    {
+        var js = Script();
+        Assert.Contains("MAX_WAIT_BACKOFF_SECONDS = 30", js);
+        Assert.Contains("JITTER = 0.2", js);
+        Assert.Matches(new Regex(@"e\.kind === 'wait'\) \{[^}]*base \* Math\.pow\(2,[^}]*waits\+\+;[^}]*sleep\(jittered\(backoff \* 1000\), signal\)"), js);
+        Assert.Matches(new Regex(@"e\.kind === 'busy'\) \{[\s\S]*?sleep\(jittered\(Math\.max\(1, e\.retryAfter\) \* 1000\), signal\)"), js);
+        // The wait count lives in withRetry, which each piece calls afresh, so a piece that succeeds resets it.
+        Assert.Matches(new Regex(@"function withRetry\(u, work, signal\) \{\s*var attempt = 0;\s*var busyWaits = 0;\s*var waits = 0;"), js);
+        // A wait never counts as an attempt.
+        Assert.DoesNotMatch(new Regex(@"e\.kind === 'wait'\) \{[^}]*attempt"), js);
+    }
+
     [Fact]
     public void Uploader_SignalsActivityToSessionGuard_AtMostOncePerMinute()
     {

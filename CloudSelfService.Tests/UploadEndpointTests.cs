@@ -541,7 +541,8 @@ public sealed class UploadEndpointTests : IDisposable
 
         await AssertError(waiting, HttpStatusCode.TooManyRequests, UploadErrorCodes.Wait);
         await AssertError(drained, HttpStatusCode.TooManyRequests, UploadErrorCodes.Busy);
-        Assert.Equal("5", drained.Headers.GetValues("Retry-After").Single());
+        // An empty bucket of 2 a minute holds the next 1-permit piece's token in 30 seconds.
+        Assert.Equal("30", drained.Headers.GetValues("Retry-After").Single());
         Assert.Equal(2 * file.Length, factory.Storage.BytesWritten);
     }
 
@@ -570,7 +571,8 @@ public sealed class UploadEndpointTests : IDisposable
 
         Assert.Equal(HttpStatusCode.NoContent, first.StatusCode);
         await AssertError(second, HttpStatusCode.TooManyRequests, UploadErrorCodes.Busy);
-        Assert.Equal("5", second.Headers.GetValues("Retry-After").Single());
+        // Two permits at 2 a minute: a full minute, the cap.
+        Assert.Equal("60", second.Headers.GetValues("Retry-After").Single());
         Assert.Equal(piece, factory.Storage.BytesWritten);
     }
 
@@ -584,6 +586,41 @@ public sealed class UploadEndpointTests : IDisposable
     [InlineData(32L * 1024 * 1024, 8)]
     public void ChunkPermits_OnePerStartedFourMiB(long? contentLength, int expected) =>
         Assert.Equal(expected, ChunkThroughputLimiter.PermitsFor(contentLength));
+
+    [Theory]
+    [InlineData(1, 0L, 600, 1)]
+    [InlineData(8, 0L, 600, 1)]
+    [InlineData(8, 4L, 600, 1)]
+    [InlineData(8, 0L, 60, 8)]
+    [InlineData(8, 3L, 60, 5)]
+    [InlineData(1, 0L, 2, 30)]
+    [InlineData(2, 0L, 2, 60)]
+    [InlineData(8, 0L, 1, 60)]
+    public void ThroughputRetryAfter_SecondsUntilTheBucketHoldsThePiece(int permits, long available, int perMinute, int expected) =>
+        Assert.Equal(expected, ChunkThroughputLimiter.RetryAfterSeconds(permits, available, perMinute, TimeSpan.FromMinutes(1)));
+
+    [Fact]
+    public void ThroughputRetryAfter_UnknownLevel_UsesLeaseThenFallback()
+    {
+        Assert.Equal(42, ChunkThroughputLimiter.RetryAfterSeconds(8, null, 600, TimeSpan.FromSeconds(41.2)));
+        Assert.Equal(60, ChunkThroughputLimiter.RetryAfterSeconds(8, null, 600, TimeSpan.FromMinutes(5)));
+        Assert.Equal(5, ChunkThroughputLimiter.RetryAfterSeconds(8, null, 600, null));
+    }
+
+    [Fact]
+    public void ChunkThroughputLimiter_Refusal_ReportsRefillTime()
+    {
+        var config = new ConfigurationBuilder().AddInMemoryCollection(
+            new Dictionary<string, string?> { ["Transfers:ChunksPerMinute"] = "6" }).Build();
+        using var limiter = new ChunkThroughputLimiter(config);
+        var ctx = new DefaultHttpContext();
+
+        Assert.True(limiter.TryAcquire(ctx, 24L * 1024 * 1024, out var charged));
+        Assert.False(limiter.TryAcquire(ctx, 8L * 1024 * 1024, out var retryAfter));
+
+        Assert.Equal(0, charged);
+        Assert.Equal(20, retryAfter);
+    }
 
     [Fact]
     public void ChunkThroughputLimiter_PieceCostingMoreThanTheBucket_StillAdmittedWhenFull()

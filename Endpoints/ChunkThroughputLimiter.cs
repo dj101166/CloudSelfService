@@ -34,12 +34,45 @@ public sealed class ChunkThroughputLimiter : IDisposable
             ? (int)Math.Min(int.MaxValue, (length + ChunkMath.MinPieceSize - 1) / ChunkMath.MinPieceSize)
             : 1;
 
-    // Capped at the bucket size: a piece costing more than a whole minute's allowance (a low ChunksPerMinute) would
-    // otherwise be refused forever; it empties the bucket instead.
-    public bool TryAcquire(HttpContext ctx, long? contentLength)
+    public const int MaxRetryAfterSeconds = 60;
+    public const int FallbackRetryAfterSeconds = 5;
+
+    public bool TryAcquire(HttpContext ctx, long? contentLength) => TryAcquire(ctx, contentLength, out _);
+
+    /// <param name="retryAfterSeconds">On refusal, how long until the bucket holds enough for this piece; 0 when charged.</param>
+    public bool TryAcquire(HttpContext ctx, long? contentLength, out int retryAfterSeconds)
     {
-        using var lease = _buckets.AttemptAcquire(RateLimits.PartitionKey(ctx), Math.Min(PermitsFor(contentLength), _tokenLimit));
-        return lease.IsAcquired;
+        var key = RateLimits.PartitionKey(ctx);
+        // Capped at the bucket size: a piece costing more than a whole minute's allowance (a low ChunksPerMinute) would
+        // otherwise be refused forever; it empties the bucket instead.
+        var permits = Math.Min(PermitsFor(contentLength), _tokenLimit);
+        using var lease = _buckets.AttemptAcquire(key, permits);
+        if (lease.IsAcquired)
+        {
+            retryAfterSeconds = 0;
+            return true;
+        }
+        lease.TryGetMetadata(MetadataName.RetryAfter, out var leaseRetryAfter);
+        retryAfterSeconds = RetryAfterSeconds(permits, _buckets.GetStatistics(key)?.CurrentAvailablePermits, _tokenLimit,
+            leaseRetryAfter);
+        return false;
+    }
+
+    /// <summary>
+    /// Seconds until a bucket refilling <paramref name="tokensPerMinute"/> evenly holds <paramref name="permits"/>, rounded
+    /// up and kept to 1..60. The lease's own RetryAfter is a whole replenishment period (a minute here), so it is only the
+    /// fallback when the bucket's level is unknown, and 5 seconds when neither is.
+    /// </summary>
+    public static int RetryAfterSeconds(int permits, long? available, int tokensPerMinute, TimeSpan? leaseRetryAfter)
+    {
+        double seconds;
+        if (available is { } have)
+            seconds = Math.Max(1, permits - have) * 60.0 / Math.Max(1, tokensPerMinute);
+        else if (leaseRetryAfter is { } fromLease)
+            seconds = fromLease.TotalSeconds;
+        else
+            return FallbackRetryAfterSeconds;
+        return (int)Math.Clamp(Math.Ceiling(seconds), 1, MaxRetryAfterSeconds);
     }
 
     public void Dispose() => _buckets.Dispose();

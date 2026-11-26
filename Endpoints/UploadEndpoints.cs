@@ -134,9 +134,19 @@ public static class UploadEndpoints
             // Format checks (length, MD5 header) run inside the service before any database call. A declared length
             // over the largest piece size was refused by the guard; Kestrel's body limit is the backstop, and the
             // service holds each piece to its own session's size.
+            int? refill = null;
             var result = await uploads.PutChunkAsync(userId, id, index, ctx.Request.Body, ctx.Request.ContentLength,
-                ctx.Request.Headers["Content-MD5"].ToString(), audit, ct, bytes => throughput.TryAcquire(ctx, bytes));
-            return result.Outcome == AccessOutcome.Ok ? Results.NoContent() : ErrorFor(result.Outcome, result.Message, result.Code);
+                ctx.Request.Headers["Content-MD5"].ToString(), audit, ct, bytes =>
+                {
+                    var charged = throughput.TryAcquire(ctx, bytes, out var retryAfter);
+                    refill = charged ? null : retryAfter;
+                    return charged;
+                });
+            if (result.Outcome == AccessOutcome.Ok)
+                return Results.NoContent();
+            return result is { Outcome: AccessOutcome.Busy, Code: UploadErrorCodes.Busy } && refill is { } seconds
+                ? Busy(result.Message, UploadErrorCodes.Busy, seconds)
+                : ErrorFor(result.Outcome, result.Message, result.Code);
         });
 
     private static Task<IResult> CompleteAsync(Guid id, HttpContext ctx, UploadSessionService uploads, ILoggerFactory loggers) =>
@@ -187,13 +197,14 @@ public static class UploadEndpoints
         _ => Error(StatusCodes.Status503ServiceUnavailable, message ?? DownloadEndpoints.UnavailableMessage, UploadErrorCodes.Unavailable),
     };
 
-    private static IResult Busy(string? message, string code) => new BusyResult(message ?? RateLimits.RejectedMessage, code);
+    private static IResult Busy(string? message, string code, int retryAfterSeconds = ChunkThroughputLimiter.FallbackRetryAfterSeconds) =>
+        new BusyResult(message ?? RateLimits.RejectedMessage, code, retryAfterSeconds);
 
-    private sealed class BusyResult(string message, string code) : IResult
+    private sealed class BusyResult(string message, string code, int retryAfterSeconds) : IResult
     {
         public Task ExecuteAsync(HttpContext httpContext)
         {
-            httpContext.Response.Headers.RetryAfter = "5";
+            httpContext.Response.Headers.RetryAfter = retryAfterSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
             return Error(StatusCodes.Status429TooManyRequests, message, code).ExecuteAsync(httpContext);
         }
     }

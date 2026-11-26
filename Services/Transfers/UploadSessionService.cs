@@ -1,4 +1,3 @@
-using System.Buffers;
 using System.Security.Cryptography;
 using CloudSelfService.Models;
 using CloudSelfService.Services.Access;
@@ -339,7 +338,7 @@ public sealed class UploadSessionService
             return new(AccessOutcome.Busy, null, UploadErrorCodes.Busy);
         }
         var length = (int)expected;
-        var buffer = ArrayPool<byte>.Shared.Rent(Math.Max(1, length));
+        var buffer = _budget.Buffers.Rent(Math.Max(1, length));
         try
         {
             var read = await ReadPieceAsync(body, buffer, length, target.Id, session.FinalPath, ctx, ct);
@@ -397,7 +396,7 @@ public sealed class UploadSessionService
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(buffer, clearArray: true);
+            _budget.Buffers.Return(buffer, clearArray: true);
             budgetLease.Dispose();
         }
 

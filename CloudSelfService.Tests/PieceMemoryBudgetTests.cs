@@ -25,6 +25,34 @@ public class PieceMemoryBudgetTests
         Assert.Equal(67_108_864, budget.MaxBytesPerUser);
     }
 
+    [Theory]
+    [InlineData(268_435_456L, 8)]
+    [InlineData(67_108_864L, 2)]
+    [InlineData(33_554_432L, 1)]
+    [InlineData(1L, 1)]
+    public void Buffers_KeepTheBudgetsWorthOfLargestPieces(long total, int expected)
+    {
+        var budget = Budget(total);
+
+        Assert.Equal(expected, budget.MaxArraysPerBucket);
+        Assert.Equal(expected, PieceMemoryBudget.ArraysPerBucketFor(total));
+        Assert.NotSame(System.Buffers.ArrayPool<byte>.Shared, budget.Buffers);
+    }
+
+    // A 32 MiB budget keeps one largest piece: the second returned is dropped, not retained.
+    [Fact]
+    public void Buffers_LargestPieces_RetainAtMostTheBudget()
+    {
+        var budget = Budget(ChunkMath.MaxBlobPieceSize);
+        var first = new[] { budget.Buffers.Rent(ChunkMath.MaxBlobPieceSize), budget.Buffers.Rent(ChunkMath.MaxBlobPieceSize) };
+        foreach (var a in first) budget.Buffers.Return(a, clearArray: true);
+
+        var second = new[] { budget.Buffers.Rent(ChunkMath.MaxBlobPieceSize), budget.Buffers.Rent(ChunkMath.MaxBlobPieceSize) };
+
+        Assert.Equal(1, second.Count(b => first.Any(a => ReferenceEquals(a, b))));
+        Assert.All(second, b => Assert.Equal(ChunkMath.MaxBlobPieceSize, b.Length));
+    }
+
     [Fact]
     public void TryReserve_WithinBothBudgets_Succeeds()
     {
