@@ -45,9 +45,11 @@ public class PgStoresIntegrationTests
     public async Task UploadLimitStore_SetTwice_KeepsOneRow()
     {
         await using var ctx = await CtxAsync();
-        await UploadLimitStoreContract.SetTwice_KeepsOneRow(new PgUploadLimitStore(ctx));
-        await using var cmd = ctx.DataSource.CreateCommand("SELECT count(*) FROM upload_limit_override");
-        Assert.Equal(0L, (long)(await cmd.ExecuteScalarAsync())!);
+        await UploadLimitStoreContract.SetTwice_KeepsOneRow(new PgUploadLimitStore(ctx), async () =>
+        {
+            await using var cmd = ctx.DataSource.CreateCommand("SELECT count(*) FROM upload_limit_override");
+            return (long)(await cmd.ExecuteScalarAsync())!;
+        });
     }
 
     [PgFact]

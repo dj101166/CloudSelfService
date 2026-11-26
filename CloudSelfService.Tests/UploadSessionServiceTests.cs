@@ -174,6 +174,21 @@ public class UploadSessionServiceTests
     }
 
     [Fact]
+    public async Task PutChunk_PiecesKeepArrivingPastDay7_SessionStillEndsAtCreatedPlusSevenDays()
+    {
+        var svc = Service();
+        var file = Bytes(33 * Mi);
+        var begin = await BeginOk(svc, _contrib, _share, "", "a.bin", file.Length);
+        await KeepAlive(svc, begin.SessionId, file, until: TimeSpan.FromDays(6.9));
+
+        _time.Now = Start.AddDays(7);
+        var result = await Put(svc, _contrib.Id, begin.SessionId, file, 0);
+
+        Assert.Equal(AccessOutcome.NotFound, result.Outcome);
+        Assert.Equal(Start.AddDays(7), (await _sessions.GetAsync(begin.SessionId))!.ExpiresAt);
+    }
+
+    [Fact]
     public async Task Sweep_SessionWithRecentPiece_NotAbortedAfter24h()
     {
         var svc = Service();

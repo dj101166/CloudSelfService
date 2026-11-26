@@ -159,7 +159,7 @@ public static class UploadLimitStoreContract
         await store.ClearAsync();
     }
 
-    public static async Task SetTwice_KeepsOneRow(IUploadLimitStore store)
+    public static async Task SetTwice_KeepsOneRow(IUploadLimitStore store, Func<Task<long>>? rowCount = null)
     {
         await store.ClearAsync();
         await store.SetAsync(new UploadLimitOverride(3L << 30, null, Guid.NewGuid(), "a@advancedutility.com", At, "one"));
@@ -168,7 +168,9 @@ public static class UploadLimitStoreContract
         var current = (await store.GetAsync())!;
         Assert.Equal(4L << 30, current.Bytes);
         Assert.Equal("two", current.Note);
+        if (rowCount is not null) Assert.Equal(1L, await rowCount());
         await store.ClearAsync();
         Assert.Null(await store.GetAsync());
+        if (rowCount is not null) Assert.Equal(0L, await rowCount());
     }
 }

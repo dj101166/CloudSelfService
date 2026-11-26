@@ -142,6 +142,22 @@ public class UploadLimitServiceTests
     }
 
     [Fact]
+    public async Task GetState_OverrideExpiresInsideCacheWindow_FallsBackWithoutReread()
+    {
+        var store = new CountingStore();
+        await store.SetAsync(Override(150 * GiB, Start.AddSeconds(10)));
+        var svc = Service(store);
+        Assert.Equal(150 * GiB, (await svc.GetStateAsync()).Effective);
+
+        _time.Now = Start.AddSeconds(20);
+        var state = await svc.GetStateAsync();
+
+        Assert.Equal(100 * GiB, state.Effective);
+        Assert.False(state.OverrideActive);
+        Assert.Equal(1, store.Reads);
+    }
+
+    [Fact]
     public async Task Invalidate_NextReadGoesToTheStore()
     {
         var store = new CountingStore();
@@ -289,8 +305,10 @@ public class SettingsPageTests
         using var factory = new TestAppFactory();
         var client = await factory.CreateClientAs("staff");
 
-        var html = await (await client.GetAsync("/admin/settings")).Content.ReadAsStringAsync();
+        var response = await client.GetAsync("/admin/settings");
+        var html = await response.Content.ReadAsStringAsync();
 
         Assert.DoesNotContain("data-testid=\"upload-limit-save\"", html);
+        Assert.Equal("/access-denied", response.Headers.Location?.AbsolutePath);
     }
 }
