@@ -1,0 +1,44 @@
+### Task 4: Effective upload limit, the override store, and the Settings admin page
+
+**Files:**
+- Create: `Services/Transfers/UploadLimitService.cs`, `Services/Data/SettingsStore.cs`, `Pages/Admin/Settings.razor`, `Pages/Admin/Settings.razor.css`, `CloudSelfService.Tests/UploadLimitServiceTests.cs`
+- Modify: `Services/Data/PgsqlContext.cs`, `Services/AdminService.cs`, `Services/Transfers/UploadSessionService.cs`, `Program.cs`, `Shared/NavMenu.razor`, `appsettings.json`
+- Test: `AdminServiceTests.cs`, `UploadSessionServiceTests.cs`, `StartupChecksTests.cs`, `PgSchemaTests.cs`, `PageAuthorizationAttributeTests.cs` (if it lists pages explicitly), `InMemoryStoresTests.cs`, `PgStoresIntegrationTests.cs`
+
+**Interfaces:**
+- Produces:
+  - `public sealed record UploadLimitOverride(long Bytes, DateTimeOffset? ExpiresAt, Guid SetBy, string SetByUpn, DateTimeOffset SetAt, string Note)`.
+  - `public interface IUploadLimitStore { Task<UploadLimitOverride?> GetAsync(CancellationToken ct = default); Task SetAsync(UploadLimitOverride o, CancellationToken ct = default); Task ClearAsync(CancellationToken ct = default); }`, with `PgUploadLimitStore` and `InMemoryUploadLimitStore`, registered in both branches of `Program.cs`.
+  - Table, added to `PgsqlContext` schema: `CREATE TABLE IF NOT EXISTS upload_limit_override (id SMALLINT PRIMARY KEY CHECK (id = 1), bytes BIGINT NOT NULL CHECK (bytes > 0), expires_at TIMESTAMPTZ NULL, set_by UUID NOT NULL, set_by_upn TEXT NOT NULL, set_at TIMESTAMPTZ NOT NULL, note TEXT NOT NULL DEFAULT '')`. `SetAsync` upserts row 1; `ClearAsync` deletes it.
+  - `public sealed record UploadLimitState(long Effective, long Default, long Ceiling, UploadLimitOverride? Override, bool OverrideActive)`.
+  - `public sealed class UploadLimitService` (singleton): ctor `(IUploadLimitStore store, TimeProvider time, IConfiguration config)`.
+    - `public static (long Ceiling, long ConfiguredCeiling, long Default, long ConfiguredDefault) LimitsFrom(IConfiguration config)` replaces `UploadSessionService.MaxUploadBytesFrom`. Ceiling = `min(Transfers:MaxUploadBytesCeiling ?? 1,099,511,627,776, ChunkMath.MaxBlobBytes)`. Default = `min(Transfers:MaxUploadBytes ?? 107,374,182,400, Ceiling)`.
+    - `Task<UploadLimitState> GetStateAsync(CancellationToken ct = default)`: the override counts when it exists and `ExpiresAt is null || ExpiresAt > now`. Effective = `min(override.Bytes, Ceiling)` if active, else Default. The store read is cached for 30 s (`TimeProvider`-based); `Invalidate()` drops the cache and is called by `AdminService` after a set or clear.
+    - `public const long DefaultMaxUploadBytes = 107_374_182_400; public const long DefaultCeilingBytes = 1_099_511_627_776;`
+  - `UploadSessionService`: ctor takes `UploadLimitService limits` instead of reading `_maxBytes` from config. `BeginAsync` reads `(await _limits.GetStateAsync(ct)).Effective` once and uses it for the size check (before authorisation, as today), the per-user reserved-bytes cap, and `TooLargeMessage`. **Change from today:** resolve the resumable session (`FindResumableAsync` plus the existing first-piece match) before the size check, and skip the size and reserved-bytes checks when one exists, because its size was accepted at its own Begin. The input validation (negative size, MD5 format, names) and the authorisation call still run first.
+  - `AdminService`: `public const string SetUploadLimitOp = "Admin.SetUploadLimit";`, added to `AuditOperationNames`. Ctor gains `UploadLimitService limits` (update `Program.cs` and the test helpers).
+    - `Task<AccessResult> SetUploadLimitAsync(Guid actorId, long bytes, DateTimeOffset? expiresAt, string? note, AuditContext? ctx = null, CancellationToken ct = default)`: `RequireAsync(actorId, StaffRole.StaffAdmin, SetUploadLimitOp, ...)`. Validation: `bytes` in `[1 GiB, Ceiling]` → else `Invalid` with `"The limit must be between 1 GB and {ceiling} GB."`; `expiresAt` null or `> now + 1 minute` → else `Invalid` with `"The end time must be in the future."`; note ≤ 500 chars after trim. Audit path text: `"limit {old GB} GB -> {new GB} GB; until {ISO-8601 UTC or 'permanent'}; note: {note}"`, `Bytes` = new bytes.
+    - `Task<AccessResult> ClearUploadLimitAsync(Guid actorId, AuditContext? ctx = null, CancellationToken ct = default)`: same gate; audit path `"limit {old} GB -> default {default} GB"`.
+    - GB figures use the same formatting as `UploadSessionService.TooLargeMessage` (binary GB, up to 2 decimals). Extract that into `public static string UploadLimitService.FormatGb(long bytes)` and use it in both places.
+  - `Program.cs` startup warnings: one for a clamped ceiling (`"Transfers:MaxUploadBytesCeiling {Configured} exceeds the {Limit}-byte Azure block-blob maximum; using the maximum."`), one for a clamped default (the existing text, now citing the ceiling).
+  - `Pages/Admin/Settings.razor`: `@page "/admin/settings"`, `@attribute [Authorize(Policy = Policies.StaffAdmin)]`, `@inherits AdminPageBase`, `<PageTitle>Settings — Advanced Cloud Self Service</PageTitle>`, inside `AdminGate` and `AdminAlertBox` like `Targets.razor`.
+    - Card "Upload size limit" showing the current limit `[data-testid=upload-limit-effective]`, its source `[data-testid=upload-limit-source]` ("Default from configuration" or "Set by {upn} on {local time}, until {local time}" / ", permanent"), the default and the ceiling.
+    - Form: number input in GB `[data-testid=upload-limit-gb]` (min 1, max ceiling GB, step 1); radio Permanent / Until `[data-testid=upload-limit-permanent]`, `[data-testid=upload-limit-until]`; `datetime-local` input `[data-testid=upload-limit-until-at]` enabled only for Until, labelled with the browser's zone name; note `[data-testid=upload-limit-note]`; Save `[data-testid=upload-limit-save]`; **Revert to default** `[data-testid=upload-limit-revert]`, shown only when an override exists.
+    - The browser zone comes from the existing `cssp.timeZone` interop (`BrowserTimeZone`, `FileDisplay.ResolveZone`) as in `Browse.razor`. The entered local time converts to UTC with that zone; when the zone can't be resolved, the label says UTC and the value is taken as UTC.
+    - Every action re-checks with `StillAuthorizedAsync()` and catches store failures into `Alert`, like the other admin pages.
+  - `NavMenu.razor`: Settings link after Storage targets, `href="admin/settings"`, `data-testid="nav-admin-settings"`, icon `monitor`, label "Settings".
+  - `appsettings.json`: `MaxUploadBytes: 107374182400`, add `MaxUploadBytesCeiling: 1099511627776`.
+
+- [ ] **Step 1: Write failing tests:**
+  - `UploadLimitServiceTests`: `Effective_NoOverride_IsDefault` (default 100 GiB); `Effective_ActiveOverride_IsOverride`; `Effective_OverrideExpired_FallsBackToDefault` (move `MutableTime` past `ExpiresAt` and call `Invalidate()`, or advance past the 30 s cache, → Default); `Effective_OverrideAboveCeiling_ClampedToCeiling`; `LimitsFrom_CeilingAboveBlobMax_Clamped` (configured 2 TiB → `ChunkMath.MaxBlobBytes`); `LimitsFrom_DefaultAboveCeiling_Clamped`; `GetState_CachesForThirtySeconds` (a store that counts reads: two calls within 30 s → 1 read; after 31 s → 2).
+  - `AdminServiceTests`: `SetUploadLimit_StaffAdmin_SavesAndAudits` (audit operation `Admin.SetUploadLimit`, `Bytes` = new value, path contains `"-> 150 GB"`); `SetUploadLimit_Staff_Denied` (role Staff → `Denied`, denied audit row, store unchanged); `SetUploadLimit_AboveCeiling_Invalid`; `SetUploadLimit_PastExpiry_Invalid`; `ClearUploadLimit_RevertsToDefault_Audited`; `SetUploadLimit_Owner_FromConfig_Allowed` (a stored role of None with the UPN in `OwnerConfig` → Ok).
+  - `UploadSessionServiceTests`: `Begin_AboveEffectiveLimit_TooLarge` (override 2 GiB, size 2 GiB + 1 → `TooLargeMessage(2 GiB)`); `Begin_ResumeAfterLimitLowered_StillResumes` (Begin 3 GiB under a 4 GiB override, set the override to 2 GiB, Begin the same file again → Ok, same session id).
+  - `StartupChecksTests`: replace the `MaxUploadBytesFrom` cases with `LimitsFrom` cases (null config → 100 GiB default and 1 TiB ceiling) and keep the source-text assertion pointing at `UploadLimitService.LimitsFrom(`.
+  - `PgSchemaTests`: the schema text contains `upload_limit_override`.
+  - Store contract (in-memory always, Pg under `CSSP_TEST_PG`): `UploadLimitStore_SetGetClear_RoundTrips`, `UploadLimitStore_SetTwice_KeepsOneRow`.
+  - `PageAuthorizationAttributeTests` (if it enumerates pages): `/admin/settings` carries the StaffAdmin policy.
+- [ ] **Step 2: Run.** Expected: failures.
+- [ ] **Step 3: Implement** the service, stores, schema, `AdminService` methods, DI, startup warnings, page, nav link and `appsettings.json`. Remove `UploadSessionService.MaxUploadBytesFrom` and `DefaultMaxUploadBytes`.
+- [ ] **Step 4: Run** `dotnet build` (0 errors) and the full test project. Expected: all pass.
+- [ ] **Step 5: Commit** `Add an audited, expiring upload limit that Admins and Owners can change`.
+

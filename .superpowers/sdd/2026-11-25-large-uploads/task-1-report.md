@@ -1,0 +1,5 @@
+# Task 1 report
+Implemented ChunkMath per brief (MinPieceSize, MaxBlobPieceSize, FingerprintBytes, MaxBlocksPerBlob, MaxBlobBytes, PieceSizeFor, ChunkCount/ExpectedLength/Offset with piece size). Callers mechanically updated to MinPieceSize.
+TDD: RED = `dotnet test ... --filter ChunkMathTests` -> CS0117 'ChunkMath' does not contain 'MinPieceSize'. GREEN = full suite: Passed 1178, Failed 0, Skipped 16. Build 0 errors.
+Deviation: UploadSessionService's configured-size clamp (and its tests / StartupChecksTests) use `(long)MinPieceSize * MaxBlocksPerBlob` (200,000 MiB, the old MaxUploadBytes) instead of MaxBlobBytes, because the brief's literal swap raised the ceiling 8x and failed Begin_ConfiguredMaxAboveBlobBlockLimit. Task 2 should switch it to piece-size-aware limits.
+Files: ChunkMath.cs, UploadSessionService.cs, UploadEndpoints.cs, ChunkMathTests, LiveStorageTests, StartupChecksTests, UploadEndpointTests, UploadSessionServiceTests. LF endings preserved. Unrelated pre-existing changes (.claude/memory) left unstaged.
