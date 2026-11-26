@@ -1,5 +1,10 @@
 # Changelog - Advanced Cloud Self Service
 
+## [1.1.1] - November 25, 2026
+
+### 🐛 Fixed
+- An upload started when no other upload was running showed "Waiting to start" for its whole run, even while its progress bar moved. It now shows "Uploading" as soon as it starts.
+
 ## [1.1.0] - November 25, 2026
 
 ### 🔄 Changed

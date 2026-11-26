@@ -163,6 +163,7 @@ else if (this.LimitBytes is { } limit)
     private DotNetObjectReference<UploadPanel>? _ref;
     private readonly string _owner = Guid.NewGuid().ToString("N");
     private readonly HashSet<Guid> _claimed = new();
+    private readonly EarlyUploadUpdates _early = new();
     private DateTimeOffset? _sessionEndsAt;
     private bool _ready;
 
@@ -204,6 +205,7 @@ else if (this.LimitBytes is { } limit)
             }
             item.Notice = null;
             item.ResumingSessionId = resuming?.SessionId;
+            this._early.ApplyTo(item);
             // Begin resumes or replaces the server session a started file matches, so its waiting row must not come
             // back when the finished item is cleared from the panel.
             foreach (var u in this.Unfinished.Where(item.IsFor))
@@ -300,7 +302,11 @@ else if (this.LimitBytes is { } limit)
     private Task UpdateAsync(string id, Action<UploadItem> change)
     {
         var item = this.Find(id);
-        if (item is null) return Task.CompletedTask;
+        if (item is null)
+        {
+            this._early.Hold(id, change);
+            return Task.CompletedTask;
+        }
         change(item);
         return this.InvokeAsync(this.StateHasChanged);
     }
