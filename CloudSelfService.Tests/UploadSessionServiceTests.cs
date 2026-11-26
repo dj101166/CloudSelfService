@@ -69,9 +69,10 @@ public class UploadSessionServiceTests
 
     private UploadSessionService Service(long? maxBytes = null, IUploadSessionStore? sessions = null, int? maxOpen = null,
         ILogger<UploadSessionService>? logger = null, IStorageBackendResolver? backends = null, int parallel = 6,
-        int? minChunkBytesPerSecond = null, PieceMemoryBudget? budget = null)
+        int? minChunkBytesPerSecond = null, PieceMemoryBudget? budget = null, int? idleMinutes = null)
     {
         var settings = new Dictionary<string, string?> { ["Transfers:ParallelChunks"] = parallel.ToString() };
+        if (idleMinutes is not null) settings["Transfers:IdleSessionMinutes"] = idleMinutes.ToString();
         if (maxBytes is not null)
         {
             settings["Transfers:MaxUploadBytes"] = maxBytes.ToString();
@@ -2923,6 +2924,38 @@ public class UploadSessionServiceTests
     }
 
     [Fact]
+    public async Task Complete_FileShare_PassesNoBlockIds()
+    {
+        var recorder = new RecordingBackend(_fake);
+        var svc = Service(backends: recorder);
+        var file = Bytes(5 * Mi);
+        var begin = await BeginOk(svc, _contrib, _share, "", "f.bin", file.Length);
+        Assert.Equal(AccessOutcome.Ok, (await Put(svc, _contrib.Id, begin.SessionId, file, 0)).Outcome);
+        Assert.Equal(AccessOutcome.Ok, (await Put(svc, _contrib.Id, begin.SessionId, file, 1)).Outcome);
+
+        var complete = await svc.CompleteAsync(_contrib.Id, begin.SessionId, Ctx);
+
+        Assert.Equal(AccessOutcome.Ok, complete.Outcome);
+        Assert.Empty(recorder.CommittedBlockIds!);
+        Assert.Equal(file, await ReadFile(_share, "f.bin"));
+    }
+
+    [Fact]
+    public async Task Complete_Blob_PassesEveryBlockIdInOrder()
+    {
+        var recorder = new RecordingBackend(_fake);
+        var svc = Service(backends: recorder);
+        var file = Bytes(5 * Mi);
+        var begin = await BeginOk(svc, _contrib, _blob, "", "f.bin", file.Length);
+        Assert.Equal(AccessOutcome.Ok, (await Put(svc, _contrib.Id, begin.SessionId, file, 0)).Outcome);
+        Assert.Equal(AccessOutcome.Ok, (await Put(svc, _contrib.Id, begin.SessionId, file, 1)).Outcome);
+
+        Assert.Equal(AccessOutcome.Ok, (await svc.CompleteAsync(_contrib.Id, begin.SessionId, Ctx)).Outcome);
+
+        Assert.Equal(new[] { ChunkMath.BlockId(begin.SessionId, 0), ChunkMath.BlockId(begin.SessionId, 1) }, recorder.CommittedBlockIds);
+    }
+
+    [Fact]
     public void PieceReadTimeout_ScalesWithPieceLengthAboveTheFloor()
     {
         var svc = Service();
@@ -3084,6 +3117,60 @@ public class UploadSessionServiceTests
         Assert.Equal(8 * Mi, only.ChunkSize);
         Assert.Equal(activity, only.LastActivity);
         Assert.Equal(Start.AddHours(25), only.ExpiresAt);
+        Assert.Equal(Start.AddHours(25), only.DiscardAt);
+    }
+
+    [Fact]
+    public async Task ListUnfinished_LastShortPieceReceived_CountsItsRealLength()
+    {
+        var svc = Service();
+        var session = await OpenSession(_contrib, _blob, "Big/file.bin", size: 20 * Mi + 5, pieceSize: 8 * Mi);
+        await _sessions.MarkChunkAsync(session.Id, 0, Start, Start.AddHours(24));
+        await _sessions.MarkChunkAsync(session.Id, 2, Start, Start.AddHours(24));
+        // Rows outside the session's pieces never count.
+        await _sessions.MarkChunkAsync(session.Id, 3, Start, Start.AddHours(24));
+        await _sessions.MarkChunkAsync(session.Id, -1, Start, Start.AddHours(24));
+
+        var only = Assert.Single(await svc.ListUnfinishedAsync(_contrib.Id));
+
+        Assert.Equal(8L * Mi + 4L * Mi + 5, only.ReceivedBytes);
+    }
+
+    [Fact]
+    public async Task ListUnfinished_EveryPieceReceived_ReceivedIsTheSize()
+    {
+        var svc = Service();
+        var session = await OpenSession(_contrib, _share, "a.bin", size: 9 * Mi + 1);
+        for (var i = 0; i < 3; i++)
+            await _sessions.MarkChunkAsync(session.Id, i, Start, Start.AddHours(24));
+
+        Assert.Equal(9L * Mi + 1, Assert.Single(await svc.ListUnfinishedAsync(_contrib.Id)).ReceivedBytes);
+    }
+
+    // A session no piece has reached is swept IdleSessionMinutes after it began, long before its ExpiresAt.
+    [Fact]
+    public async Task ListUnfinished_NoPieceYet_DiscardAtIsCreatedPlusIdleMinutes()
+    {
+        var svc = Service();
+        await OpenSession(_contrib, _share, "a.bin");
+
+        var only = Assert.Single(await svc.ListUnfinishedAsync(_contrib.Id));
+
+        Assert.Equal(Start.AddMinutes(UploadCleanupService.DefaultIdleSessionMinutes), only.DiscardAt);
+        Assert.Equal(Start.AddHours(24), only.ExpiresAt);
+    }
+
+    [Fact]
+    public async Task ListUnfinished_NoPieceYet_DiscardAtMatchesTheSweep()
+    {
+        var svc = Service(idleMinutes: 45);
+        var session = await OpenSession(_contrib, _share, "a.bin");
+        var only = Assert.Single(await svc.ListUnfinishedAsync(_contrib.Id));
+
+        _time.Now = only.DiscardAt.AddMinutes(-1);
+        Assert.DoesNotContain(await _sessions.ListSweepableOpenAsync(_time.Now, _time.Now - TimeSpan.FromMinutes(45)), s => s.Id == session.Id);
+        _time.Now = only.DiscardAt.AddMinutes(1);
+        Assert.Contains(await _sessions.ListSweepableOpenAsync(_time.Now, _time.Now - TimeSpan.FromMinutes(45)), s => s.Id == session.Id);
     }
 
     [Fact]

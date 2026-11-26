@@ -156,6 +156,26 @@ public abstract class UploadSessionStoreContract
 
         Assert.Equal(new[] { active.Id, newer.Id, older.Id }, listed.Select(s => s.Id));
     }
+
+    protected async Task ReceivedSummary_CountsInRangeAndFlagsTheLast()
+    {
+        var store = await CreateStoreAsync();
+        var s = Session(Guid.NewGuid());
+        var other = Session(Guid.NewGuid());
+        await store.CreateAsync(s);
+        await store.CreateAsync(other);
+
+        Assert.Equal((0, false), await store.ReceivedSummaryAsync(s.Id, 5));
+        foreach (var i in new[] { 0, 2, 2, 7, -1 })
+            await store.MarkChunkAsync(s.Id, i, Now, Now.AddHours(24));
+        await store.MarkChunkAsync(other.Id, 4, Now, Now.AddHours(24));
+        Assert.Equal((2, false), await store.ReceivedSummaryAsync(s.Id, 5));
+
+        await store.MarkChunkAsync(s.Id, 4, Now, Now.AddHours(24));
+        Assert.Equal((3, true), await store.ReceivedSummaryAsync(s.Id, 5));
+        Assert.Equal((0, false), await store.ReceivedSummaryAsync(s.Id, 0));
+        Assert.Equal((0, false), await store.ReceivedSummaryAsync(Guid.NewGuid(), 5));
+    }
 }
 
 public class InMemoryUploadSessionStoreContractTests : UploadSessionStoreContract
@@ -188,6 +208,9 @@ public class InMemoryUploadSessionStoreContractTests : UploadSessionStoreContrac
 
     [Fact]
     public Task ListOpenForUser_NewestActivityFirst() => NewestActivityFirst();
+
+    [Fact]
+    public Task ReceivedSummaryAsync_CountsInRangeAndFlagsTheLast() => ReceivedSummary_CountsInRangeAndFlagsTheLast();
 }
 
 public class PgUploadSessionStoreContractTests : UploadSessionStoreContract
@@ -227,4 +250,7 @@ public class PgUploadSessionStoreContractTests : UploadSessionStoreContract
 
     [PgFact]
     public Task ListOpenForUser_NewestActivityFirst() => NewestActivityFirst();
+
+    [PgFact]
+    public Task ReceivedSummaryAsync_CountsInRangeAndFlagsTheLast() => ReceivedSummary_CountsInRangeAndFlagsTheLast();
 }

@@ -242,6 +242,41 @@ public sealed class BrowseRouteTests : IDisposable
     }
 
     [Fact]
+    public async Task Browse_Prerender_RendersSelectFileDisabled_UntilInteractive()
+    {
+        var full = await _factory.CreateClientAs("customer-full");
+        var own = await _factory.DemoTargetAsync("Full");
+        await BeginUploadAsync(full, own.Id, "Documents", "big.bak", 10 * 1024 * 1024);
+
+        var html = await (await full.GetAsync($"/files/{own.Id}/Documents")).Content.ReadAsStringAsync();
+
+        Assert.Matches(@"<input type=""file""[^>]*data-testid=""upload-select-input""[^>]*disabled", html);
+        Assert.Matches(@"<label[^>]*data-testid=""upload-select-file""[^>]*aria-disabled=""true""", html);
+    }
+
+    [Fact]
+    public async Task Home_UnfinishedUploadWithNoPiece_ShowsIdleDiscardTime_NotExpiry()
+    {
+        var full = await _factory.CreateClientAs("customer-full");
+        var own = await _factory.DemoTargetAsync("Full");
+        var user = (await _factory.Services.GetRequiredService<IUserStore>().ListAsync(UserKind.Customer, own.CustomerId)).Single();
+        var sessions = _factory.Services.GetRequiredService<IUploadSessionStore>();
+        var created = new DateTimeOffset(DateTimeOffset.UtcNow.Year + 1, 3, 4, 10, 0, 0, TimeSpan.Zero);
+        var idle = new UploadSession(Guid.NewGuid(), user.Id, own.Id, "idle.bak", ".idle.bak.cssupload-x", 10, 4 * 1024 * 1024,
+            false, created, created.AddHours(24), UploadStatus.Open);
+        var active = new UploadSession(Guid.NewGuid(), user.Id, own.Id, "active.bak", ".active.bak.cssupload-y", 10, 4 * 1024 * 1024,
+            false, created, created.AddHours(24), UploadStatus.Open);
+        await sessions.CreateAsync(idle);
+        await sessions.CreateAsync(active);
+        await sessions.MarkChunkAsync(active.Id, 0, created.AddMinutes(5), created.AddHours(30));
+
+        var html = await (await full.GetAsync("/")).Content.ReadAsStringAsync();
+
+        Assert.Matches(new Regex($"data-session-id=\"{idle.Id}\"[\\s\\S]*?Discarded after 2\\d{{3}}-03-04 12:00 UTC"), html);
+        Assert.Matches(new Regex($"data-session-id=\"{active.Id}\"[\\s\\S]*?Discarded after 2\\d{{3}}-03-05 16:00 UTC"), html);
+    }
+
+    [Fact]
     public async Task Browse_UnfinishedUploadInAnotherFolder_NoWaitingRow()
     {
         var full = await _factory.CreateClientAs("customer-full");

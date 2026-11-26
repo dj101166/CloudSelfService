@@ -101,7 +101,8 @@ Storage Explorer (AzCopy underneath) picks a block size big enough to fit the fi
   platform maxima, Blob's) with a startup warning when clamped. Config only, never editable in the app.
 - *(Builder's call)* **One limit for both kinds.** Because the ceiling never exceeds what Blob can take, a single number is
   valid on every target: the admin form, the effective limit, the reserved-bytes cap and the panel text all use it, and
-  the size check stays before authorisation in Begin.
+  Begin authorises first, then looks for a resumable session, and checks the limit and the per-user caps only for a
+  new upload (ruling R2).
 - Production sets no `Transfers__MaxUploadBytes` (checked: nothing in ZZ_Pulumi), so the new `appsettings.json` default
   takes effect on deploy.
 - **Default** `Transfers:MaxUploadBytes`, now 100 GiB, clamped to the ceiling (the existing startup warning stays).

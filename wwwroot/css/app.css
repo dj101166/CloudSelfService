@@ -189,6 +189,8 @@ a.btn:hover { text-decoration: none; }
 
 .btn:active:not(:disabled) { transform: translateY(1px); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+/* A label styled as a button cannot be disabled itself; this keeps it inert while its input is. */
+.btn[aria-disabled="true"] { opacity: 0.5; cursor: not-allowed; pointer-events: none; }
 
 .btn--sm { height: var(--control-height-sm); padding: 0 11px; font-size: 12.5px; }
 

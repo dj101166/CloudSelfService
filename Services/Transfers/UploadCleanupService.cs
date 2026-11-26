@@ -45,8 +45,12 @@ public sealed class UploadCleanupService : BackgroundService
         _logger = logger;
         _completingTimeout = TimeSpan.FromMinutes(Math.Max(MinCompletingTimeoutMinutes,
             config.GetValue<int?>("Transfers:CompletingTimeoutMinutes") ?? DefaultCompletingTimeoutMinutes));
-        _idle = TimeSpan.FromMinutes(Math.Max(1, config.GetValue<int?>("Transfers:IdleSessionMinutes") ?? DefaultIdleSessionMinutes));
+        _idle = IdleFrom(config);
     }
+
+    /// <summary>Transfers:IdleSessionMinutes, at least 1: how long a session no piece has reached is kept before the sweep aborts it.</summary>
+    public static TimeSpan IdleFrom(IConfiguration config) =>
+        TimeSpan.FromMinutes(Math.Max(1, config.GetValue<int?>("Transfers:IdleSessionMinutes") ?? DefaultIdleSessionMinutes));
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {

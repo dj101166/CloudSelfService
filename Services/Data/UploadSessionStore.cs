@@ -53,6 +53,12 @@ public interface IUploadSessionStore
     /// </summary>
     Task MarkChunkAsync(Guid id, int index, DateTimeOffset at, DateTimeOffset expiresAt, CancellationToken ct = default);
     Task<IReadOnlyList<int>> ReceivedChunksAsync(Guid id, CancellationToken ct = default);
+
+    /// <summary>
+    /// How many of pieces 0..<paramref name="chunkCount"/>-1 were received, and whether the last of them was, without
+    /// reading every piece row (a 1.5 TB upload has 50,000).
+    /// </summary>
+    Task<(int Received, bool LastReceived)> ReceivedSummaryAsync(Guid id, int chunkCount, CancellationToken ct = default);
     Task SetStatusAsync(Guid id, string status, CancellationToken ct = default);
 
     /// <summary>
@@ -176,6 +182,15 @@ public sealed class InMemoryUploadSessionStore : IUploadSessionStore
             return Task.FromResult<IReadOnlyList<int>>(_chunks.TryGetValue(id, out var set)
                 ? set.OrderBy(i => i).ToList()
                 : Array.Empty<int>());
+    }
+
+    public Task<(int Received, bool LastReceived)> ReceivedSummaryAsync(Guid id, int chunkCount, CancellationToken ct = default)
+    {
+        lock (_lock)
+        {
+            if (!_chunks.TryGetValue(id, out var set)) return Task.FromResult((0, false));
+            return Task.FromResult((set.Count(i => i >= 0 && i < chunkCount), chunkCount > 0 && set.Contains(chunkCount - 1)));
+        }
     }
 
     public Task SetStatusAsync(Guid id, string status, CancellationToken ct = default)
@@ -446,6 +461,20 @@ public sealed class PgUploadSessionStore : IUploadSessionStore
         await using var cmd = new NpgsqlCommand("SELECT idx FROM upload_chunks WHERE session_id = @id ORDER BY idx", conn);
         cmd.Parameters.AddWithValue("id", id);
         return await cmd.ReadAllAsync(r => r.GetInt32(0), ct);
+    }
+
+    public async Task<(int Received, bool LastReceived)> ReceivedSummaryAsync(Guid id, int chunkCount, CancellationToken ct = default)
+    {
+        await using var conn = await _db.DataSource.OpenConnectionAsync(ct);
+        await using var cmd = new NpgsqlCommand("""
+            SELECT COUNT(*), COALESCE(BOOL_OR(idx = @count - 1), FALSE)
+            FROM upload_chunks WHERE session_id = @id AND idx >= 0 AND idx < @count
+            """, conn);
+        cmd.Parameters.AddWithValue("id", id);
+        cmd.Parameters.AddWithValue("count", chunkCount);
+        await using var r = await cmd.ExecuteReaderAsync(ct);
+        await r.ReadAsync(ct);
+        return ((int)r.GetInt64(0), r.GetBoolean(1));
     }
 
     public async Task SetStatusAsync(Guid id, string status, CancellationToken ct = default)

@@ -14,7 +14,8 @@
     Leaving the Files pages stops the uploads (the server keeps each one for 24 hours after its last piece arrived,
     and at most 7 days, so choosing the same file again resumes), which is why a navigation away with uploads running
     asks first. The same holds when the sign-in ends: running uploads pause, and after signing in again the page lists
-    this folder's unfinished uploads as rows waiting for their file.
+    this folder's unfinished uploads as rows waiting for their file. Their "Select file" is prerendered disabled and
+    enabled once the circuit is live, so a file chosen before then is not lost.
 *@
 <NavigationLock ConfirmExternalNavigation="this.HasActive" OnBeforeInternalNavigation="this.OnBeforeNavigationAsync" />
 
@@ -106,8 +107,9 @@
                         <span class="upload-panel__actions">
                             <input type="file" id="@inputId" class="upload-panel__file-input" data-testid="upload-select-input"
                                    aria-label="Select @StoragePath.DisplayName(row.Name) again to carry on uploading it"
-                                   @onchange="() => this.SelectFileAsync(u, inputId)" />
-                            <label for="@inputId" class="btn btn--secondary btn--sm" data-testid="upload-select-file">Select file</label>
+                                   disabled="@(!this._ready)" @onchange="() => this.SelectFileAsync(u, inputId)" />
+                            <label for="@inputId" class="btn btn--secondary btn--sm" data-testid="upload-select-file"
+                                   aria-disabled="@(this._ready ? null : "true")">Select file</label>
                         </span>
                     </div>
                     <div class="upload-panel__track" role="progressbar" aria-valuemin="0" aria-valuemax="100"
@@ -162,8 +164,16 @@ else if (this.LimitBytes is { } limit)
     private readonly string _owner = Guid.NewGuid().ToString("N");
     private readonly HashSet<Guid> _claimed = new();
     private DateTimeOffset? _sessionEndsAt;
+    private bool _ready;
 
     private bool HasActive => this._items.Any(i => i.IsActive);
+
+    protected override void OnAfterRender(bool firstRender)
+    {
+        if (!firstRender) return;
+        this._ready = true;
+        this.StateHasChanged();
+    }
 
     /// <summary>Hands the files chosen in <paramref name="inputElementId"/> to uploader.js.</summary>
     public Task StartAsync(Guid targetId, string folder, string inputElementId) =>

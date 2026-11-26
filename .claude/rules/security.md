@@ -24,7 +24,7 @@ Set in `Program.cs` and must not be removed or loosened:
 - File pages are `Cache-Control: no-store`.
 
 ## Upload route
-- `PUT /api/uploads/{id}/chunks/{index}` takes 4 MiB bodies. It stays antiforgery-protected, rate limited, session-bound and size-checked. The App Gateway WAF needs a body-inspection exemption for this route; do not widen it beyond the route.
+- `PUT /api/uploads/{id}/chunks/{index}` takes bodies up to 32 MiB (the session's piece size). It stays antiforgery-protected, rate limited, session-bound and size-checked. The App Gateway WAF needs a body-inspection exemption for this route; do not widen it beyond the route.
 - Client IP for audit comes from forwarded headers, trusted only because the App Gateway is the single ingress.
 
 ## Destructive actions (restart / stop) — for future features

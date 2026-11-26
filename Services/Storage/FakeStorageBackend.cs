@@ -371,9 +371,26 @@ public sealed class FakeStorageBackend : IStorageBackend, IStorageBackendResolve
                 throw new StorageFailureException(StorageFailureKind.Conflict, StorageErrorMapper.StagingIncompleteMessage);
             if (tree.Folders.Contains(finalPath) || (!overwrite && tree.Files.ContainsKey(finalPath)))
                 throw Fail(StorageFailureKind.AlreadyExists);
-            if (blockIds.Any(id => !blocks.ContainsKey(id))) throw Fail(StorageFailureKind.Other);
-
-            var assembled = blockIds.SelectMany(id => blocks[id].Data).ToArray();
+            byte[] assembled;
+            if (t.Kind == StorageKind.BlobContainer)
+            {
+                if (blockIds.Any(id => !blocks.ContainsKey(id))) throw Fail(StorageFailureKind.Other);
+                assembled = blockIds.SelectMany(id => blocks[id].Data).ToArray();
+            }
+            else
+            {
+                // Files commits by renaming whatever was written in place, with no block list. Azure would zero-fill a
+                // range lost to truncation; the fake refuses instead, so tests can see the loss.
+                assembled = new byte[tree.StagingSizes.GetValueOrDefault(stagingPath)];
+                long covered = 0;
+                foreach (var (offset, data) in blocks.Values.OrderBy(b => b.Offset))
+                {
+                    if (offset > covered) break;
+                    covered = Math.Max(covered, offset + data.LongLength);
+                    data.CopyTo(assembled, offset);
+                }
+                if (covered < assembled.LongLength) throw Fail(StorageFailureKind.Other);
+            }
             tree.Staging.Remove(stagingPath);
             if (stagingPath != finalPath)
             {

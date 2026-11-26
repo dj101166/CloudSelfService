@@ -8,7 +8,7 @@
 - Being signed out during an upload now pauses it instead of failing it.
 
 ### ✨ Added
-- Files larger than 195 GB can now be uploaded: large files are sent in bigger pieces, up to about 1.5 TB for blob containers.
+- Admins can now raise the upload limit beyond 195 GB; large files are sent in bigger pieces.
 - Admins and Owners can change the upload limit in Admin, Settings, permanently or until a set time. Every change is recorded in the audit log.
 - The Files home lists your unfinished uploads, and the file browser shows each one as waiting for its file so you can carry on after signing in again.
 - The upload panel shows the largest file you can upload, and warns before your sign-in ends while uploads are running.

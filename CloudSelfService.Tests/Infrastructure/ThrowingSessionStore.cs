@@ -17,6 +17,7 @@ internal sealed class ThrowingSessionStore : IUploadSessionStore
         CancellationToken ct = default) => throw Down();
     public Task MarkChunkAsync(Guid id, int index, DateTimeOffset at, DateTimeOffset expiresAt, CancellationToken ct = default) => throw Down();
     public Task<IReadOnlyList<int>> ReceivedChunksAsync(Guid id, CancellationToken ct = default) => throw Down();
+    public Task<(int Received, bool LastReceived)> ReceivedSummaryAsync(Guid id, int chunkCount, CancellationToken ct = default) => throw Down();
     public Task SetStatusAsync(Guid id, string status, CancellationToken ct = default) => throw Down();
     public Task<bool> TrySetStatusAsync(Guid id, string expected, string next, DateTimeOffset? claimedAt = null,
         CancellationToken ct = default, bool requireClaim = false, DateTimeOffset? expectedClaim = null) => throw Down();

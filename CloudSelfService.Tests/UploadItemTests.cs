@@ -94,7 +94,7 @@ public class UploadItemTests
 
     private static UnfinishedUpload Unfinished(Guid target, string folder, string name, long size, long received) =>
         new(Guid.NewGuid(), target, "Share", folder, name, size, 4194304, received, DateTimeOffset.UnixEpoch,
-            DateTimeOffset.UnixEpoch.AddDays(1), false);
+            DateTimeOffset.UnixEpoch.AddDays(1), false, DateTimeOffset.UnixEpoch.AddDays(1));
 
     [Fact]
     public void Waiting_ShowsPercentReceived()

@@ -12,9 +12,14 @@ public sealed record BeginUploadRequest(Guid TargetId, string Folder, string Fil
 
 public sealed record BeginUploadResponse(Guid SessionId, int ChunkSize, int ChunkCount, int ParallelChunks, IReadOnlyList<int> Received);
 
-/// <summary>One of the caller's own open uploads, for resuming or discarding it. Folder is the final path's parent.</summary>
+/// <summary>
+/// One of the caller's own open uploads, for resuming or discarding it. Folder is the final path's parent. DiscardAt is
+/// when the cleanup sweep may remove it: ExpiresAt once a piece has arrived, otherwise no later than
+/// Transfers:IdleSessionMinutes after it began.
+/// </summary>
 public sealed record UnfinishedUpload(Guid SessionId, Guid TargetId, string TargetName, string Folder, string FileName, long Size,
-    int ChunkSize, long ReceivedBytes, DateTimeOffset LastActivity, DateTimeOffset ExpiresAt, bool Overwrite);
+    int ChunkSize, long ReceivedBytes, DateTimeOffset LastActivity, DateTimeOffset ExpiresAt, bool Overwrite,
+    DateTimeOffset DiscardAt);
 
 /// <summary>
 /// Chunked, resumable uploads. Every call re-reads the session and goes back through
@@ -71,6 +76,7 @@ public sealed class UploadSessionService
     private readonly int _parallel;
     private readonly TimeSpan _lifetime;
     private readonly TimeSpan _maxSessionAge;
+    private readonly TimeSpan _idle;
     private readonly TimeSpan _blobLock;
     private readonly int _maxOpenSessions;
     private readonly int _minChunkBytesPerSecond;
@@ -106,6 +112,7 @@ public sealed class UploadSessionService
         _parallel = Math.Clamp(config.GetValue<int?>("Transfers:ParallelChunks") ?? DefaultParallelChunks, 1, 16);
         _lifetime = TimeSpan.FromHours(Math.Max(1, config.GetValue<int?>("Transfers:SessionHours") ?? DefaultSessionHours));
         _maxSessionAge = TimeSpan.FromDays(Math.Max(1, config.GetValue<int?>("Transfers:MaxSessionDays") ?? DefaultMaxSessionDays));
+        _idle = UploadCleanupService.IdleFrom(config);
         _blobLock = TimeSpan.FromMinutes(Math.Max(1, config.GetValue<int?>("Transfers:BlobLockMinutes") ?? DefaultBlobLockMinutes));
         _maxOpenSessions = Math.Max(1, config.GetValue<int?>("Transfers:MaxOpenSessionsPerUser") ?? DefaultMaxOpenSessionsPerUser);
         _minChunkBytesPerSecond = MinChunkBytesPerSecondFrom(config);
@@ -458,7 +465,10 @@ public sealed class UploadSessionService
         if (!await _sessions.TrySetStatusAsync(session.Id, UploadStatus.Open, UploadStatus.Completing, _time.GetUtcNow(), ct))
             return new(AccessOutcome.NotFound, StorageErrorMapper.NotFoundMessage);
 
-        var blockIds = Enumerable.Range(0, count).Select(i => ChunkMath.BlockId(session.Id, i)).ToList();
+        // Files writes each range in place and commits by renaming, so only Blob needs the block list.
+        IReadOnlyList<string> blockIds = target.Kind == StorageKind.BlobContainer
+            ? Enumerable.Range(0, count).Select(i => ChunkMath.BlockId(session.Id, i)).ToList()
+            : Array.Empty<string>();
         string? failureMessage = null;
         var outcome = AccessOutcome.Ok;
         var lost = false;
@@ -565,12 +575,16 @@ public sealed class UploadSessionService
                 || !AccessPolicy.Allows(await _access.GetLevelAsync(userId, session.TargetId, ct), OperationOf(session)))
                 continue;
             var count = ChunkMath.ChunkCount(session.Size, session.ChunkSize);
-            var received = (await _sessions.ReceivedChunksAsync(session.Id, ct))
-                .Where(i => i >= 0 && i < count).Distinct()
-                .Sum(i => ChunkMath.ExpectedLength(session.Size, session.ChunkSize, i));
+            var (pieces, lastReceived) = await _sessions.ReceivedSummaryAsync(session.Id, count, ct);
+            // Every piece is a full piece except the last, which may be short.
+            var received = (long)pieces * session.ChunkSize;
+            if (lastReceived)
+                received -= session.ChunkSize - ChunkMath.ExpectedLength(session.Size, session.ChunkSize, count - 1);
+            var idleDeadline = session.CreatedAt + _idle;
+            var discardAt = session.LastActivityAt is null && idleDeadline < session.ExpiresAt ? idleDeadline : session.ExpiresAt;
             unfinished.Add(new UnfinishedUpload(session.Id, session.TargetId, targetName, StoragePath.Parent(session.FinalPath),
                 StoragePath.Leaf(session.FinalPath), session.Size, session.ChunkSize, received,
-                session.LastActivityAt ?? session.CreatedAt, session.ExpiresAt, session.Overwrite));
+                session.LastActivityAt ?? session.CreatedAt, session.ExpiresAt, session.Overwrite, discardAt));
         }
         return unfinished;
     }

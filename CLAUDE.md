@@ -74,7 +74,7 @@ Set in `appsettings.json`, `appsettings.Development.json` (git-ignored; copy fro
 - **Effective staff role.** Read it only through `StaffAccess` (`Effective`, `IsPending`, `Reaches`). Owner is derived from `Authorization:Owners` and never stored, so the stored `StaffRole` alone must never gate or label anything.
 - **No `/auth/service-signin`.** There is no shared-secret or API-key sign-in on this app.
 - **Dev sign-in and fake storage are Development-only.** `DevSignIn.AssertSafe` throws at startup otherwise; the built image was verified to exit with "Dev sign-in cannot run outside Development" on `Auth__Provider=Dev` in Production.
-- **Upload chunk route.** `PUT /api/uploads/{id}/chunks/{index}` carries 4 MiB bodies and needs a WAF exemption (body-inspection limit) at the App Gateway; it is antiforgery-protected, rate limited and session-bound.
+- **Upload chunk route.** `PUT /api/uploads/{id}/chunks/{index}` carries bodies up to 32 MiB (the session's piece size) and needs a WAF exemption (body-inspection limit) at the App Gateway; it is antiforgery-protected, rate limited and session-bound.
 - **No keys or URLs to the browser.** Downloads are `Content-Disposition: attachment` and `application/octet-stream`.
 - **Every `@page`** has `[Authorize]` or a policy, except `/login`, `/signed-out`, `/access-denied`.
 - **Client IP trust** relies on the App Gateway being the only ingress (forwarded headers are trusted unconditionally).
