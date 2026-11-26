@@ -58,7 +58,7 @@ public class AdminServiceTests
     private AdminService Build(Dictionary<string, string?> settings) =>
         new(_users, _customers, _targets, _grants, _fake, new AuditService(_audit, NullLogger<AuditService>.Instance),
             new OwnerConfig(OwnerUpn), _clock,
-            new ConfigurationBuilder().AddInMemoryCollection(settings).Build(), _limits);
+            new ConfigurationBuilder().AddInMemoryCollection(settings).Build(), _limits, _limitStore);
 
     private static AppUser Staff(string upn, StaffRole role, bool active = true) =>
         new(Guid.NewGuid(), UserKind.Staff, null, upn, upn, "oid-" + upn, role, active, Now, null);
@@ -529,7 +529,7 @@ public class AdminServiceTests
 
     private AdminService WithOwners(string owners) =>
         new(_users, _customers, _targets, _grants, _fake, new AuditService(_audit, NullLogger<AuditService>.Instance),
-            new OwnerConfig(owners), new AppRoleHandlerTests.FixedTime(Now), new ConfigurationBuilder().Build(), _limits);
+            new OwnerConfig(owners), new AppRoleHandlerTests.FixedTime(Now), new ConfigurationBuilder().Build(), _limits, _limitStore);
 
     [Theory]
     [InlineData("a\u0000b@x.example")]
@@ -1244,7 +1244,7 @@ public class AdminServiceTests
     {
         var shared = new ProbeCooldown(new AppRoleHandlerTests.FixedTime(Now));
         AdminService Make() => new(_users, _customers, _targets, _grants, _fake, new AuditService(_audit, NullLogger<AuditService>.Instance),
-            new OwnerConfig(OwnerUpn), new AppRoleHandlerTests.FixedTime(Now), new ConfigurationBuilder().Build(), _limits, shared);
+            new OwnerConfig(OwnerUpn), new AppRoleHandlerTests.FixedTime(Now), new ConfigurationBuilder().Build(), _limits, _limitStore, shared);
 
         var first = await Make().TestTargetAsync(_admin.Id, _alphaTarget.Id, Ctx);
         var secondCircuit = await Make().TestTargetAsync(_admin.Id, _alphaTarget.Id, Ctx);

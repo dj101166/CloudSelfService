@@ -45,6 +45,7 @@ public sealed partial class AdminService
     private readonly HashSet<Guid> _allowedSubscriptions;
     private readonly ProbeCooldown _cooldown;
     private readonly UploadLimitService _limits;
+    private readonly IUploadLimitStore _limitStore;
     private readonly ILogger<AdminService>? _logger;
     private readonly TimeSpan _testTimeout;
 
@@ -57,10 +58,11 @@ public sealed partial class AdminService
 
     public AdminService(IUserStore users, ICustomerStore customers, ITargetStore targets, IGrantStore grants,
         IStorageBackendResolver backends, AuditService audit, OwnerConfig owners, TimeProvider time, IConfiguration config,
-        UploadLimitService limits, ProbeCooldown? cooldown = null, ILogger<AdminService>? logger = null)
+        UploadLimitService limits, IUploadLimitStore limitStore, ProbeCooldown? cooldown = null, ILogger<AdminService>? logger = null)
     {
         _logger = logger;
         _limits = limits;
+        _limitStore = limitStore;
         _users = users;
         _customers = customers;
         _targets = targets;
@@ -421,7 +423,7 @@ public sealed partial class AdminService
         if (text.Length > 500) return new(AccessOutcome.Invalid, UploadLimitNoteMessage);
 
         var until = expiresAt?.ToUniversalTime();
-        await _limits.SetOverrideAsync(new UploadLimitOverride(bytes, until, actor.Id, actor.Upn, now, text), ct);
+        await _limitStore.SetAsync(new UploadLimitOverride(bytes, until, actor.Id, actor.Upn, now, text), ct);
         _limits.Invalidate();
 
         var untilText = until is { } u ? u.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture) : "permanent";
@@ -439,7 +441,7 @@ public sealed partial class AdminService
 
         _limits.Invalidate();
         var before = await _limits.GetStateAsync(ct);
-        await _limits.ClearOverrideAsync(ct);
+        await _limitStore.ClearAsync(ct);
         _limits.Invalidate();
 
         await RecordAsync(actor, SetUploadLimitOp, null, null,

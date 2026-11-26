@@ -9,7 +9,8 @@ public sealed record UploadLimitState(long Effective, long Default, long Ceiling
 
 /// <summary>
 /// The upload size limit: the configured default, or an Admin's override while it is unexpired, never above the configured
-/// ceiling. Expiry is evaluated on every read, so nothing has to run when an override ends.
+/// ceiling. Expiry is evaluated on every read, so nothing has to run when an override ends. Read-only by design: the
+/// override is written only by <see cref="AdminService"/>, behind its role check and audit row.
 /// </summary>
 public sealed class UploadLimitService
 {
@@ -78,10 +79,6 @@ public sealed class UploadLimitService
         Interlocked.Increment(ref _generation);
         _cached = null;
     }
-
-    public Task SetOverrideAsync(UploadLimitOverride o, CancellationToken ct = default) => _store.SetAsync(o, ct);
-
-    public Task ClearOverrideAsync(CancellationToken ct = default) => _store.ClearAsync(ct);
 
     /// <summary>Where the limit in force comes from, with times in the viewer's zone (UTC, labelled, when it is unknown).</summary>
     public static string Describe(UploadLimitState state, TimeZoneInfo? zone)

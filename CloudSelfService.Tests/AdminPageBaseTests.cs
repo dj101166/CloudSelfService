@@ -73,10 +73,12 @@ public class AdminPageBaseTests
         var cu = new CurrentUser(auth, _users, _customers,
             new SessionLifetime(TimeSpan.FromHours(12)), new AppRoleHandlerTests.FixedTime(Now));
         var targets = new InMemoryTargetStore();
+        var limitStore = new InMemoryUploadLimitStore();
         var svc = new AdminService(_users, _customers, targets, new InMemoryGrantStore(targets), new CloudSelfService.Services.Storage.FakeStorageBackend(),
             new AuditService(new InMemoryAuditStore(), NullLogger<AuditService>.Instance), owners,
             new AppRoleHandlerTests.FixedTime(Now), new ConfigurationBuilder().Build(),
-            new CloudSelfService.Services.Transfers.UploadLimitService(new InMemoryUploadLimitStore(), new AppRoleHandlerTests.FixedTime(Now), new ConfigurationBuilder().Build()));
+            new CloudSelfService.Services.Transfers.UploadLimitService(limitStore, new AppRoleHandlerTests.FixedTime(Now), new ConfigurationBuilder().Build()),
+            limitStore);
         _page.Wire(cu, owners, svc);
     }
 
