@@ -13,6 +13,9 @@
 - The Files home lists your unfinished uploads, and the file browser shows each one as waiting for its file so you can carry on after signing in again.
 - The upload panel shows the largest file you can upload, and warns before your sign-in ends while uploads are running.
 
+### 🛡️ Security
+- Upload requests sent as a form are now refused before the server reads them.
+
 ## [1.0.0] - November 21, 2026
 
 First release. Advanced Cloud Self Service is now a private storage access portal: customers and Advanced staff sign in with Microsoft and browse, upload and download files held in Advanced-hosted Azure storage, without ever being given a storage key, a SAS link or a direct storage address.
